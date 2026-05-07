@@ -4,6 +4,7 @@ use std::io::{self, Write};
 ///
 /// Uses diff-based rendering: only writes cells that changed since the last
 /// frame. Maintains a scrollback-accessible history of all terminal output.
+#[allow(dead_code)]
 pub struct TermRenderer {
     parser: vt100::Parser,
     cols: u16,
@@ -24,7 +25,9 @@ impl CellSnapshot {
     }
 }
 
+#[allow(dead_code)]
 impl TermRenderer {
+    /// Create a new renderer with the given terminal dimensions.
     pub fn new(rows: u16, cols: u16) -> Self {
         let parser = vt100::Parser::new(rows, cols, 0);
         let last_rendered = build_empty_snapshot(rows, cols);
@@ -58,13 +61,7 @@ impl TermRenderer {
                     .unwrap_or_else(|| " ".to_string());
 
                 if self.last_rendered[screen_row as usize][col as usize].contents != contents {
-                    write!(
-                        w,
-                        "\x1b[{};{}H{}",
-                        screen_row + 1,
-                        col + 1,
-                        contents
-                    )?;
+                    write!(w, "\x1b[{};{}H{}", screen_row + 1, col + 1, contents)?;
                     self.last_rendered[screen_row as usize][col as usize] =
                         CellSnapshot { contents };
                 }

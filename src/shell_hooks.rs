@@ -38,9 +38,7 @@ impl TempHookFiles {
         let original_zdotdir = std::env::var("ZDOTDIR")
             .ok()
             .and_then(|s| if s.is_empty() { None } else { Some(s) })
-            .unwrap_or_else(|| {
-                std::env::var("HOME").unwrap_or_else(|_| String::new())
-            });
+            .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| String::new()));
 
         let zshenv_content = format!(
             "[[ -f '{}'/.zshenv ]] && source '{}'/.zshenv\n",
@@ -208,10 +206,7 @@ fn push_visible_part(parts: &mut Vec<ParsedPtyPart>, bytes: impl Iterator<Item =
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Osc777Parser, ParsedPtyPart, ShellHookEvent, TempHookFiles,
-        escape_single_quotes,
-    };
+    use super::{Osc777Parser, ParsedPtyPart, ShellHookEvent, TempHookFiles, escape_single_quotes};
     use std::fs;
 
     #[test]
@@ -228,8 +223,7 @@ mod tests {
     fn temp_hook_files_zshrc_sources_original_and_hooks() {
         let hooks = TempHookFiles::new().expect("create temp hook files");
 
-        let zshrc = fs::read_to_string(hooks.zdotdir().join(".zshrc"))
-            .expect("read .zshrc");
+        let zshrc = fs::read_to_string(hooks.zdotdir().join(".zshrc")).expect("read .zshrc");
 
         assert!(zshrc.contains("export ZDOTDIR="));
         assert!(zshrc.contains("source $ZDOTDIR/.zshrc"));
@@ -241,10 +235,12 @@ mod tests {
     fn temp_hook_files_zshenv_sources_original() {
         let hooks = TempHookFiles::new().expect("create temp hook files");
 
-        let zshenv = fs::read_to_string(hooks.zdotdir().join(".zshenv"))
-            .expect("read .zshenv");
+        let zshenv = fs::read_to_string(hooks.zdotdir().join(".zshenv")).expect("read .zshenv");
 
-        assert!(!zshenv.contains("export ZDOTDIR="), ".zshenv must not change ZDOTDIR");
+        assert!(
+            !zshenv.contains("export ZDOTDIR="),
+            ".zshenv must not change ZDOTDIR"
+        );
         assert!(zshenv.contains(".zshenv"), "must source original .zshenv");
     }
 
@@ -279,10 +275,7 @@ mod tests {
 
     #[test]
     fn escape_single_quotes_handles_embedded_quote() {
-        assert_eq!(
-            escape_single_quotes("it's working"),
-            "it'\\''s working"
-        );
+        assert_eq!(escape_single_quotes("it's working"), "it'\\''s working");
     }
 
     #[test]

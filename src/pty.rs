@@ -26,12 +26,7 @@ fn block_header_bytes(block_id: u64, command: &str) -> Vec<u8> {
     let label = format!("#{block_id} · {command}");
     let label: String = label.chars().take(width.saturating_sub(7)).collect();
     let fill_len = width.saturating_sub(5 + label.chars().count()).max(1);
-    format!(
-        "\r\n┌─ {} {}┐\r\n",
-        label,
-        "─".repeat(fill_len)
-    )
-    .into_bytes()
+    format!("\r\n┌─ {} {}┐\r\n", label, "─".repeat(fill_len)).into_bytes()
 }
 
 fn block_footer_bytes(block_id: u64, exit_code: i32, duration_ms: Option<u64>) -> Vec<u8> {
@@ -44,12 +39,7 @@ fn block_footer_bytes(block_id: u64, exit_code: i32, duration_ms: Option<u64>) -
     );
     let label: String = label.chars().take(width.saturating_sub(7)).collect();
     let fill_len = width.saturating_sub(5 + label.chars().count()).max(1);
-    format!(
-        "└─ {} {}┘\r\n",
-        label,
-        "─".repeat(fill_len)
-    )
-    .into_bytes()
+    format!("└─ {} {}┘\r\n", label, "─".repeat(fill_len)).into_bytes()
 }
 
 pub fn run_shell(config: &Config) -> Result<()> {
