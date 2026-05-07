@@ -8,6 +8,8 @@ Tide 是一个基于 zsh 的 shell 工作环境，提供命令结果块和 TUI �
 
 Tide runs inside the user's existing terminal emulator. It is not a new terminal emulator and not a replacement shell. It is a PTY wrapper around real `zsh`.
 
+Tide renders shell output through a terminal grid (like tmux), using `vt100` for parsing and grid maintenance. TUI applications are detected and given transparent passthrough.
+
 The user runs `tide`, Tide starts real `zsh`, and then Tide adds two core capabilities above the shell:
 
 1. Block-based execution
@@ -88,10 +90,14 @@ Tide is not:
 
 ## Architecture
 
-```text
-real terminal
+Tide uses terminal-grid rendering similar to tmux:
+
+```
+real terminal        ← Tide renders grid here
   |
-tide wrapper
+TermRenderer         ← vt100 grid + diff rendering
+  |
+Osc777Parser         ← splits visible output from hook events
   |
 PTY master
   |
@@ -100,25 +106,16 @@ zsh
 child commands / TUI apps
 ```
 
+Shell mode: PTY → parse → grid → render with block frames
+TUI mode: PTY → raw bytes → transparent passthrough (no parsing)
+
 ## Development Direction
 
-First stabilize the PTY wrapper and transparent zsh passthrough. Then add zsh lifecycle hooks, command block capture, block interaction, TUI handoff-return detection, return context, and finally optional AI integrations.
+Current priority: migrate from transparent passthrough to terminal-grid-based rendering using `vt100`. Shell output is parsed into a grid and rendered with block decorations. TUI apps get full transparent passthrough.
 
-Transparent passthrough is Tide's foundation, not a temporary phase. Tide should enhance the shell at clear lifecycle boundaries instead of replacing the live zsh terminal surface.
+Upcoming: block mode as scrollback navigation (tmux copy-mode style), TUI handoff-return detection, return context, and eventually optional AI integrations.
 
-The core product strategy is:
-
-```text
-transparent passthrough
-  +
-boundary-aware enhancement
-```
-
-Ordinary shell use stays transparent. Command output is shown normally while Tide captures sidecar block data. TUI apps keep full terminal control during handoff. BlockInteraction and ReturnPanel appear only when the user explicitly enters them or after configured handoff-return flows.
-
-The first block implementation keeps only the latest 10 blocks in memory for the current Tide session. Persistence is optional future work and must never block the PTY hot path.
-
-Early block UI should be structural: wrap blocks with simple line borders first, then refine interaction and visuals after the core lifecycle is stable.
+The first block implementation keeps only the latest 10 blocks in memory for the current Tide session. Persistence is optional future work.
 
 The two product lines are parallel:
 

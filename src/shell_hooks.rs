@@ -1,3 +1,9 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellHookEvent {
     Preexec { command: String },
@@ -9,6 +15,63 @@ pub enum ShellHookEvent {
 pub enum ParsedPtyPart {
     Visible(Vec<u8>),
     Event(ShellHookEvent),
+}
+
+static HOOK_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub struct TempHookFiles {
+    dir: PathBuf,
+}
+
+impl TempHookFiles {
+    pub fn new() -> std::io::Result<Self> {
+        let dir = {
+            let pid = std::process::id();
+            let counter = HOOK_DIR_COUNTER.fetch_add(1, Ordering::SeqCst);
+            std::env::temp_dir().join(format!("tide-{}-{}", pid, counter))
+        };
+        fs::create_dir_all(&dir)?;
+
+        let hook_file = dir.join("tide-hooks.zsh");
+        fs::write(&hook_file, install_script())?;
+
+        let original_zdotdir = std::env::var("ZDOTDIR")
+            .ok()
+            .and_then(|s| if s.is_empty() { None } else { Some(s) })
+            .unwrap_or_else(|| {
+                std::env::var("HOME").unwrap_or_else(|_| String::new())
+            });
+
+        let zshenv_content = format!(
+            "[[ -f '{}'/.zshenv ]] && source '{}'/.zshenv\n",
+            escape_single_quotes(&original_zdotdir),
+            escape_single_quotes(&original_zdotdir),
+        );
+        fs::write(dir.join(".zshenv"), zshenv_content)?;
+
+        let zshrc_content = format!(
+            "export ZDOTDIR='{}'\n[[ -f $ZDOTDIR/.zshrc ]] && source $ZDOTDIR/.zshrc\nsource '{}'\n",
+            escape_single_quotes(&original_zdotdir),
+            escape_single_quotes(hook_file.to_str().unwrap_or(""))
+        );
+        fs::write(dir.join(".zshrc"), zshrc_content)?;
+
+        Ok(Self { dir })
+    }
+
+    pub fn zdotdir(&self) -> &Path {
+        &self.dir
+    }
+}
+
+impl Drop for TempHookFiles {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn escape_single_quotes(s: &str) -> String {
+    s.replace('\'', "'\\''")
 }
 
 #[derive(Debug, Default)]
@@ -145,7 +208,82 @@ fn push_visible_part(parts: &mut Vec<ParsedPtyPart>, bytes: impl Iterator<Item =
 
 #[cfg(test)]
 mod tests {
-    use super::{Osc777Parser, ParsedPtyPart, ShellHookEvent};
+    use super::{
+        Osc777Parser, ParsedPtyPart, ShellHookEvent, TempHookFiles,
+        escape_single_quotes,
+    };
+    use std::fs;
+
+    #[test]
+    fn temp_hook_files_create_dir_and_files() {
+        let hooks = TempHookFiles::new().expect("create temp hook files");
+
+        assert!(hooks.zdotdir().exists());
+        assert!(hooks.zdotdir().join(".zshenv").exists());
+        assert!(hooks.zdotdir().join(".zshrc").exists());
+        assert!(hooks.zdotdir().join("tide-hooks.zsh").exists());
+    }
+
+    #[test]
+    fn temp_hook_files_zshrc_sources_original_and_hooks() {
+        let hooks = TempHookFiles::new().expect("create temp hook files");
+
+        let zshrc = fs::read_to_string(hooks.zdotdir().join(".zshrc"))
+            .expect("read .zshrc");
+
+        assert!(zshrc.contains("export ZDOTDIR="));
+        assert!(zshrc.contains("source $ZDOTDIR/.zshrc"));
+        assert!(zshrc.contains("source '"));
+        assert!(zshrc.contains("tide-hooks.zsh"));
+    }
+
+    #[test]
+    fn temp_hook_files_zshenv_sources_original() {
+        let hooks = TempHookFiles::new().expect("create temp hook files");
+
+        let zshenv = fs::read_to_string(hooks.zdotdir().join(".zshenv"))
+            .expect("read .zshenv");
+
+        assert!(!zshenv.contains("export ZDOTDIR="), ".zshenv must not change ZDOTDIR");
+        assert!(zshenv.contains(".zshenv"), "must source original .zshenv");
+    }
+
+    #[test]
+    fn temp_hook_files_hook_file_contains_preexec() {
+        let hooks = TempHookFiles::new().expect("create temp hook files");
+
+        let hook_script = fs::read_to_string(hooks.zdotdir().join("tide-hooks.zsh"))
+            .expect("read tide-hooks.zsh");
+
+        assert!(hook_script.contains("_tide_preexec"));
+        assert!(hook_script.contains("_tide_precmd"));
+        assert!(hook_script.contains("_tide_chpwd"));
+        assert!(hook_script.contains("add-zsh-hook"));
+    }
+
+    #[test]
+    fn temp_hook_files_cleanup_on_drop() {
+        let dir: std::path::PathBuf;
+        {
+            let hooks = TempHookFiles::new().expect("create temp hook files");
+            dir = hooks.zdotdir().to_path_buf();
+            assert!(dir.exists());
+        }
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn escape_single_quotes_handles_plain_string() {
+        assert_eq!(escape_single_quotes("hello"), "hello");
+    }
+
+    #[test]
+    fn escape_single_quotes_handles_embedded_quote() {
+        assert_eq!(
+            escape_single_quotes("it's working"),
+            "it'\\''s working"
+        );
+    }
 
     #[test]
     fn strips_hook_event_from_visible_output() {

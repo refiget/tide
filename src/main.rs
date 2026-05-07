@@ -2,6 +2,7 @@ mod app;
 mod block;
 mod config;
 mod pty;
+mod renderer;
 mod shell_hooks;
 mod ui;
 

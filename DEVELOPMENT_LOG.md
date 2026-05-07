@@ -91,3 +91,50 @@ This log records notable project changes so future agents can quickly understand
   - clean up temporary hook files when possible
 - Keep Block Mode read-only and latest-10 in-memory until lifecycle capture is stable.
 - Do not add block actions, database persistence, AI, ReturnPanel, or UI polish in the next step.
+
+### hook installation via ZDOTDIR temp file
+
+- Replaced PTY-stream hook injection with a ZDOTDIR-based temp file approach.
+- Added `TempHookFiles` struct in `shell_hooks.rs`:
+  - Creates a per-process temp directory (`/tmp/tide-<pid>/`)
+  - Writes `tide-hooks.zsh` (the hook script with hex-encoded OSC 777 events)
+  - Writes `.zshenv` that restores ZDOTDIR and sources the original `.zshenv`
+  - Writes `.zshrc` that restores ZDOTDIR, sources the original `.zshrc`, and sources `tide-hooks.zsh`
+  - Cleans up the temp directory on `Drop` (RAII)
+- Modified `pty.rs::run_shell()`:
+  - Creates `TempHookFiles` before spawning zsh
+  - Sets `ZDOTDIR` env var on the `CommandBuilder` to point to the temp directory
+  - Removed the old `hook_install_command()` function and PTY write at startup
+- Benefits:
+  - No visible hook script text during startup
+  - No shell history pollution from hook installation
+  - User's normal zsh configuration is preserved (chained via the temp `.zshrc`/`.zshenv`)
+  - Clean teardown on Tide exit
+- Added tests: temp file creation, .zshrc/.zshenv content, hook file content, Drop cleanup, single-quote escaping
+
+### block frame decorations
+
+- Added inline block frames around command output in the shell stream:
+  - On `Preexec`: writes header `┌─ #N · command ────┐` to screen
+  - On `Precmd`: writes footer `└─ #N · status · exit N · X.Xs ────┘` to screen
+  - Frames adapt to terminal width, command names truncated to fit
+- Improved Block Mode UI:
+  - j/k navigation with reverse-video highlight on selected block
+  - Read-only — no action keys
+
+### terminal grid rendering
+
+- Added `vt100` and `unicode-width` dependencies (switched from `alacritty_terminal` due to macOS compile issue)
+- Created `src/renderer.rs` — `TermRenderer` wrapping `alacritty_terminal::Term`:
+  - Maintains terminal grid with 10000-line scrollback
+  - Diff-based rendering: only writes changed cells to screen via cursor positioning
+  - `process(bytes)` feeds PTY output to terminal parser
+  - `render(writer)` outputs grid changes
+  - `resize(rows, cols)` handles terminal resize
+  - `mark_dirty()` forces full redraw
+- Rewired `pty.rs` output thread:
+  - Replaced transparent stdout writes with `renderer.process()` + `renderer.render()`
+  - Block header/footer decorations now fed as bytes to renderer (become grid cells)
+  - PTY visible output flowing through renderer rather than directly to stdout
+- Updated AGENTS.md, README.md, CLAUDE.md to reflect rendering architecture
+- Design: Tide renders shell output (tmux-style), TUI apps will get transparent passthrough

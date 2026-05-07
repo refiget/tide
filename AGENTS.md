@@ -140,37 +140,72 @@ Primary responsibilities:
 - optionally show return transition or return panel
 - later, integrate AI for block interaction and return context summarization
 
-## Transparent-First Product Principle
+## Rendering Architecture
 
-Transparent passthrough is not a temporary implementation shortcut. It is Tide's foundation.
+Tide uses terminal-grid-based rendering, similar to tmux. PTY output is parsed through `alacritty_terminal` to maintain an in-memory terminal grid, which Tide renders to the real terminal. This enables inline block decorations and future full block rendering.
 
-Tide should stay transparent-first. Enhancements must be boundary-aware and opt-in instead of replacing the live zsh terminal surface.
+### Two-Mode Design
 
-Default behavior:
+**Shell Mode (Rendered)**
 
-- ordinary zsh use stays transparent
-- ordinary command output is displayed normally while being captured as sidecar block data
-- configured TUI apps run in fully transparent handoff mode
-- Tide only intervenes at clear lifecycle boundaries, such as `preexec`, `precmd`, `chpwd`, process exit, TUI return, or explicit user shortcuts
-- BlockInteraction UI appears only when the user asks for it
-- ReturnPanel appears only after configured handoff-return flows
+Default mode. Tide parses PTY output through `alacritty_terminal::Term`, maintains the grid, and renders it to the real terminal. Block header/footer frames are injected inline. Tide owns the display during this mode.
 
-Design rules:
-
-- do not cover or redraw the live shell by default
-- do not replace the user's terminal emulator
-- do not build a full terminal renderer as the primary path
-- do not make block-rendered UI the default live shell surface
-- prefer sidecar capture over visual takeover
-- prefer boundary-based enhancement over continuous interpretation
-
-The core strategy is:
-
-```text
-transparent passthrough
-  +
-boundary-aware enhancement
 ```
+PTY output → Osc777Parser → alacritty_terminal::Term → grid → Tide renders → stdout
+```
+
+**TUI Mode (Transparent)**
+
+When a command matches `tui_apps` config (nvim, lazygit, etc.), Tide yields the terminal. Raw PTY bytes are forwarded directly — no parsing, no rendering, no interference. Before entering: leave alternate screen. After exit: re-enter Tide rendering.
+
+Mode switch on `ShellPreexec { command }`:
+- Match against `tui_apps` commands → TUI mode (transparent)
+- No match → Shell mode (rendered)
+
+Return on `ShellPrecmd`.
+
+### Rendering Pipeline
+
+```
+PTY output → Osc777Parser (splits visible/event)
+  ├─ Visible bytes
+  │   ├─ alacritty_terminal::Term.advance_bytes()   maintain grid
+  │   ├─ BlockStore.append_output()                  sidecar capture
+  │   └─ TermRenderer.render(stdout)                 diff-based screen update
+  └─ OSC events
+      ├─ Preexec → start block + render header
+      ├─ Precmd  → finish block + render footer
+      └─ Chpwd   → update cwd
+```
+
+### Component: `TermRenderer` (src/renderer.rs)
+
+Wraps `vt100::Parser`:
+- `process(&mut self, bytes: &[u8])` — feed bytes to terminal parser
+- `render<W: Write>(&self, w: &mut W) -> io::Result<()>` — diff current screen vs last rendered, write only changed cells
+- `resize(&mut self, rows: u16, cols: u16)` — handle SIGWINCH
+- `mark_dirty()` — force full redraw (after mode switch)
+- `total_lines()` — scrollback + visible rows
+
+### Thread Model
+
+Output thread merges rendering into the existing PTY read loop:
+
+```
+while running:
+    read PTY → parser.push(bytes)
+    for part in parsed:
+        Visible → renderer.process() + block.append() + renderer.render()
+        Event   → apply lifecycle + write decorations
+```
+
+No additional threads needed. `vt100::Parser` is single-threaded inside the output thread. The resize thread signals the output thread to call `renderer.resize()`.
+
+### Dependencies
+
+- `vt100` — pure Rust ANSI/VT parser, maintains screen grid with scrollback
+- `ratatui` — used in BlockInteraction mode for TUI rendering
+- `crossterm` — terminal raw mode, cursor control, alternate screen
 
 ## Core Data Model
 
@@ -427,17 +462,13 @@ First command matching should be conservative. Match only `argv[0]`, such as `nv
 
 ## UI Model
 
-The first implementation should use a hybrid model:
+Tide uses a two-mode terminal rendering model:
 
-- `Passthrough shell mode`: most of the time Tide forwards zsh output directly to the real terminal.
-- `Block capture mode`: Tide uses zsh hook markers to assign command output to the active block while still showing output normally.
-- `Block interaction mode`: a ratatui UI lets the user browse blocks and perform actions.
-- `TuiHandoff mode`: configured TUI apps fully control the terminal.
-- `Returning` / `ReturnPanel` mode: Tide briefly takes over after a TUI exits to show return context.
+- **Shell Mode** (default): PTY output parsed through `alacritty_terminal`, Tide renders the grid with inline block frames. User sees normal shell + block decorations.
+- **TUI Handoff Mode**: Configured TUI apps get full terminal control. Transparent byte forwarding, no parsing, no overlay.
+- **BlockInteraction Mode**: `Ctrl-X Ctrl-B` enters alternate-screen TUI for browsing blocks. j/k selection, highlighted active block, read-only for now.
 
-Long-term, Tide should remain transparent-first. Any block-rendered UI must be opt-in and boundary-based, not a replacement for the live zsh terminal surface. In the first phase, do not parse all ANSI/VT and do not rewrite terminal rendering.
-
-Early visual rule: blocks should be wrapped with simple line borders first. Keep the first block UI structural and readable. Do not spend early milestones on decorative styling, complex animations, or elaborate visual treatments.
+Early visual rule: block frames use simple line borders (`┌─ ───┐` / `└─ ───┘`). Keep structural and readable. No decorative styling or animations yet.
 
 ## BlockInteraction UI
 
@@ -702,17 +733,12 @@ Historical bootstrap steps for a fresh repository:
 
 - Stabilize PTY behavior before building UI.
 - Build block capture before AI.
-- Treat transparent zsh wrapping as the permanent foundation, not only as a stepping stone.
-- Build block features as sidecar capture and opt-in interaction, not as a default replacement for the live shell surface.
+- Use `alacritty_terminal` for terminal parsing — do not write a custom ANSI/VT parser.
+- Tide renders shell output (tmux-style), TUI apps get full transparent passthrough.
 - Treat block-based execution and TUI handoff-return as equal core features.
-- Do not implement a complete terminal emulator at the start.
-- Do not make a complete terminal emulator the default architectural target.
-- Do not parse all ANSI/VT in the first phase.
-- Only identify necessary OSC hook events and limited alternate screen signals.
 - Never steal control during `TuiHandoff`.
 - Do not break the user's existing zsh configuration.
 - Always restore terminal state after errors.
-- Keep default behavior conservative.
 - AI-generated commands must be inserted, not executed.
 - Use Rust `enum` plus `match` for the state machine.
 - Avoid premature trait or generic abstraction.
@@ -722,30 +748,23 @@ Historical bootstrap steps for a fresh repository:
 - Store block output as raw bytes first, then derive stripped text.
 - Keep the first in-memory BlockStore small. The current default is the latest 10 blocks only.
 - Enforce `max_output_bytes_per_block` to avoid memory growth.
-- Persistence is optional and must never be on the PTY hot path. Start with in-memory blocks; consider JSONL before SQLite if history across Tide sessions becomes necessary.
+- Persistence is optional and must never be on the PTY hot path.
 - Add unit tests for event parsing.
 - Commit after each milestone when working in a git repository.
 - Maintain [docs/manual-testing.md](./docs/manual-testing.md) as terminal behavior evolves.
 - When adding or changing terminal behavior, zsh lifecycle handling, block interaction, TUI handoff-return, or AI command insertion, update the manual testing checklist in the same change.
-- Before committing terminal behavior changes, run the automated checks and follow the relevant manual test section when feasible.
+- Before committing terminal behavior changes, run `cargo fmt --check && cargo check && cargo test`.
 
 ## Current Priority
 
-Continue Milestone 2 hardening.
+Migrate from transparent passthrough to terminal-grid rendering.
+
+Next: implement `TermRenderer` using `alacritty_terminal`, replacing the transparent output path with grid-based rendering while preserving block decorations and TUI handoff transparency.
 
 Do not implement:
 
 - AI
 - animation
 - ReturnPanel
-- complete BlockInteraction UI or block actions
-- complete ANSI/VT parser
+- block actions (copy, rerun, explain, save)
 - database persistence
-
-Focus on:
-
-- stable zsh hook installation
-- accurate command lifecycle boundaries
-- robust OSC 777 parsing
-- latest-10 in-memory BlockStore behavior
-- transparent shell behavior while capturing sidecar block data

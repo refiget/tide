@@ -6,7 +6,8 @@ use std::{
 use anyhow::Result;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
-    execute,
+    execute, queue,
+    style::{Attribute, SetAttribute},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
@@ -96,7 +97,14 @@ fn render(stdout: &mut io::Stdout, blocks: &[CommandBlock], selected: usize) -> 
                 status,
                 format_duration_ms(block.duration_ms)
             );
-            write_framed(stdout, &line, width)?;
+
+            if index == selected {
+                queue!(stdout, SetAttribute(Attribute::Reverse))?;
+                write_framed(stdout, &line, width)?;
+                queue!(stdout, SetAttribute(Attribute::Reset))?;
+            } else {
+                write_framed(stdout, &line, width)?;
+            }
         }
     }
 

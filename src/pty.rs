@@ -15,12 +15,47 @@ use signal_hook::{consts::signal::SIGWINCH, iterator::Signals};
 use crate::{
     block::{BlockStore, format_duration_ms},
     config::Config,
-    shell_hooks::{Osc777Parser, ParsedPtyPart, ShellHookEvent, install_script},
+    renderer::TermRenderer,
+    shell_hooks::{Osc777Parser, ParsedPtyPart, ShellHookEvent, TempHookFiles},
     ui,
 };
 
+fn block_header_bytes(block_id: u64, command: &str) -> Vec<u8> {
+    let (cols, _) = terminal::size().unwrap_or((80, 24));
+    let width = cols as usize;
+    let label = format!("#{block_id} · {command}");
+    let label: String = label.chars().take(width.saturating_sub(7)).collect();
+    let fill_len = width.saturating_sub(5 + label.chars().count()).max(1);
+    format!(
+        "\r\n┌─ {} {}┐\r\n",
+        label,
+        "─".repeat(fill_len)
+    )
+    .into_bytes()
+}
+
+fn block_footer_bytes(block_id: u64, exit_code: i32, duration_ms: Option<u64>) -> Vec<u8> {
+    let (cols, _) = terminal::size().unwrap_or((80, 24));
+    let width = cols as usize;
+    let status = if exit_code == 0 { "ok" } else { "failed" };
+    let label = format!(
+        "#{block_id} · {status} · exit {exit_code} · {}",
+        format_duration_ms(duration_ms)
+    );
+    let label: String = label.chars().take(width.saturating_sub(7)).collect();
+    let fill_len = width.saturating_sub(5 + label.chars().count()).max(1);
+    format!(
+        "└─ {} {}┘\r\n",
+        label,
+        "─".repeat(fill_len)
+    )
+    .into_bytes()
+}
+
 pub fn run_shell(config: &Config) -> Result<()> {
     let _terminal_guard = TerminalGuard::enter()?;
+
+    let hook_files = TempHookFiles::new().context("failed to create tide hook files")?;
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -31,6 +66,13 @@ pub fn run_shell(config: &Config) -> Result<()> {
     command.env(
         "TERM",
         std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string()),
+    );
+    command.env(
+        "ZDOTDIR",
+        hook_files
+            .zdotdir()
+            .to_str()
+            .context("hook directory path is not valid UTF-8")?,
     );
 
     let mut child = pair
@@ -48,10 +90,6 @@ pub fn run_shell(config: &Config) -> Result<()> {
         .master
         .take_writer()
         .context("failed to take PTY writer")?;
-    writer
-        .write_all(hook_install_command().as_bytes())
-        .context("failed to install zsh hooks")?;
-    writer.flush().context("failed to flush zsh hook install")?;
 
     let master = Arc::new(Mutex::new(pair.master));
     let running = Arc::new(AtomicBool::new(true));
@@ -62,12 +100,15 @@ pub fn run_shell(config: &Config) -> Result<()> {
     )));
     let debug_blocks = std::env::var_os("TIDE_DEBUG_BLOCKS").is_some();
 
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
+
     let output_running = Arc::clone(&running);
     let output_blocks = Arc::clone(&blocks);
     let output_thread = thread::spawn(move || {
         let mut stdout = io::stdout();
         let mut buffer = [0_u8; 8192];
         let mut parser = Osc777Parser::default();
+        let mut renderer = TermRenderer::new(rows, cols);
 
         while output_running.load(Ordering::SeqCst) {
             match reader.read(&mut buffer) {
@@ -81,20 +122,23 @@ pub fn run_shell(config: &Config) -> Result<()> {
                                 if let Ok(mut blocks) = output_blocks.lock() {
                                     blocks.append_output(&visible);
                                 }
-
-                                if stdout.write_all(&visible).is_err() {
-                                    break;
-                                }
-                                if stdout.flush().is_err() {
-                                    break;
-                                }
+                                renderer.process(&visible);
                             }
                             ParsedPtyPart::Event(event) => {
                                 if let Ok(mut blocks) = output_blocks.lock() {
-                                    apply_shell_hook_event(&mut blocks, event, debug_blocks);
+                                    apply_shell_hook_event(
+                                        &mut blocks,
+                                        event,
+                                        debug_blocks,
+                                        &mut renderer,
+                                    );
                                 }
                             }
                         }
+                    }
+
+                    if renderer.render(&mut stdout).is_err() {
+                        break;
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -104,8 +148,8 @@ pub fn run_shell(config: &Config) -> Result<()> {
 
         let remaining = parser.flush_visible();
         if !remaining.is_empty() {
-            let _ = stdout.write_all(&remaining);
-            let _ = stdout.flush();
+            renderer.process(&remaining);
+            let _ = renderer.render(&mut stdout);
         }
     });
 
@@ -188,29 +232,39 @@ pub fn run_shell(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn hook_install_command() -> String {
-    format!("{}\n", install_script())
-}
-
-fn apply_shell_hook_event(blocks: &mut BlockStore, event: ShellHookEvent, debug_blocks: bool) {
+fn apply_shell_hook_event(
+    blocks: &mut BlockStore,
+    event: ShellHookEvent,
+    debug_blocks: bool,
+    renderer: &mut TermRenderer,
+) {
     match event {
         ShellHookEvent::Preexec { command } => {
-            blocks.start_command(command);
+            blocks.start_command(command.clone());
+            if let Some(block_id) = blocks.active_block_id() {
+                let header = block_header_bytes(block_id, &command);
+                renderer.process(&header);
+            }
         }
         ShellHookEvent::Precmd { exit_code } => {
-            let active_block_id = blocks.active_block_id();
+            let active_id = blocks.active_block_id();
             blocks.finish_command(exit_code);
-            if debug_blocks {
-                if let Some(block) = active_block_id.and_then(|id| blocks.block(id)) {
-                    eprintln!(
-                        "\r\ntide block #{} status={:?} exit={} duration={} command={:?} output_bytes={}\r",
-                        block.id,
-                        block.status,
-                        block.exit_code.unwrap_or(-1),
-                        format_duration_ms(block.duration_ms),
-                        block.command,
-                        block.output_raw.len()
-                    );
+            if let Some(id) = active_id {
+                let duration_ms = blocks.block(id).and_then(|b| b.duration_ms);
+                let footer = block_footer_bytes(id, exit_code, duration_ms);
+                renderer.process(&footer);
+                if debug_blocks {
+                    if let Some(block) = blocks.block(id) {
+                        eprintln!(
+                            "\r\ntide block #{} status={:?} exit={} duration={} command={:?} output_bytes={}\r",
+                            block.id,
+                            block.status,
+                            block.exit_code.unwrap_or(-1),
+                            format_duration_ms(block.duration_ms),
+                            block.command,
+                            block.output_raw.len()
+                        );
+                    }
                 }
             }
         }
