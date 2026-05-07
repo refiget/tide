@@ -70,3 +70,11 @@ This log records notable project changes so future agents can quickly understand
 - Added OSC 777 zsh hook parsing for `preexec`, `precmd`, and `chpwd`.
 - Added a read-only alternate-screen Block Mode entered with `Ctrl-X Ctrl-B`.
 - Kept persistence as optional future work and outside the PTY hot path.
+
+### hook and capture hardening
+
+- Changed OSC 777 hook payloads to `hex:` encoding so commands with semicolons, newlines, or control-sensitive characters do not break event parsing.
+- Kept parser support for legacy plain payloads to avoid making the parser brittle.
+- Added parser tests for split events, multiple events in one PTY chunk, semicolon/newline payloads, and ordinary output delay behavior.
+- Added optional `TIDE_DEBUG_BLOCKS=1` output to inspect completed block status, exit code, duration, command, and captured output size.
+- Updated the Chinese manual testing guide with block capture debug and hook/parser regression checks.

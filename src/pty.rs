@@ -13,7 +13,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use signal_hook::{consts::signal::SIGWINCH, iterator::Signals};
 
 use crate::{
-    block::BlockStore,
+    block::{BlockStore, format_duration_ms},
     config::Config,
     shell_hooks::{Osc777Parser, ParsedPtyPart, ShellHookEvent, install_script},
     ui,
@@ -60,6 +60,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
         config.blocks.max_blocks,
         config.blocks.max_output_bytes_per_block,
     )));
+    let debug_blocks = std::env::var_os("TIDE_DEBUG_BLOCKS").is_some();
 
     let output_running = Arc::clone(&running);
     let output_blocks = Arc::clone(&blocks);
@@ -90,7 +91,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
                             }
                             ParsedPtyPart::Event(event) => {
                                 if let Ok(mut blocks) = output_blocks.lock() {
-                                    apply_shell_hook_event(&mut blocks, event);
+                                    apply_shell_hook_event(&mut blocks, event, debug_blocks);
                                 }
                             }
                         }
@@ -191,13 +192,27 @@ fn hook_install_command() -> String {
     format!("{}\n", install_script())
 }
 
-fn apply_shell_hook_event(blocks: &mut BlockStore, event: ShellHookEvent) {
+fn apply_shell_hook_event(blocks: &mut BlockStore, event: ShellHookEvent, debug_blocks: bool) {
     match event {
         ShellHookEvent::Preexec { command } => {
             blocks.start_command(command);
         }
         ShellHookEvent::Precmd { exit_code } => {
+            let active_block_id = blocks.active_block_id();
             blocks.finish_command(exit_code);
+            if debug_blocks {
+                if let Some(block) = active_block_id.and_then(|id| blocks.block(id)) {
+                    eprintln!(
+                        "\r\ntide block #{} status={:?} exit={} duration={} command={:?} output_bytes={}\r",
+                        block.id,
+                        block.status,
+                        block.exit_code.unwrap_or(-1),
+                        format_duration_ms(block.duration_ms),
+                        block.command,
+                        block.output_raw.len()
+                    );
+                }
+            }
         }
         ShellHookEvent::Cwd { cwd } => {
             blocks.set_cwd(cwd);

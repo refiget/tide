@@ -109,6 +109,14 @@ impl BlockStore {
         block.output_text = String::from_utf8_lossy(&strip(&block.output_raw)).to_string();
     }
 
+    pub fn active_block_id(&self) -> Option<BlockId> {
+        self.active_block_id
+    }
+
+    pub fn block(&self, id: BlockId) -> Option<&CommandBlock> {
+        self.blocks.iter().find(|block| block.id == id)
+    }
+
     pub fn set_cwd(&mut self, cwd: String) {
         self.current_cwd = PathBuf::from(cwd);
     }

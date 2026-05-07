@@ -52,14 +52,24 @@ impl Osc777Parser {
 
 pub fn install_script() -> &'static str {
     r#"autoload -Uz add-zsh-hook
+_tide_hex_encode() {
+  command od -An -tx1 -v | command tr -d ' \n'
+}
 _tide_preexec() {
-  print -rn -- $'\e]777;tide;preexec;'"${1}"$'\a'
+  local payload
+  payload=$(printf '%s' "$1" | _tide_hex_encode)
+  print -rn -- $'\e]777;tide;preexec;hex:'"${payload}"$'\a'
 }
 _tide_precmd() {
-  print -rn -- $'\e]777;tide;precmd;'"${?}"$'\a'
+  local exit_code=$?
+  local payload
+  payload=$(printf '%s' "${exit_code}" | _tide_hex_encode)
+  print -rn -- $'\e]777;tide;precmd;hex:'"${payload}"$'\a'
 }
 _tide_chpwd() {
-  print -rn -- $'\e]777;tide;cwd;'"${PWD}"$'\a'
+  local payload
+  payload=$(printf '%s' "$PWD" | _tide_hex_encode)
+  print -rn -- $'\e]777;tide;cwd;hex:'"${payload}"$'\a'
 }
 add-zsh-hook preexec _tide_preexec
 add-zsh-hook precmd _tide_precmd
@@ -73,18 +83,34 @@ fn parse_osc777_event(bytes: &[u8]) -> Option<ShellHookEvent> {
 
     let (kind, payload) = text.split_once(';')?;
 
+    let payload = decode_payload(payload)?;
+
     match kind {
-        "preexec" => Some(ShellHookEvent::Preexec {
-            command: payload.to_string(),
-        }),
+        "preexec" => Some(ShellHookEvent::Preexec { command: payload }),
         "precmd" => Some(ShellHookEvent::Precmd {
             exit_code: payload.parse().unwrap_or(-1),
         }),
-        "cwd" => Some(ShellHookEvent::Cwd {
-            cwd: payload.to_string(),
-        }),
+        "cwd" => Some(ShellHookEvent::Cwd { cwd: payload }),
         _ => None,
     }
+}
+
+fn decode_payload(payload: &str) -> Option<String> {
+    let Some(hex) = payload.strip_prefix("hex:") else {
+        return Some(payload.to_string());
+    };
+
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for index in (0..hex.len()).step_by(2) {
+        let byte = u8::from_str_radix(&hex[index..index + 2], 16).ok()?;
+        bytes.push(byte);
+    }
+
+    String::from_utf8(bytes).ok()
 }
 
 fn marker() -> &'static [u8] {
@@ -124,7 +150,7 @@ mod tests {
     #[test]
     fn strips_hook_event_from_visible_output() {
         let mut parser = Osc777Parser::default();
-        let parsed = parser.push(b"hello\x1b]777;tide;precmd;0\x07world");
+        let parsed = parser.push(b"hello\x1b]777;tide;precmd;hex:30\x07world");
 
         assert_eq!(
             parsed,
@@ -143,7 +169,7 @@ mod tests {
         let first = parser.push(b"abc\x1b]777;tide;pre");
         assert_eq!(first, vec![ParsedPtyPart::Visible(b"abc".to_vec())]);
 
-        let second = parser.push(b"exec;echo hi\x07def");
+        let second = parser.push(b"exec;hex:6563686f206869\x07def");
         assert_eq!(
             second,
             vec![
@@ -161,5 +187,36 @@ mod tests {
 
         let parsed = parser.push(b"prompt> ");
         assert_eq!(parsed, vec![ParsedPtyPart::Visible(b"prompt> ".to_vec())]);
+    }
+
+    #[test]
+    fn decodes_command_with_semicolon_and_newline() {
+        let mut parser = Osc777Parser::default();
+        let parsed = parser.push(b"\x1b]777;tide;preexec;hex:6563686f2068693b0a707764\x07");
+
+        assert_eq!(
+            parsed,
+            vec![ParsedPtyPart::Event(ShellHookEvent::Preexec {
+                command: "echo hi;\npwd".to_string()
+            })]
+        );
+    }
+
+    #[test]
+    fn handles_multiple_events_in_one_chunk() {
+        let mut parser = Osc777Parser::default();
+        let parsed = parser
+            .push(b"\x1b]777;tide;preexec;hex:66616c7365\x07out\x1b]777;tide;precmd;hex:31\x07");
+
+        assert_eq!(
+            parsed,
+            vec![
+                ParsedPtyPart::Event(ShellHookEvent::Preexec {
+                    command: "false".to_string()
+                }),
+                ParsedPtyPart::Visible(b"out".to_vec()),
+                ParsedPtyPart::Event(ShellHookEvent::Precmd { exit_code: 1 }),
+            ]
+        );
     }
 }

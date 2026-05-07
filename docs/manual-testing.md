@@ -300,6 +300,41 @@ echo 12
 - 暂不接入数据库或文件日志。
 - zsh hook 注入方式仍是早期实现，后续需要继续打磨。
 
+## Block Capture 调试
+
+如果需要确认 block 捕获边界，可以启用 debug 输出：
+
+```sh
+TIDE_DEBUG_BLOCKS=1 cargo run
+```
+
+在 Tide 内运行：
+
+```sh
+echo debug
+false
+```
+
+预期：
+
+- 每个 command 结束时，会输出一行 `tide block #...` 调试信息。
+- 调试信息包含 status、exit、duration、command 和 output_bytes。
+- `echo debug` 应显示 `exit=0`。
+- `false` 应显示非零退出码和 failed 状态。
+
+这个 debug 输出只用于开发验证。正常使用 Tide 时不要设置 `TIDE_DEBUG_BLOCKS`。
+
+## Hook / Parser 回归点
+
+涉及 zsh hook 或 OSC parser 的修改，需要确认：
+
+- 普通 shell 输出仍然透明显示。
+- Tide 自己的 OSC 777 hook 事件不会显示到用户终端。
+- 命令里包含分号时仍能被正确记录，例如 `echo hi; pwd`。
+- 命令里包含换行时 parser 单元测试仍通过。
+- 同一个 PTY chunk 内出现多个 hook 事件时，事件顺序不乱。
+- hook 事件被拆成多个 PTY chunk 时，普通输出不会被长时间延迟。
+
 ## 回归检查清单
 
 提交任何影响终端行为的变更前，至少确认：
@@ -317,3 +352,4 @@ echo 12
 - `Ctrl-X Ctrl-B` 能进入 Block Mode。
 - Block Mode 能浏览最近 10 条命令 block。
 - `Esc` 或 `q` 能从 Block Mode 回到透明 shell。
+- 修改 hook / parser 后，`cargo test` 中的 parser 测试全部通过。
