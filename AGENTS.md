@@ -623,7 +623,47 @@ Goal:
 
 ## Suggested First Implementation Step
 
-Start from Milestone 1:
+Milestone 1 has been bootstrapped. The current near-term work is Milestone 2 hardening: make zsh lifecycle hooks and block capture reliable before polishing Block Mode UI.
+
+Next implementation target:
+
+1. Move hook installation out of the user-visible PTY input stream.
+
+   Current implementation writes the hook script into the running PTY after spawning zsh. This is acceptable for the early prototype but should be replaced with a cleaner startup-time mechanism.
+
+   Preferred direction:
+
+   - generate a temporary Tide hook file for the current process
+   - start zsh in a way that sources that hook before interactive use
+   - preserve the user's normal zsh configuration and prompt behavior
+   - avoid adding hook installation commands to shell history
+   - avoid visible hook script text during startup
+   - delete temporary hook files on exit when possible
+
+2. Keep hook payloads encoded.
+
+   Continue using encoded OSC 777 payloads so commands containing semicolons, newlines, BEL, or other control-sensitive characters do not corrupt parser boundaries.
+
+3. Preserve transparent-first behavior.
+
+   Hook installation must not make Tide feel like a replacement shell. Ordinary startup, prompts, command output, and TUI passthrough should still behave like normal zsh.
+
+4. Keep Block Mode read-only for now.
+
+   Do not add copy, rerun, AI, save, delete, or action-menu behavior until command lifecycle capture is stable.
+
+Acceptance criteria:
+
+- `cargo fmt --check`, `cargo check`, and `cargo test` pass
+- parser tests still cover split events, multiple events in one PTY chunk, and encoded payloads
+- `cargo run` starts zsh without visibly printing the hook script
+- ordinary commands are captured as blocks
+- `false` is captured with a failed status and non-zero exit code
+- `Ctrl-X Ctrl-B` still opens the read-only latest-10 Block Mode
+- `Esc` or `q` returns from Block Mode to the transparent shell
+- terminal state is restored after exit
+
+Historical bootstrap steps for a fresh repository:
 
 1. Create the Rust project:
 
@@ -691,20 +731,21 @@ Start from Milestone 1:
 
 ## Current Priority
 
-Begin with Milestone 1 only.
+Continue Milestone 2 hardening.
 
 Do not implement:
 
 - AI
 - animation
 - ReturnPanel
-- complete BlockInteraction UI
+- complete BlockInteraction UI or block actions
 - complete ANSI/VT parser
+- database persistence
 
 Focus on:
 
-- creating the Rust project structure
-- reading configuration
-- starting real `zsh` through a PTY
-- stable transparent input and output forwarding
-- terminal cleanup on exit
+- stable zsh hook installation
+- accurate command lifecycle boundaries
+- robust OSC 777 parsing
+- latest-10 in-memory BlockStore behavior
+- transparent shell behavior while capturing sidecar block data

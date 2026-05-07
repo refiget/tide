@@ -78,3 +78,16 @@ This log records notable project changes so future agents can quickly understand
 - Added parser tests for split events, multiple events in one PTY chunk, semicolon/newline payloads, and ordinary output delay behavior.
 - Added optional `TIDE_DEBUG_BLOCKS=1` output to inspect completed block status, exit code, duration, command, and captured output size.
 - Updated the Chinese manual testing guide with block capture debug and hook/parser regression checks.
+
+### next planned work
+
+- Next implementation should focus on zsh hook installation stability before UI polish.
+- Replace the current prototype behavior that writes hook setup into the live PTY input stream.
+- Preferred next direction:
+  - generate a per-process temporary Tide hook file
+  - start zsh so it sources the hook before user interaction
+  - preserve the user's normal zsh configuration
+  - avoid visible hook setup text and avoid polluting shell history
+  - clean up temporary hook files when possible
+- Keep Block Mode read-only and latest-10 in-memory until lifecycle capture is stable.
+- Do not add block actions, database persistence, AI, ReturnPanel, or UI polish in the next step.

@@ -300,6 +300,22 @@ echo 12
 - 暂不接入数据库或文件日志。
 - zsh hook 注入方式仍是早期实现，后续需要继续打磨。
 
+## 下一步手动测试重点：Hook 注入稳定化
+
+下一步实现应优先改进 zsh hook 注入方式，而不是完善 UI。
+
+当前原型会在启动 zsh 后向 PTY 写入 hook setup。后续应改成更干净的启动期安装机制，例如临时 hook 文件或等价方案。
+
+完成下一步后，需要重点确认：
+
+- `cargo run` 启动时不应 visibly 打印 hook 脚本内容。
+- hook 安装命令不应污染 shell history。
+- 用户正常 `.zshrc`、prompt 和插件行为不应被破坏。
+- 普通命令仍能被捕获为 block。
+- `false` 仍能记录为 failed。
+- `Ctrl-X Ctrl-B` 仍能进入 latest-10 Block Mode。
+- 退出 Tide 后临时 hook 文件应被清理，或至少不会影响后续 shell。
+
 ## Block Capture 调试
 
 如果需要确认 block 捕获边界，可以启用 debug 输出：
