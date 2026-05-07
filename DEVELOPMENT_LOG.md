@@ -51,3 +51,4 @@ This log records notable project changes so future agents can quickly understand
 - Added `docs/manual-testing.md` as the maintained manual test checklist for terminal behavior.
 - Documented the Milestone 1 flow for testing zsh passthrough, command output, interactive input, `Ctrl-C`, `Ctrl-D` / `exit`, resize propagation, TUI passthrough smoke tests, and terminal recovery.
 - Updated `AGENTS.md` so future agents must maintain the manual testing checklist whenever terminal behavior changes.
+- Rewrote `docs/manual-testing.md` in Chinese to match the project's primary documentation style.

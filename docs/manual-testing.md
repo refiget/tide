@@ -1,12 +1,12 @@
-# Manual Testing
+# 手动测试
 
-Manual testing is required for terminal behavior because automated tests cannot fully validate raw mode, PTY passthrough, resize behavior, and interactive TUI handoff.
+终端行为必须保留手动测试流程。自动化测试无法完整覆盖 raw mode、PTY 透明转发、窗口 resize、交互式输入和 TUI 应用交接等行为。
 
-Update this document whenever Tide gains a new user-visible terminal behavior, mode, command lifecycle feature, block action, or TUI handoff-return feature.
+当 Tide 新增或修改任何用户可见的终端行为、模式、命令生命周期能力、Block 操作或 TUI handoff-return 功能时，都要同步更新本文档。
 
-## Before Testing
+## 测试前准备
 
-Run static checks first:
+先运行静态检查：
 
 ```sh
 cargo fmt --check
@@ -14,32 +14,32 @@ cargo check
 cargo test
 ```
 
-Run interactive tests from a real terminal emulator, not from an IDE output panel.
+交互测试必须在真实终端模拟器里运行，不要在 IDE output panel 里测试。
 
-Use a terminal tab that you can close if raw mode or screen state breaks during development.
+建议使用一个可以随时关闭的独立终端 tab。开发阶段如果 raw mode 或屏幕状态异常，可以直接关闭该 tab。
 
-## Milestone 1: Transparent zsh Wrapper
+## Milestone 1：透明 zsh Wrapper
 
-Goal: `cargo run` starts Tide, Tide starts real `zsh`, and ordinary shell use still feels like normal zsh.
+目标：`cargo run` 启动 Tide，Tide 启动真实 `zsh`，普通 shell 使用体验应尽量接近正常 zsh。
 
-### 1. Start Tide
+### 1. 启动 Tide
 
-Command:
+命令：
 
 ```sh
 cargo run
 ```
 
-Expected:
+预期：
 
-- The program starts without panic.
-- A normal zsh prompt appears.
-- The terminal does not show Tide-specific UI yet.
-- Typing appears as expected for a raw-mode shell session.
+- 程序正常启动，没有 panic。
+- 出现普通 zsh prompt。
+- 目前不应显示 Tide 自己的 UI。
+- 在 raw-mode shell session 下，键盘输入表现正常。
 
-### 2. Basic Command Passthrough
+### 2. 基础命令透明转发
 
-Inside Tide, run:
+在 Tide 内运行：
 
 ```sh
 echo hello
@@ -47,107 +47,107 @@ pwd
 printf 'a\nb\n'
 ```
 
-Expected:
+预期：
 
-- Output appears exactly like normal zsh.
-- Prompt returns after each command.
-- No extra control sequences or Tide debug text are visible.
+- 输出表现和普通 zsh 一致。
+- 每条命令结束后都能回到 prompt。
+- 不应出现额外控制序列或 Tide debug 文本。
 
-### 3. Interactive Input
+### 3. 交互式输入
 
-Inside Tide, run:
+在 Tide 内运行：
 
 ```sh
 read name
 ```
 
-Type:
+输入：
 
 ```text
 tide
 ```
 
-Then run:
+然后运行：
 
 ```sh
 echo $name
 ```
 
-Expected:
+预期：
 
-- `read` accepts keyboard input.
-- `echo $name` prints `tide`.
-- Enter, Backspace, and normal text input work.
+- `read` 能正常接收键盘输入。
+- `echo $name` 输出 `tide`。
+- Enter、Backspace 和普通文本输入都正常。
 
-### 4. Ctrl-C Handling
+### 4. Ctrl-C 处理
 
-Inside Tide, run:
+在 Tide 内运行：
 
 ```sh
 sleep 10
 ```
 
-Press `Ctrl-C`.
+按 `Ctrl-C`。
 
-Expected:
+预期：
 
-- `sleep` is interrupted.
-- zsh returns to the prompt.
-- Tide does not exit.
-- The terminal remains usable.
+- `sleep` 被中断。
+- zsh 回到 prompt。
+- Tide 本身不退出。
+- 终端仍然可用。
 
-### 5. Ctrl-D and exit Handling
+### 5. Ctrl-D 和 exit 处理
 
-Start Tide again if needed:
+如果需要，重新启动 Tide：
 
 ```sh
 cargo run
 ```
 
-Inside Tide, test both:
+在 Tide 内分别测试：
 
 ```sh
 exit
 ```
 
-and in a separate run, press `Ctrl-D` at an empty prompt.
+以及另一次运行时，在空 prompt 下按 `Ctrl-D`。
 
-Expected:
+预期：
 
-- zsh exits.
-- Tide exits.
-- The outer terminal returns to normal input mode.
-- Text typed after Tide exits is not stuck in raw mode.
+- zsh 退出。
+- Tide 退出。
+- 外层终端恢复到正常输入模式。
+- Tide 退出后继续输入文字，不应卡在 raw mode。
 
-### 6. Terminal Resize
+### 6. 窗口 Resize
 
-Start Tide:
+启动 Tide：
 
 ```sh
 cargo run
 ```
 
-Inside Tide, run:
+在 Tide 内运行：
 
 ```sh
 stty size
 ```
 
-Resize the terminal window, then run:
+调整终端窗口大小后，再运行：
 
 ```sh
 stty size
 ```
 
-Expected:
+预期：
 
-- The reported rows and columns change after resizing.
-- Prompt rendering remains coherent after resize.
-- No panic occurs.
+- resize 前后输出的 rows / columns 应发生变化。
+- resize 后 prompt 渲染仍然正常。
+- 程序不 panic。
 
-### 7. Full-Screen TUI Passthrough Smoke Test
+### 7. 全屏 TUI 透明转发冒烟测试
 
-Use whichever of these commands is installed:
+使用本机已安装的任意命令测试：
 
 ```sh
 nvim
@@ -155,64 +155,64 @@ vim
 less Cargo.toml
 ```
 
-Expected:
+预期：
 
-- The TUI app opens normally.
-- Tide does not draw overlays.
-- Keyboard input belongs to the TUI app.
-- Exiting the TUI app returns to the zsh prompt.
+- TUI 应用正常打开。
+- Tide 不绘制 overlay。
+- 键盘输入属于 TUI 应用。
+- 退出 TUI 后回到 zsh prompt。
 
-Milestone 1 does not yet create `TuiSession` blocks or return panels. This test only verifies transparent passthrough.
+Milestone 1 还不会创建 `TuiSession` block，也不会显示 ReturnPanel。这个测试只验证透明转发。
 
-### 8. Terminal Recovery After Failure
+### 8. 退出后的终端恢复
 
-In an outer shell after Tide exits, run:
+Tide 退出后，在外层 shell 里运行：
 
 ```sh
 echo ok
 stty -a
 ```
 
-Expected:
+预期：
 
-- Text input echoes normally.
-- Enter creates new lines normally.
-- The terminal is not left in a broken raw-mode state.
+- 文本输入正常回显。
+- Enter 正常换行。
+- 终端没有停留在异常 raw-mode 状态。
 
-If the terminal is broken during development, run:
+如果开发过程中终端状态异常，可以运行：
 
 ```sh
 reset
 ```
 
-or:
+或者：
 
 ```sh
 stty sane
 ```
 
-## Known Milestone 1 Limits
+## Milestone 1 已知限制
 
-- No zsh lifecycle hook parsing yet.
-- No command block capture yet.
-- No BlockInteraction UI yet.
-- No TUI handoff-return detection yet.
-- No ReturnPanel yet.
-- No AI features yet.
+- 还没有 zsh lifecycle hook 解析。
+- 还没有 command block capture。
+- 还没有 BlockInteraction UI。
+- 还没有 TUI handoff-return 检测。
+- 还没有 ReturnPanel。
+- 还没有 AI 功能。
 
-These are expected and should not be treated as failures for Milestone 1.
+这些都是 Milestone 1 的预期限制，不应当视为测试失败。
 
-## Regression Checklist
+## 回归检查清单
 
-Before committing changes that affect terminal behavior, verify:
+提交任何影响终端行为的变更前，至少确认：
 
-- `cargo fmt --check` passes.
-- `cargo check` passes.
-- `cargo test` passes.
-- `cargo run` starts zsh.
-- Basic commands print output and return to prompt.
-- `Ctrl-C` interrupts a foreground command without exiting Tide.
-- `exit` or `Ctrl-D` exits Tide.
-- Terminal input is normal after Tide exits.
-- Resize updates the PTY size.
-- A simple full-screen TUI still works as passthrough.
+- `cargo fmt --check` 通过。
+- `cargo check` 通过。
+- `cargo test` 通过。
+- `cargo run` 能启动 zsh。
+- 基础命令能输出结果并回到 prompt。
+- `Ctrl-C` 能中断前台命令，且 Tide 不退出。
+- `exit` 或 `Ctrl-D` 能退出 Tide。
+- Tide 退出后外层终端输入正常。
+- resize 能更新 PTY size。
+- 简单全屏 TUI 仍然能以透明转发方式工作。
