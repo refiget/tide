@@ -1,0 +1,45 @@
+[shell]
+program = "zsh"
+
+[ui.transitions]
+enabled = true
+duration_ms = 220
+fps = 30
+skip_if_fast_under_ms = 80
+reduced_motion = false
+
+[blocks]
+max_blocks = 500
+max_output_bytes_per_block = 1048576
+strip_ansi_for_text = true
+persist_session = false
+
+[tui_apps.nvim]
+commands = ["nvim", "vim"]
+handoff = true
+snapshot = ["git", "cwd"]
+return_panel = "changed-files"
+
+[tui_apps.lazygit]
+commands = ["lazygit"]
+handoff = true
+snapshot = ["git"]
+after_exit = ["git status --short"]
+return_panel = "git"
+
+[tui_apps.opencode]
+commands = ["opencode"]
+handoff = true
+snapshot = ["git", "cwd"]
+after_exit = ["git status --short", "git diff --stat"]
+return_panel = "summary"
+
+[tui_apps.fzf]
+commands = ["fzf"]
+handoff = true
+return_panel = "none"
+
+[tui_apps.less]
+commands = ["less"]
+handoff = true
+return_panel = "none"
