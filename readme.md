@@ -104,6 +104,18 @@ child commands / TUI apps
 
 First stabilize the PTY wrapper and transparent zsh passthrough. Then add zsh lifecycle hooks, command block capture, block interaction, TUI handoff-return detection, return context, and finally optional AI integrations.
 
+Transparent passthrough is Tide's foundation, not a temporary phase. Tide should enhance the shell at clear lifecycle boundaries instead of replacing the live zsh terminal surface.
+
+The core product strategy is:
+
+```text
+transparent passthrough
+  +
+boundary-aware enhancement
+```
+
+Ordinary shell use stays transparent. Command output is shown normally while Tide captures sidecar block data. TUI apps keep full terminal control during handoff. BlockInteraction and ReturnPanel appear only when the user explicitly enters them or after configured handoff-return flows.
+
 Early block UI should be structural: wrap blocks with simple line borders first, then refine interaction and visuals after the core lifecycle is stable.
 
 The two product lines are parallel:

@@ -140,6 +140,38 @@ Primary responsibilities:
 - optionally show return transition or return panel
 - later, integrate AI for block interaction and return context summarization
 
+## Transparent-First Product Principle
+
+Transparent passthrough is not a temporary implementation shortcut. It is Tide's foundation.
+
+Tide should stay transparent-first. Enhancements must be boundary-aware and opt-in instead of replacing the live zsh terminal surface.
+
+Default behavior:
+
+- ordinary zsh use stays transparent
+- ordinary command output is displayed normally while being captured as sidecar block data
+- configured TUI apps run in fully transparent handoff mode
+- Tide only intervenes at clear lifecycle boundaries, such as `preexec`, `precmd`, `chpwd`, process exit, TUI return, or explicit user shortcuts
+- BlockInteraction UI appears only when the user asks for it
+- ReturnPanel appears only after configured handoff-return flows
+
+Design rules:
+
+- do not cover or redraw the live shell by default
+- do not replace the user's terminal emulator
+- do not build a full terminal renderer as the primary path
+- do not make block-rendered UI the default live shell surface
+- prefer sidecar capture over visual takeover
+- prefer boundary-based enhancement over continuous interpretation
+
+The core strategy is:
+
+```text
+transparent passthrough
+  +
+boundary-aware enhancement
+```
+
 ## Core Data Model
 
 ### CommandBlock
@@ -398,12 +430,12 @@ First command matching should be conservative. Match only `argv[0]`, such as `nv
 The first implementation should use a hybrid model:
 
 - `Passthrough shell mode`: most of the time Tide forwards zsh output directly to the real terminal.
-- `Block capture mode`: Tide uses zsh hook markers to assign command output to the active block.
+- `Block capture mode`: Tide uses zsh hook markers to assign command output to the active block while still showing output normally.
 - `Block interaction mode`: a ratatui UI lets the user browse blocks and perform actions.
 - `TuiHandoff mode`: configured TUI apps fully control the terminal.
 - `Returning` / `ReturnPanel` mode: Tide briefly takes over after a TUI exits to show return context.
 
-Long-term, Tide may become a more complete block-rendered shell workspace. In the first phase, do not parse all ANSI/VT and do not rewrite terminal rendering.
+Long-term, Tide should remain transparent-first. Any block-rendered UI must be opt-in and boundary-based, not a replacement for the live zsh terminal surface. In the first phase, do not parse all ANSI/VT and do not rewrite terminal rendering.
 
 Early visual rule: blocks should be wrapped with simple line borders first. Keep the first block UI structural and readable. Do not spend early milestones on decorative styling, complex animations, or elaborate visual treatments.
 
@@ -630,9 +662,11 @@ Start from Milestone 1:
 
 - Stabilize PTY behavior before building UI.
 - Build block capture before AI.
-- Build transparent zsh wrapping before block-rendered shell.
+- Treat transparent zsh wrapping as the permanent foundation, not only as a stepping stone.
+- Build block features as sidecar capture and opt-in interaction, not as a default replacement for the live shell surface.
 - Treat block-based execution and TUI handoff-return as equal core features.
 - Do not implement a complete terminal emulator at the start.
+- Do not make a complete terminal emulator the default architectural target.
 - Do not parse all ANSI/VT in the first phase.
 - Only identify necessary OSC hook events and limited alternate screen signals.
 - Never steal control during `TuiHandoff`.

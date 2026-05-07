@@ -52,3 +52,13 @@ This log records notable project changes so future agents can quickly understand
 - Documented the Milestone 1 flow for testing zsh passthrough, command output, interactive input, `Ctrl-C`, `Ctrl-D` / `exit`, resize propagation, TUI passthrough smoke tests, and terminal recovery.
 - Updated `AGENTS.md` so future agents must maintain the manual testing checklist whenever terminal behavior changes.
 - Rewrote `docs/manual-testing.md` in Chinese to match the project's primary documentation style.
+
+### transparent-first product direction
+
+- Clarified that transparent passthrough is Tide's foundation, not a temporary bootstrap phase.
+- Updated the product guidance so block features are sidecar capture and opt-in interaction rather than a default replacement for the live shell surface.
+- Reframed future UI work around boundary-aware enhancement:
+  - zsh lifecycle boundaries
+  - explicit BlockInteraction shortcuts
+  - configured TUI handoff-return exits
+- Replaced language that implied Tide should naturally grow into a complete block-rendered shell by default.
