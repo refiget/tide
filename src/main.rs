@@ -1,6 +1,9 @@
 mod app;
+mod block;
 mod config;
 mod pty;
+mod shell_hooks;
+mod ui;
 
 use anyhow::Result;
 use tracing::debug;
@@ -18,5 +21,5 @@ fn main() -> Result<()> {
     let config = Config::load()?;
     debug!(?config, "loaded config");
 
-    pty::run_shell(&config.shell.program)
+    pty::run_shell(&config)
 }

@@ -116,6 +116,8 @@ boundary-aware enhancement
 
 Ordinary shell use stays transparent. Command output is shown normally while Tide captures sidecar block data. TUI apps keep full terminal control during handoff. BlockInteraction and ReturnPanel appear only when the user explicitly enters them or after configured handoff-return flows.
 
+The first block implementation keeps only the latest 10 blocks in memory for the current Tide session. Persistence is optional future work and must never block the PTY hot path.
+
 Early block UI should be structural: wrap blocks with simple line borders first, then refine interaction and visuals after the core lifecycle is stable.
 
 The two product lines are parallel:

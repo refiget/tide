@@ -392,7 +392,7 @@ skip_if_fast_under_ms = 80
 reduced_motion = false
 
 [blocks]
-max_blocks = 500
+max_blocks = 10
 max_output_bytes_per_block = 1048576
 strip_ansi_for_text = true
 persist_session = false
@@ -680,7 +680,9 @@ Start from Milestone 1:
 - Use `anyhow::Result` initially for error handling.
 - Derive `Debug`, `Clone`, and `Deserialize` where appropriate.
 - Store block output as raw bytes first, then derive stripped text.
+- Keep the first in-memory BlockStore small. The current default is the latest 10 blocks only.
 - Enforce `max_output_bytes_per_block` to avoid memory growth.
+- Persistence is optional and must never be on the PTY hot path. Start with in-memory blocks; consider JSONL before SQLite if history across Tide sessions becomes necessary.
 - Add unit tests for event parsing.
 - Commit after each milestone when working in a git repository.
 - Maintain [docs/manual-testing.md](./docs/manual-testing.md) as terminal behavior evolves.

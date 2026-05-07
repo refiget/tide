@@ -149,7 +149,7 @@ fn default_transition_skip_if_fast_under_ms() -> u64 {
 }
 
 fn default_max_blocks() -> usize {
-    500
+    10
 }
 
 fn default_max_output_bytes_per_block() -> usize {

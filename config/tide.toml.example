@@ -9,7 +9,7 @@ skip_if_fast_under_ms = 80
 reduced_motion = false
 
 [blocks]
-max_blocks = 500
+max_blocks = 10
 max_output_bytes_per_block = 1048576
 strip_ansi_for_text = true
 persist_session = false

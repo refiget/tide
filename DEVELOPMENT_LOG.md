@@ -62,3 +62,11 @@ This log records notable project changes so future agents can quickly understand
   - explicit BlockInteraction shortcuts
   - configured TUI handoff-return exits
 - Replaced language that implied Tide should naturally grow into a complete block-rendered shell by default.
+
+### block mode prototype
+
+- Began the first block capture prototype with an in-memory `BlockStore`.
+- Set the default block history limit to the latest 10 blocks for the current Tide session.
+- Added OSC 777 zsh hook parsing for `preexec`, `precmd`, and `chpwd`.
+- Added a read-only alternate-screen Block Mode entered with `Ctrl-X Ctrl-B`.
+- Kept persistence as optional future work and outside the PTY hot path.

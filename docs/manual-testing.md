@@ -193,14 +193,112 @@ stty sane
 
 ## Milestone 1 已知限制
 
-- 还没有 zsh lifecycle hook 解析。
-- 还没有 command block capture。
-- 还没有 BlockInteraction UI。
 - 还没有 TUI handoff-return 检测。
 - 还没有 ReturnPanel。
 - 还没有 AI 功能。
 
 这些都是 Milestone 1 的预期限制，不应当视为测试失败。
+
+## Block Mode 雏形：最近 10 条 Block
+
+目标：Tide 默认保持透明 shell。用户显式按 `Ctrl-X Ctrl-B` 后，进入 alternate-screen Block Mode，浏览当前 Tide session 最近 10 条命令 block。
+
+### 1. 捕获普通命令
+
+启动 Tide：
+
+```sh
+cargo run
+```
+
+在 Tide 内运行：
+
+```sh
+echo one
+pwd
+false
+printf 'line 1\nline 2\n'
+```
+
+然后按 `Ctrl-X Ctrl-B`。
+
+预期：
+
+- 进入一个线框包裹的 `Tide Blocks` 页面。
+- 能看到刚才执行过的命令。
+- 最近执行的命令显示在列表上方。
+- `false` 应显示为失败状态。
+- 选中 block 后，下方能看到 command、cwd、exit、duration 和 output。
+
+### 2. Block Mode 选择
+
+在 Block Mode 内按：
+
+```text
+j
+k
+```
+
+预期：
+
+- `j` 选择下一条 block。
+- `k` 选择上一条 block。
+- 选中项变化后，下方详情同步变化。
+
+### 3. 返回透明 shell
+
+在 Block Mode 内按：
+
+```text
+Esc
+```
+
+或者：
+
+```text
+q
+```
+
+预期：
+
+- 退出 alternate screen。
+- 回到原来的 zsh shell 画面。
+- shell 仍然可继续输入命令。
+
+### 4. 最近 10 条限制
+
+在 Tide 内连续运行 12 条简单命令：
+
+```sh
+echo 1
+echo 2
+echo 3
+echo 4
+echo 5
+echo 6
+echo 7
+echo 8
+echo 9
+echo 10
+echo 11
+echo 12
+```
+
+然后按 `Ctrl-X Ctrl-B`。
+
+预期：
+
+- Block Mode 中最多显示最近 10 条 block。
+- 最旧的 `echo 1` 和 `echo 2` 不再保留。
+- `echo 12` 应在列表最上方。
+
+### 5. 当前雏形限制
+
+- Block Mode 暂时只读，只支持选择和查看。
+- 暂不支持复制、重跑、保存、删除、AI 解释等操作。
+- Block output 只保存在当前 Tide 进程内，退出 Tide 后丢弃。
+- 暂不接入数据库或文件日志。
+- zsh hook 注入方式仍是早期实现，后续需要继续打磨。
 
 ## 回归检查清单
 
@@ -216,3 +314,6 @@ stty sane
 - Tide 退出后外层终端输入正常。
 - resize 能更新 PTY size。
 - 简单全屏 TUI 仍然能以透明转发方式工作。
+- `Ctrl-X Ctrl-B` 能进入 Block Mode。
+- Block Mode 能浏览最近 10 条命令 block。
+- `Esc` 或 `q` 能从 Block Mode 回到透明 shell。
