@@ -649,6 +649,9 @@ Start from Milestone 1:
 - Enforce `max_output_bytes_per_block` to avoid memory growth.
 - Add unit tests for event parsing.
 - Commit after each milestone when working in a git repository.
+- Maintain [docs/manual-testing.md](./docs/manual-testing.md) as terminal behavior evolves.
+- When adding or changing terminal behavior, zsh lifecycle handling, block interaction, TUI handoff-return, or AI command insertion, update the manual testing checklist in the same change.
+- Before committing terminal behavior changes, run the automated checks and follow the relevant manual test section when feasible.
 
 ## Current Priority
 
