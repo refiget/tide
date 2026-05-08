@@ -78,8 +78,8 @@ cargo fmt --check && cargo check && cargo test
 - **Footer**: Shows Block View footer (`Block #N/total  j/k ...`).
 - **Navigation**: `j`/`k` navigate between blocks normally; expanded state follows selection (Enter, `j`/`k`, `g`, `G`).
 
-### Detail View (future action key)
-- **What it is**: A full-screen pager mode for deep inspection of one block. Entry via a dedicated action key (not Enter).
+### Detail View (i from Block View)
+- **What it is**: A full-screen pager mode for deep inspection of one block. Entry via `i` from Block View.
 - **View**: `ViewKind::Detail` — separate view, leaves Block View.
 - **Rendering**: `build_detail_layout()` generates single-block full-screen layout.
 - **Footer**: Shows pager-style footer (`Output · #N cmd  j/k scroll ...`).
@@ -142,7 +142,7 @@ All state: `Arc<Mutex<RuntimeState>>`. Lock ordering: output thread locks `(stat
 - `Blocks` → `g` → `Top` anchor (force render)
 - `Blocks` → `G` → `Tail` anchor (force render)
 - `Blocks` → `Enter` → toggle `expanded_block` (inline expand/collapse, stays in Blocks, force render)
-- `Blocks` → future action key → `Detail` (full-screen pager, not yet implemented)
+- `Blocks` → `i` → `Detail` (full-screen pager, force render)
 - `Detail` → bare `\x1b` or `q` → `Blocks` (force render); multi-byte escape sequences (arrow keys etc.) are consumed without triggering exit
 - `Blocks` → `q`/`Esc` → `Plain` (reset to default ViewState, force render)
 

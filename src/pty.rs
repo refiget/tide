@@ -458,6 +458,7 @@ fn perform_block_action(state: &mut RuntimeState, action: BlockAction) {
     let text = match action {
         BlockAction::CopyOutput => block.output_text.clone(),
         BlockAction::CopyCommand => block.command.clone(),
+        BlockAction::CopyBlock => format!("{}\n\n{}", block.command, block.output_text),
         _ => return,
     };
 
@@ -465,6 +466,7 @@ fn perform_block_action(state: &mut RuntimeState, action: BlockAction) {
         let msg = match action {
             BlockAction::CopyOutput => "copied output".to_string(),
             BlockAction::CopyCommand => "copied command".to_string(),
+            BlockAction::CopyBlock => "copied block".to_string(),
             _ => unreachable!(),
         };
         state.render_state.flash_message = Some((msg, Instant::now()));
@@ -639,73 +641,82 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
             [] => None,
         },
         ViewKind::Detail => match bytes {
-            [b'y', ..] => {
-                perform_block_action(&mut state, BlockAction::CopyOutput);
-                Some(1)
-            }
-            [b'Y', ..] => {
+            // Two-key copy sequences
+            [b'y', b'c', ..] => {
                 perform_block_action(&mut state, BlockAction::CopyCommand);
-                Some(1)
+                Some(2)
             }
+            [b'y', b'o', ..] => {
+                perform_block_action(&mut state, BlockAction::CopyOutput);
+                Some(2)
+            }
+            [b'y', b'b', ..] => {
+                perform_block_action(&mut state, BlockAction::CopyBlock);
+                Some(2)
+            }
+            [b'y', ..] => Some(1),
+
+            // Cursor movement + auto-scroll
             [b'j', ..] | [b'\x1b', b'[', b'B', ..] => {
-                state.view.block_viewport.line_offset =
-                    state.view.block_viewport.line_offset.saturating_add(1);
+                let total = detail_output_line_count(&state);
+                if total > 0 && state.view.detail_line_cursor + 1 < total {
+                    state.view.detail_line_cursor += 1;
+                    let inner = detail_inner_height(&state);
+                    let lo = state.view.block_viewport.line_offset;
+                    if state.view.detail_line_cursor >= lo + inner {
+                        state.view.block_viewport.line_offset = state
+                            .view
+                            .detail_line_cursor
+                            .saturating_sub(inner.saturating_sub(1));
+                    }
+                }
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
-                if bytes.len() >= 3 && bytes[0] == b'\x1b' {
-                    Some(3)
+                Some(if bytes.len() >= 3 && bytes[0] == b'\x1b' {
+                    3
                 } else {
-                    Some(1)
-                }
+                    1
+                })
             }
             [b'k', ..] | [b'\x1b', b'[', b'A', ..] => {
-                state.view.block_viewport.line_offset =
-                    state.view.block_viewport.line_offset.saturating_sub(1);
+                if state.view.detail_line_cursor > 0 {
+                    state.view.detail_line_cursor -= 1;
+                    if state.view.detail_line_cursor < state.view.block_viewport.line_offset {
+                        state.view.block_viewport.line_offset = state.view.detail_line_cursor;
+                    }
+                }
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
-                if bytes.len() >= 3 && bytes[0] == b'\x1b' {
-                    Some(3)
+                Some(if bytes.len() >= 3 && bytes[0] == b'\x1b' {
+                    3
                 } else {
-                    Some(1)
-                }
+                    1
+                })
             }
+
+            // Jump to end
             [b'G', ..] => {
-                let layout = Compositor::build_visual_layout(
-                    &state.shell,
-                    &state.blocks,
-                    &state.view,
-                    state.cols,
-                    &state.config.block_view,
-                );
-                let content_height = (state.rows as usize)
-                    .saturating_sub(usize::from(state.config.block_view.show_footer));
-                if let Some(id) = state.view.expanded_block {
-                    if let Some(span) = layout.spans.iter().find(|s| s.block_id == id) {
-                        state.view.block_viewport.line_offset =
-                            span.end_line.saturating_sub(content_height);
-                    }
+                let total = detail_output_line_count(&state);
+                let inner = detail_inner_height(&state);
+                if total > 0 {
+                    state.view.detail_line_cursor = total.saturating_sub(1);
+                    state.view.block_viewport.line_offset = total.saturating_sub(inner);
                 }
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
                 Some(1)
             }
+
+            // Jump to start
             [b'g', ..] => {
-                let layout = Compositor::build_visual_layout(
-                    &state.shell,
-                    &state.blocks,
-                    &state.view,
-                    state.cols,
-                    &state.config.block_view,
-                );
-                if let Some(id) = state.view.expanded_block {
-                    if let Some(span) = layout.spans.iter().find(|s| s.block_id == id) {
-                        state.view.block_viewport.line_offset = span.start_line;
-                    }
-                }
+                state.view.detail_line_cursor = 0;
+                state.view.block_viewport.line_offset = 0;
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
                 Some(1)
             }
+
+            // Rerun
             [b'r', ..] => {
                 let command = state
                     .view
@@ -720,14 +731,14 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                 }
                 Some(1)
             }
+
+            // Return to Block View
             [b'q', ..] | [b'\x1b'] => {
                 state.view.view = ViewKind::Blocks;
                 state.view.expanded_block = None;
-                if matches!(state.view.block_viewport.anchor, ViewAnchor::Tail) {
-                    state.view.block_viewport.line_offset = compute_tail_scroll_offset(&state);
-                } else {
-                    ensure_selected_visible(&mut state);
-                }
+                state.view.detail_line_cursor = 0;
+                state.view.block_viewport.line_offset = 0;
+                ensure_selected_visible(&mut state);
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
                 Some(1)
@@ -807,6 +818,17 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
                 state.input_accumulator.pending_block_delta = 0;
                 state.render_state.needs_cleanup = true;
                 state.render_state.pending_paste = Some(cmd);
+            }
+            true
+        }
+        b'i' => {
+            if let Some(selected) = state.view.selected_block {
+                state.view.view = ViewKind::Detail;
+                state.view.expanded_block = Some(selected);
+                state.view.block_viewport.line_offset = 0;
+                state.view.detail_line_cursor = 0;
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
             }
             true
         }
@@ -973,6 +995,27 @@ fn compute_tail_scroll_offset(state: &RuntimeState) -> usize {
         state.rows as usize,
         &state.config.block_view,
     )
+}
+
+fn detail_output_line_count(state: &RuntimeState) -> usize {
+    let Some(id) = state.view.expanded_block else {
+        return 0;
+    };
+    let Some(block) = state.blocks.block(id) else {
+        return 0;
+    };
+    let shell_lines = state.shell.snapshot();
+    let start = block.start_line.min(shell_lines.len());
+    let end = block.end_line.min(shell_lines.len().saturating_sub(1));
+    if start >= shell_lines.len() || block.start_line > block.end_line {
+        1
+    } else {
+        end - start + 1
+    }
+}
+
+fn detail_inner_height(state: &RuntimeState) -> usize {
+    (state.rows as usize).saturating_sub(4)
 }
 
 fn ensure_selected_visible(state: &mut RuntimeState) {
@@ -1437,92 +1480,35 @@ mod tests {
     }
 
     #[test]
-    fn detail_view_y_triggers_copy_output() {
+    fn detail_j_scrolls_cursor_down() {
         let state = Arc::new(Mutex::new(runtime_state()));
         {
             let mut s = state.lock().unwrap();
-            add_block(&mut s, "echo hello");
+            add_block_with_lines(&mut s, "echo", &["a", "b", "c"]);
             enter_block_view(&mut s);
             s.view.view = ViewKind::Detail;
             s.view.expanded_block = s.view.selected_block;
         }
 
-        assert_eq!(handle_view_key_sequence(b"y", &state), Some(1));
-        let s = state.lock().unwrap();
-        assert!(
-            matches!(s.view.view, ViewKind::Detail),
-            "y should not exit Detail"
-        );
-        if write_to_clipboard("test") {
-            assert!(s.render_state.flash_message.is_some());
-        }
-    }
-
-    #[test]
-    fn detail_view_y_upper_triggers_copy_command() {
-        let state = Arc::new(Mutex::new(runtime_state()));
-        {
-            let mut s = state.lock().unwrap();
-            add_block(&mut s, "echo hello");
-            enter_block_view(&mut s);
-            s.view.view = ViewKind::Detail;
-            s.view.expanded_block = s.view.selected_block;
-        }
-
-        assert_eq!(handle_view_key_sequence(b"Y", &state), Some(1));
-        let s = state.lock().unwrap();
-        assert!(
-            matches!(s.view.view, ViewKind::Detail),
-            "Y should not exit Detail"
-        );
-        if write_to_clipboard("test") {
-            assert!(
-                s.render_state.flash_message.is_some(),
-                "flash message should be set after Y"
-            );
-            let (msg, _) = s.render_state.flash_message.as_ref().unwrap();
-            assert!(
-                msg.contains("command"),
-                "flash should mention 'command', got: {msg}"
-            );
-        }
-    }
-
-    #[test]
-    fn detail_j_scrolls_line_offset_down() {
-        let state = Arc::new(Mutex::new(runtime_state()));
-        {
-            let mut s = state.lock().unwrap();
-            add_block(&mut s, "echo one");
-            enter_block_view(&mut s);
-            s.view.view = ViewKind::Detail;
-            s.view.expanded_block = s.view.selected_block;
-        }
-
-        let before = state.lock().unwrap().view.block_viewport.line_offset;
         assert_eq!(handle_view_key_sequence(b"j", &state), Some(1));
         let s = state.lock().unwrap();
         assert!(
             matches!(s.view.view, ViewKind::Detail),
             "j should stay in Detail"
         );
-        assert_eq!(
-            s.view.block_viewport.line_offset,
-            before + 1,
-            "j should increase line_offset by 1"
-        );
+        assert_eq!(s.view.detail_line_cursor, 1);
     }
 
     #[test]
-    fn detail_k_scrolls_line_offset_up() {
+    fn detail_k_scrolls_cursor_up() {
         let state = Arc::new(Mutex::new(runtime_state()));
         {
             let mut s = state.lock().unwrap();
-            add_block(&mut s, "echo one");
+            add_block_with_lines(&mut s, "echo", &["a", "b", "c"]);
             enter_block_view(&mut s);
             s.view.view = ViewKind::Detail;
             s.view.expanded_block = s.view.selected_block;
-            s.view.block_viewport.line_offset = 5;
+            s.view.detail_line_cursor = 1;
         }
 
         assert_eq!(handle_view_key_sequence(b"k", &state), Some(1));
@@ -1531,11 +1517,11 @@ mod tests {
             matches!(s.view.view, ViewKind::Detail),
             "k should stay in Detail"
         );
-        assert_eq!(s.view.block_viewport.line_offset, 4);
+        assert_eq!(s.view.detail_line_cursor, 0);
     }
 
     #[test]
-    fn detail_g_jumps_to_expanded_top() {
+    fn detail_g_jumps_to_top() {
         let state = Arc::new(Mutex::new(runtime_state()));
         {
             let mut s = state.lock().unwrap();
@@ -1543,17 +1529,17 @@ mod tests {
             enter_block_view(&mut s);
             s.view.view = ViewKind::Detail;
             s.view.expanded_block = s.view.selected_block;
-            s.view.block_viewport.line_offset = 5;
+            s.view.detail_line_cursor = 5;
         }
 
         assert_eq!(handle_view_key_sequence(b"g", &state), Some(1));
         let s = state.lock().unwrap();
-        // g should set line_offset to the expanded block's start_line (0).
+        assert_eq!(s.view.detail_line_cursor, 0);
         assert_eq!(s.view.block_viewport.line_offset, 0);
     }
 
     #[test]
-    fn detail_g_upper_jumps_to_expanded_bottom() {
+    fn detail_g_upper_jumps_to_bottom() {
         let state = Arc::new(Mutex::new(runtime_state()));
         {
             let mut s = state.lock().unwrap();
@@ -1564,15 +1550,53 @@ mod tests {
         }
 
         assert_eq!(handle_view_key_sequence(b"G", &state), Some(1));
-        // G sets line_offset to span.end_line - content_height.
-        // For a single-block layout, end_line is the visual line count.
         let s = state.lock().unwrap();
-        // The line_offset should be > 0 because the expanded block is taller than the screen.
-        // We can't assert the exact value without building the layout, but it should not cause panic.
         assert!(
             matches!(s.view.view, ViewKind::Detail),
             "G should stay in Detail"
         );
+    }
+
+    #[test]
+    fn detail_yc_copies_command() {
+        let state = Arc::new(Mutex::new(runtime_state()));
+        {
+            let mut s = state.lock().unwrap();
+            add_block(&mut s, "echo hello");
+            enter_block_view(&mut s);
+            s.view.view = ViewKind::Detail;
+            s.view.expanded_block = s.view.selected_block;
+        }
+
+        assert_eq!(handle_view_key_sequence(b"yc", &state), Some(2));
+        let s = state.lock().unwrap();
+        assert!(matches!(s.view.view, ViewKind::Detail));
+        if write_to_clipboard("test") {
+            let (msg, _) = s.render_state.flash_message.as_ref().unwrap();
+            assert!(
+                msg.contains("command"),
+                "flash should mention 'command', got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn detail_yo_copies_output() {
+        let state = Arc::new(Mutex::new(runtime_state()));
+        {
+            let mut s = state.lock().unwrap();
+            add_block(&mut s, "echo hello");
+            enter_block_view(&mut s);
+            s.view.view = ViewKind::Detail;
+            s.view.expanded_block = s.view.selected_block;
+        }
+
+        assert_eq!(handle_view_key_sequence(b"yo", &state), Some(2));
+        let s = state.lock().unwrap();
+        assert!(matches!(s.view.view, ViewKind::Detail));
+        if write_to_clipboard("test") {
+            assert!(s.render_state.flash_message.is_some());
+        }
     }
 }
 

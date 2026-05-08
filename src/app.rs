@@ -68,6 +68,8 @@ pub struct ViewState {
     pub expanded_block: Option<BlockId>,
     pub scroll_offset: usize,
     pub block_viewport: BlockViewport,
+    /// 0-indexed cursor line within the Detail View output.
+    pub detail_line_cursor: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +96,7 @@ impl Default for ViewState {
             expanded_block: None,
             scroll_offset: 0,
             block_viewport: BlockViewport::default(),
+            detail_line_cursor: 0,
         }
     }
 }
@@ -292,6 +295,7 @@ pub struct SuggestedAction {
 pub enum BlockAction {
     CopyCommand,
     CopyOutput,
+    CopyBlock,
     RerunCommand,
     ExplainOutput,
     ExplainError,

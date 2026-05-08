@@ -164,13 +164,14 @@ Block View overlays Block Metadata Layer on the same shell history.
 
 Block View is not a list page and not a popup. It is a new rendering layer over the same shell history.
 
-### Detail View (future — not entered by Enter)
+### Detail View (entered via `i` from Block View)
 
-Detail View is a full-screen pager mode for deep inspection of a single block. It is NOT entered by the Enter key (Enter does inline block expansion in Block View). Entry will be via a dedicated action key in a future implementation.
+Detail View is a full-screen pager mode for deep inspection of a single block. It is NOT entered by the Enter key (Enter does inline block expansion in Block View). Entry is via `i` from Block View.
 
 - Full screen, only one block visible at a time
-- Output scrollable via `j`/`k` (pager-style, not block navigation)
+- Output scrollable via `j`/`k` with a highlighted line cursor; auto-scrolls when cursor leaves visible area
 - Shows command, cwd, exit code, duration, and actions
+- Copy keys: `yc` copy command, `yo` copy output, `yb` copy block
 - `q` / `Esc` returns to Block View
 
 ### Terminology Distinction
@@ -178,7 +179,7 @@ Detail View is a full-screen pager mode for deep inspection of a single block. I
 | Concept | Trigger | View | Navigation | Scope |
 |---------|---------|------|------------|-------|
 | **Block expansion** | `Enter` | `ViewKind::Blocks` (inline) | `j`/`k` navigate blocks | Per-block toggle |
-| **Detail View** | Future action key | `ViewKind::Detail` (full-screen pager) | `j`/`k` scroll output | Single block, immersive |
+| **Detail View** | `i` | `ViewKind::Detail` (full-screen pager) | `j`/`k` scroll output with line cursor | Single block, immersive |
 
 ### Full-Screen Programs
 

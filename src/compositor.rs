@@ -106,12 +106,21 @@ impl Compositor {
                     block_id: line.block_id,
                 })
                 .collect(),
-            ViewKind::Blocks | ViewKind::Detail => Self::build_block_lines(
+            ViewKind::Blocks => Self::build_block_lines(
                 shell,
                 blocks,
                 view,
                 height,
                 _width,
+                block_view,
+                flash_message,
+            ),
+            ViewKind::Detail => Self::build_detail_lines(
+                shell,
+                blocks,
+                view,
+                _width,
+                height,
                 block_view,
                 flash_message,
             ),
@@ -392,6 +401,91 @@ impl Compositor {
             .min(max_offset)
     }
 
+    /// Full-screen Detail View: single block with line cursor.
+    fn build_detail_lines(
+        shell: &ShellBuffer,
+        blocks: &BlockStore,
+        view: &ViewState,
+        _width: u16,
+        height: u16,
+        _block_view: &BlockViewConfig,
+        flash_message: Option<&str>,
+    ) -> Vec<VisualLine> {
+        let height = height as usize;
+
+        let Some(block_id) = view.expanded_block else {
+            return vec![VisualLine::Footer {
+                text: "Detail: no block selected   q back".into(),
+            }];
+        };
+
+        let Some(block) = blocks.block(block_id) else {
+            return vec![VisualLine::Footer {
+                text: "Detail: block not found   q back".into(),
+            }];
+        };
+        let shell_lines = shell.snapshot();
+        let output_lines = get_block_output_lines(block, &shell_lines);
+        let total = output_lines.len();
+
+        // inner_height = rows - top_margin(1) - top_border(1) - bottom_border(1) - footer(1)
+        let inner_height = height.saturating_sub(4);
+        let short_mode = inner_height == 0 || total <= inner_height;
+
+        let cursor = view.detail_line_cursor.min(total.saturating_sub(1));
+        let line_offset = view.block_viewport.line_offset;
+
+        let mut result: Vec<VisualLine> = Vec::with_capacity(height);
+
+        result.push(VisualLine::Empty); // top margin row
+        result.push(VisualLine::BlockTopBorder {
+            block_id,
+            selected: true,
+            label: top_label(block),
+        });
+
+        if short_mode {
+            for (i, text) in output_lines.iter().enumerate() {
+                result.push(VisualLine::BlockBodyLine {
+                    text: text.clone(),
+                    block_id,
+                    selected: i == cursor,
+                });
+            }
+            result.push(VisualLine::BlockBottomBorder {
+                block_id,
+                selected: true,
+                label: bottom_label(block),
+            });
+            while result.len() < height.saturating_sub(1) {
+                result.push(VisualLine::Empty);
+            }
+        } else {
+            let max_offset = total.saturating_sub(inner_height);
+            let start = line_offset.min(max_offset);
+            let end = (start + inner_height).min(total);
+            for (i, text) in output_lines[start..end].iter().enumerate() {
+                let abs = start + i;
+                result.push(VisualLine::BlockBodyLine {
+                    text: text.clone(),
+                    block_id,
+                    selected: abs == cursor,
+                });
+            }
+            result.push(VisualLine::BlockBottomBorder {
+                block_id,
+                selected: true,
+                label: bottom_label(block),
+            });
+        }
+
+        result.push(VisualLine::Footer {
+            text: detail_footer_text(block, view, total, inner_height, flash_message),
+        });
+
+        result
+    }
+
     #[allow(dead_code)]
     fn visual_height_for_block_from_lines(
         shell_lines: &[crate::buffer::ShellLine],
@@ -404,6 +498,48 @@ impl Compositor {
         // If scrolling performance becomes an issue, cache visual heights keyed
         // by block_id, width, view mode, expanded state, and config.
         Self::build_one_block_lines(shell_lines, block, view, block_view, selected).len()
+    }
+}
+
+fn get_block_output_lines(
+    block: &CommandBlock,
+    shell_lines: &[crate::buffer::ShellLine],
+) -> Vec<String> {
+    if block.kind == BlockKind::RawProgram {
+        return vec!["interactive program; screen output was not captured".into()];
+    }
+    let start = block.start_line.min(shell_lines.len());
+    let end = block.end_line.min(shell_lines.len().saturating_sub(1));
+    if start >= shell_lines.len() || block.start_line > block.end_line {
+        return vec!["no captured text output".into()];
+    }
+    shell_lines[start..=end]
+        .iter()
+        .map(|l| l.text.clone())
+        .collect()
+}
+
+fn detail_footer_text(
+    block: &CommandBlock,
+    view: &ViewState,
+    total_lines: usize,
+    inner_height: usize,
+    flash_message: Option<&str>,
+) -> String {
+    if let Some(msg) = flash_message {
+        return msg.to_string();
+    }
+    let id = block.id;
+    if total_lines <= inner_height {
+        format!("Detail #{id}   q back   yc cmd   yo output   yb block")
+    } else {
+        let cursor_display = view
+            .detail_line_cursor
+            .saturating_add(1)
+            .min(total_lines.max(1));
+        format!(
+            "Detail #{id}   ↑↓ scroll   g/G top/bottom   q back   line {cursor_display}/{total_lines}"
+        )
     }
 }
 
@@ -466,6 +602,7 @@ fn detail_lines(block: &CommandBlock, selected: bool) -> Vec<VisualLine> {
         .collect()
 }
 
+#[allow(dead_code)]
 fn truncate_command(cmd: &str, max_width: usize) -> String {
     let chars: Vec<char> = cmd.chars().collect();
     if chars.len() <= max_width {
@@ -510,17 +647,6 @@ fn footer_text(blocks: &BlockStore, view: &ViewState, flash_message: Option<&str
     if let Some(msg) = flash_message {
         return msg.to_string();
     }
-    if matches!(view.view, ViewKind::Detail) {
-        if let Some(block_id) = view.expanded_block {
-            if let Some(block) = blocks.block(block_id) {
-                let cmd = truncate_command(&block.command, 40);
-                return format!(
-                    "#{block} {cmd}  j/k scroll  g/G top/btm  y copy  r rerun  q collapse",
-                    block = block_id,
-                );
-            }
-        }
-    }
     let total = blocks.len();
     let current = if total == 0 {
         0
@@ -530,7 +656,7 @@ fn footer_text(blocks: &BlockStore, view: &ViewState, flash_message: Option<&str
             .min(total.saturating_sub(1))
             + 1
     };
-    format!("Block #{current}/{total}  j/k move  Enter expand  g/G top/btm  q quit")
+    format!("Block #{current}/{total}  j/k move  Enter expand  i detail  g/G top/btm  q quit")
 }
 
 #[cfg(test)]
@@ -740,7 +866,7 @@ mod tests {
             &["1", "2", "3", "4", "5", "6"],
         );
         tail_view(&mut view, &store);
-        view.view = ViewKind::Detail;
+        view.view = ViewKind::Blocks;
         view.expanded_block = Some(tail);
         view.selected_block = Some(tail);
         view.block_viewport.line_offset =
