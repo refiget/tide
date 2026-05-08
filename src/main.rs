@@ -4,6 +4,7 @@ mod buffer;
 mod compositor;
 mod config;
 mod format;
+mod index;
 mod pty;
 mod renderer;
 mod shell_hooks;

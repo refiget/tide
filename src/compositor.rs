@@ -185,7 +185,7 @@ impl Compositor {
         let mut lines = Vec::new();
         let mut spans = Vec::new();
 
-        for (block_index, block_id) in blocks.timeline.iter().copied().enumerate() {
+        for (block_index, block_id) in view.visible.ids(blocks).iter().copied().enumerate() {
             let Some(block) = blocks.block(block_id) else {
                 continue;
             };
@@ -678,16 +678,31 @@ fn footer_text(blocks: &BlockStore, view: &ViewState, flash_message: Option<&str
     if let Some(msg) = flash_message {
         return msg.to_string();
     }
-    let total = blocks.len();
-    let current = if total == 0 {
+
+    let visible_count = view.visible.len(blocks);
+    let total_count = blocks.len();
+    let current = if visible_count == 0 {
         0
     } else {
         view.block_viewport
             .selected_index
-            .min(total.saturating_sub(1))
+            .min(visible_count.saturating_sub(1))
             + 1
     };
-    format!("Block #{current}/{total}  j/k move  Enter expand  i detail  g/G top/btm  q quit")
+
+    let filter_tag = if view.filter.failed_only {
+        " \u{b7} failed"
+    } else {
+        ""
+    };
+
+    let count = if view.filter.is_active() {
+        format!("#{current}/{visible_count} of {total_count}{filter_tag}")
+    } else {
+        format!("#{current}/{total_count}")
+    };
+
+    format!("Block {count}  j/k move  Enter expand  i detail  f filter  g/G top/btm  q quit")
 }
 
 #[cfg(test)]

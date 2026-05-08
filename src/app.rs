@@ -61,6 +61,59 @@ pub enum InputMode {
     RawProgram,
 }
 
+/// The set of BlockIds currently visible in Block View.
+/// Navigation always uses this; never indexes into BlockStore.timeline directly.
+#[derive(Debug, Clone)]
+pub enum VisibleSource {
+    /// No filter active: implicitly the full BlockStore timeline.
+    AllTimeline,
+    /// Filter active: pre-computed result in timeline order.
+    Filtered(Vec<BlockId>),
+}
+
+impl VisibleSource {
+    /// Slice of visible BlockIds.
+    pub fn ids<'a>(&'a self, blocks: &'a crate::block::BlockStore) -> &'a [BlockId] {
+        match self {
+            VisibleSource::AllTimeline => &blocks.timeline,
+            VisibleSource::Filtered(v) => v.as_slice(),
+        }
+    }
+
+    pub fn len(&self, blocks: &crate::block::BlockStore) -> usize {
+        self.ids(blocks).len()
+    }
+
+    pub fn is_empty(&self, blocks: &crate::block::BlockStore) -> bool {
+        self.ids(blocks).is_empty()
+    }
+
+    pub fn block_at(&self, blocks: &crate::block::BlockStore, idx: usize) -> Option<BlockId> {
+        self.ids(blocks).get(idx).copied()
+    }
+
+    pub fn index_of(&self, blocks: &crate::block::BlockStore, id: BlockId) -> Option<usize> {
+        self.ids(blocks).iter().position(|&b| b == id)
+    }
+}
+
+impl Default for VisibleSource {
+    fn default() -> Self {
+        VisibleSource::AllTimeline
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BlockFilter {
+    pub failed_only: bool,
+}
+
+impl BlockFilter {
+    pub fn is_active(&self) -> bool {
+        self.failed_only
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ViewState {
     pub view: ViewKind,
@@ -70,6 +123,8 @@ pub struct ViewState {
     pub block_viewport: BlockViewport,
     /// 0-indexed cursor line within the Detail View output.
     pub detail_line_cursor: usize,
+    pub filter: BlockFilter,
+    pub visible: VisibleSource,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +152,8 @@ impl Default for ViewState {
             scroll_offset: 0,
             block_viewport: BlockViewport::default(),
             detail_line_cursor: 0,
+            filter: BlockFilter::default(),
+            visible: VisibleSource::default(),
         }
     }
 }

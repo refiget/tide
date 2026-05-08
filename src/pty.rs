@@ -14,7 +14,10 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use signal_hook::{consts::signal::SIGWINCH, iterator::Signals};
 
 use crate::{
-    app::{BlockAction, BlockKind, InputAccumulator, RenderState, ViewAnchor, ViewKind, ViewState},
+    app::{
+        BlockAction, BlockKind, BlockStatus, InputAccumulator, RenderState, ViewAnchor, ViewKind,
+        ViewState,
+    },
     block::BlockStore,
     buffer::ShellBuffer,
     compositor::Compositor,
@@ -33,6 +36,7 @@ struct RuntimeState {
     capture_suspended: bool,
     rows: u16,
     cols: u16,
+    index: crate::index::BlockIndex,
 }
 
 const FRAME_DURATION: Duration = Duration::from_millis(16);
@@ -94,6 +98,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
         capture_suspended: false,
         rows,
         cols,
+        index: crate::index::BlockIndex::new(),
     }));
     let stdout = Arc::new(Mutex::new(io::stdout()));
     let debug_blocks = std::env::var_os("TIDE_DEBUG_BLOCKS").is_some();
@@ -392,6 +397,20 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             state.blocks.finish_command(exit_code, end_line);
             state.capture_suspended = false;
             sync_block_viewport_after_history_change(state);
+            if let Some(block_id) = active_id {
+                if let Some(block) = state.blocks.block(block_id) {
+                    if block.status == BlockStatus::Failed {
+                        state.index.on_block_failed(block_id);
+                        if state.view.filter.failed_only {
+                            if let crate::app::VisibleSource::Filtered(ref mut v) =
+                                state.view.visible
+                            {
+                                v.push(block_id);
+                            }
+                        }
+                    }
+                }
+            }
             if let Some(id) = active_id {
                 if let Some(cwd) = finished_cwd {
                     if let Some(block) = state.blocks.block_mut(id) {
@@ -509,6 +528,10 @@ fn render_runtime(
             &state.config.block_layout,
             &state.config.block_view,
             flash_text.as_deref(),
+            std::env::var("HOME")
+                .ok()
+                .map(std::path::PathBuf::from)
+                .as_deref(),
         );
         (
             visual_lines,
@@ -750,6 +773,33 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
     }
 }
 
+fn rebuild_visible(state: &mut RuntimeState) {
+    if state.view.filter.is_active() {
+        let ids = state.index.query_failed(&state.blocks.executions);
+        state.view.visible = crate::app::VisibleSource::Filtered(ids);
+    } else {
+        state.view.visible = crate::app::VisibleSource::AllTimeline;
+    }
+}
+
+fn restore_or_clamp_selection(state: &mut RuntimeState) {
+    let len = state.view.visible.len(&state.blocks);
+    if len == 0 {
+        state.view.selected_block = None;
+        state.view.block_viewport.selected_index = 0;
+        return;
+    }
+    if let Some(prev) = state.view.selected_block {
+        if let Some(idx) = state.view.visible.index_of(&state.blocks, prev) {
+            state.view.block_viewport.selected_index = idx;
+            return;
+        }
+    }
+    let tail_idx = len - 1;
+    state.view.block_viewport.selected_index = tail_idx;
+    state.view.selected_block = state.view.visible.block_at(&state.blocks, tail_idx);
+}
+
 fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
     match byte {
         b'q' | b'\x1b' => {
@@ -832,6 +882,14 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
             }
             true
         }
+        b'f' => {
+            state.view.filter.failed_only = !state.view.filter.failed_only;
+            rebuild_visible(state);
+            restore_or_clamp_selection(state);
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+            true
+        }
         _ => true,
     }
 }
@@ -841,7 +899,7 @@ fn accumulate_block_delta(state: &mut RuntimeState, delta: isize) {
         return;
     }
 
-    let limit = (state.blocks.len().max(1).min(500)) as isize;
+    let limit = (state.view.visible.len(&state.blocks).max(1).min(500)) as isize;
     state.input_accumulator.pending_block_delta = state
         .input_accumulator
         .pending_block_delta
@@ -862,7 +920,8 @@ fn flush_navigation_delta(state: &mut RuntimeState) -> bool {
 
 fn is_navigation_boundary_noop(state: &RuntimeState, delta: isize) -> bool {
     let pending = state.input_accumulator.pending_block_delta;
-    if state.blocks.is_empty() || pending.saturating_add(delta) != delta {
+    let len = state.view.visible.len(&state.blocks);
+    if len == 0 || pending.saturating_add(delta) != delta {
         return false;
     }
 
@@ -870,12 +929,13 @@ fn is_navigation_boundary_noop(state: &RuntimeState, delta: isize) -> bool {
         .view
         .block_viewport
         .selected_index
-        .min(state.blocks.len().saturating_sub(1));
-    (delta < 0 && selected == 0) || (delta > 0 && selected == state.blocks.len().saturating_sub(1))
+        .min(len.saturating_sub(1));
+    (delta < 0 && selected == 0) || (delta > 0 && selected == len.saturating_sub(1))
 }
 
 fn select_relative_block(state: &mut RuntimeState, delta: isize) -> bool {
-    if state.blocks.is_empty() {
+    let len = state.view.visible.len(&state.blocks);
+    if len == 0 {
         state.view.selected_block = None;
         state.view.block_viewport.selected_index = 0;
         state.view.block_viewport.scroll_offset = 0;
@@ -887,12 +947,12 @@ fn select_relative_block(state: &mut RuntimeState, delta: isize) -> bool {
         .view
         .block_viewport
         .selected_index
-        .min(state.blocks.len().saturating_sub(1));
+        .min(len.saturating_sub(1));
     let next = if delta.is_negative() {
         let magnitude = delta.checked_abs().unwrap_or(isize::MAX) as usize;
         current.saturating_sub(magnitude)
     } else {
-        (current + delta as usize).min(state.blocks.len().saturating_sub(1))
+        (current + delta as usize).min(len.saturating_sub(1))
     };
     if next == current {
         return false;
@@ -901,7 +961,7 @@ fn select_relative_block(state: &mut RuntimeState, delta: isize) -> bool {
     let old_anchor = state.view.block_viewport.anchor;
     let anchor = if state.config.block_view.auto_follow_on_reach_bottom
         && !delta.is_negative()
-        && next == state.blocks.len().saturating_sub(1)
+        && next == len.saturating_sub(1)
     {
         ViewAnchor::Tail
     } else {
@@ -922,7 +982,8 @@ fn sync_block_viewport_after_history_change(state: &mut RuntimeState) {
 }
 
 fn clamp_viewport_to_history(state: &mut RuntimeState) {
-    if state.blocks.is_empty() {
+    let len = state.view.visible.len(&state.blocks);
+    if len == 0 {
         state.view.selected_block = None;
         state.view.block_viewport.selected_index = 0;
         state.view.block_viewport.scroll_offset = 0;
@@ -930,13 +991,14 @@ fn clamp_viewport_to_history(state: &mut RuntimeState) {
         return;
     }
 
-    let last = state.blocks.len().saturating_sub(1);
+    let last = len.saturating_sub(1);
     let selected = state.view.block_viewport.selected_index.min(last);
     select_block_index(state, selected, state.view.block_viewport.anchor);
 }
 
 fn select_block_index(state: &mut RuntimeState, index: usize, anchor: ViewAnchor) {
-    if state.blocks.is_empty() {
+    let len = state.view.visible.len(&state.blocks);
+    if len == 0 {
         state.view.selected_block = None;
         state.view.block_viewport.selected_index = 0;
         state.view.block_viewport.scroll_offset = 0;
@@ -945,9 +1007,9 @@ fn select_block_index(state: &mut RuntimeState, index: usize, anchor: ViewAnchor
         return;
     }
 
-    let index = index.min(state.blocks.len().saturating_sub(1));
-    state.view.block_viewport.selected_index = index;
-    state.view.selected_block = state.blocks.block_id_at(index);
+    let idx = index.min(len.saturating_sub(1));
+    state.view.block_viewport.selected_index = idx;
+    state.view.selected_block = state.view.visible.block_at(&state.blocks, idx);
     // When in expanded mode, the expanded block follows the selection.
     if state.view.expanded_block.is_some() {
         state.view.expanded_block = state.view.selected_block;
@@ -968,7 +1030,8 @@ fn select_block_index(state: &mut RuntimeState, index: usize, anchor: ViewAnchor
 }
 
 fn select_tail_block(state: &mut RuntimeState) {
-    if state.blocks.is_empty() {
+    let len = state.view.visible.len(&state.blocks);
+    if len == 0 {
         state.view.selected_block = None;
         state.view.block_viewport.selected_index = 0;
         state.view.block_viewport.scroll_offset = 0;
@@ -977,9 +1040,9 @@ fn select_tail_block(state: &mut RuntimeState) {
         return;
     }
 
-    let last = state.blocks.len().saturating_sub(1);
+    let last = len.saturating_sub(1);
     state.view.block_viewport.selected_index = last;
-    state.view.selected_block = state.blocks.block_id_at(last);
+    state.view.selected_block = state.view.visible.block_at(&state.blocks, last);
     state.view.block_viewport.anchor = ViewAnchor::Tail;
     state.view.block_viewport.line_offset = compute_tail_scroll_offset(state);
     if state.view.expanded_block.is_some() {
@@ -1022,7 +1085,7 @@ fn detail_inner_height(state: &RuntimeState) -> usize {
 }
 
 fn ensure_selected_visible(state: &mut RuntimeState) {
-    if state.blocks.is_empty() {
+    if state.view.visible.is_empty(&state.blocks) {
         return;
     }
 
@@ -1032,6 +1095,7 @@ fn ensure_selected_visible(state: &mut RuntimeState) {
         &state.view,
         state.cols,
         &state.config.block_view,
+        None,
     );
     let content_height = content_height(state);
     let margin_lines = state.config.block_view.scroll_margin_lines;
@@ -1130,6 +1194,7 @@ mod tests {
             capture_suspended: false,
             rows: 24,
             cols: 80,
+            index: crate::index::BlockIndex::new(),
         }
     }
 
@@ -1159,6 +1224,7 @@ mod tests {
             &state.view,
             state.cols,
             &state.config.block_view,
+            None,
         );
         let Some(span) = layout.span_for_block_index(state.view.block_viewport.selected_index)
         else {
