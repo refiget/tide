@@ -120,6 +120,9 @@ pub struct RenderState {
     pub dirty: bool,
     pub force_render: bool,
     pub last_render_at: Instant,
+    /// Set true when leaving Block/Detail view so the input thread performs
+    /// terminal cleanup (leave alternate screen, reset SGR, show cursor).
+    pub needs_cleanup: bool,
 }
 
 impl Default for RenderState {
@@ -128,6 +131,7 @@ impl Default for RenderState {
             dirty: false,
             force_render: false,
             last_render_at: Instant::now(),
+            needs_cleanup: false,
         }
     }
 }

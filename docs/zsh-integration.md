@@ -49,6 +49,26 @@ add-zsh-hook preexec _tide_preexec
 add-zsh-hook precmd _tide_precmd
 ```
 
+## Prompt Redraw Widget
+
+Tide registers an internal prompt redraw widget for debugging and future use:
+
+```zsh
+_tide_redraw_prompt() {
+  zle reset-prompt
+  zle -R
+}
+zle -N _tide_redraw_prompt 2>/dev/null
+bindkey '^X^R' _tide_redraw_prompt 2>/dev/null
+```
+
+The widget is bound to `Ctrl-X Ctrl-R` (`^X^R`, an unusual sequence unlikely
+to conflict with user bindings).  It is **not** automatically triggered during
+normal operation — the alternate screen exit alone restores the main screen
+correctly.  Users and developers can invoke it manually for debugging.
+
+**This is an internal binding — do not depend on it in user configuration.**
+
 ## Rules
 
 - Do not output visible UI from zsh hooks.

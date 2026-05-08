@@ -3,8 +3,8 @@ use std::io::{self, Write};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     execute, queue,
-    style::{Attribute, Print, SetAttribute},
-    terminal::{Clear, ClearType},
+    style::{Attribute, Print, ResetColor, SetAttribute},
+    terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -17,6 +17,22 @@ use crate::{
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct Theme;
+
+/// Enter alternate screen and hide cursor for Block/Detail view rendering.
+pub fn enter_block_render<W: Write>(w: &mut W) -> io::Result<()> {
+    execute!(w, EnterAlternateScreen, Hide)
+}
+
+/// Leave alternate screen, reset SGR, and show cursor when returning to Plain view.
+///
+/// # Ordering
+///
+/// `LeaveAlternateScreen` MUST come first so that `ResetColor` and `Show` are
+/// applied on the *main* screen (the restored terminal state), not the alt
+/// screen that is about to be discarded.
+pub fn leave_block_render<W: Write>(w: &mut W) -> io::Result<()> {
+    execute!(w, LeaveAlternateScreen, ResetColor, Show)
+}
 
 pub fn render<W: Write>(
     w: &mut W,
@@ -31,7 +47,7 @@ pub fn render<W: Write>(
     let height = rows as usize;
     let start = viewport_start(visual_lines, view, height);
 
-    execute!(w, Hide, MoveTo(0, 0), Clear(ClearType::All))?;
+    queue!(w, MoveTo(0, 0), Clear(ClearType::All))?;
 
     for (row, line) in visual_lines.iter().skip(start).take(height).enumerate() {
         queue!(w, MoveTo(0, row as u16))?;

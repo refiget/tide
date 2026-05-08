@@ -101,6 +101,9 @@ pub fn run_shell(config: &Config) -> Result<()> {
     let output_running = Arc::clone(&running);
     let output_state = Arc::clone(&state);
     let output_stdout = Arc::clone(&stdout);
+    // Output thread: always locks (input_state) -> (input_stdout).
+    // Input / resize threads must avoid (input_stdout) -> (input_state)
+    // to prevent deadlock.
     let output_thread = thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
         let mut parser = Osc777Parser::default();
@@ -219,10 +222,26 @@ pub fn run_shell(config: &Config) -> Result<()> {
                         }
 
                         if byte == 0x02 {
-                            if let Ok(mut state) = input_state.lock() {
+                            if let Ok(state) = input_state.lock() {
                                 if matches!(state.view.view, ViewKind::Plain)
                                     && state.blocks.active_block_id().is_none()
                                 {
+                                    // --- Enter alternate screen for Block View ---
+                                    //
+                                    // Lock ordering: the output thread always locks
+                                    // (input_state) -> then (input_stdout).  To avoid
+                                    // deadlock we must NOT hold input_state while
+                                    // locking input_stdout here.
+                                    //
+                                    // 1. Drop the state guard first.
+                                    drop(state);
+                                    // 2. Lock stdout in isolation to enter alt screen.
+                                    if let Ok(mut stdout) = input_stdout.lock() {
+                                        let _ = renderer::enter_block_render(&mut *stdout);
+                                    }
+                                    // 3. Re-acquire state (stdout guard is already dropped).
+                                    let mut state =
+                                        input_state.lock().unwrap_or_else(|e| e.into_inner());
                                     enter_block_view(&mut state);
                                     drop(state);
                                     let _ = maybe_flush_navigation_and_render(
@@ -245,6 +264,41 @@ pub fn run_shell(config: &Config) -> Result<()> {
                     }
 
                     let _ = writer.flush();
+
+                    // Check if we need to leave Block/Detail view (alt screen exit + terminal reset).
+                    let needs_cleanup = input_state
+                        .lock()
+                        .map(|s| s.render_state.needs_cleanup)
+                        .unwrap_or(false);
+                    if needs_cleanup {
+                        // --- Leave alternate screen, restore main screen ---
+                        //
+                        // Lock ordering: the output thread locks (input_state) -> (input_stdout).
+                        // We must NOT hold input_state while locking input_stdout here.
+                        // The state lock below is released before we touch stdout.
+
+                        // Leave alternate screen, reset SGR, show cursor.
+                        // Order: LeaveAlternateScreen MUST come first so that
+                        // ResetColor/Show apply on the *main* screen.
+                        //
+                        // The alt screen exit alone restores the main screen to its
+                        // exact pre-Block-View state — no zle prompt redraw needed.
+                        if let Ok(mut stdout) = input_stdout.lock() {
+                            let _ = renderer::leave_block_render(&mut *stdout);
+                        }
+
+                        // Clear the cleanup flag so future renders proceed normally.
+                        if let Ok(mut state) = input_state.lock() {
+                            state.render_state.needs_cleanup = false;
+                            state.render_state.dirty = false;
+                            state.render_state.force_render = false;
+                        }
+
+                        // Do not render Plain view — the alt screen exit already
+                        // restored the main screen's state correctly.
+                        continue;
+                    }
+
                     let _ = maybe_flush_navigation_and_render(&input_state, &input_stdout, true);
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -431,6 +485,14 @@ fn maybe_flush_navigation_and_render(
 }
 
 fn flush_render_state(state: &mut RuntimeState) -> bool {
+    // Never render through the normal path when cleanup is pending.
+    // The cleanup handler leaves alt screen and triggers prompt redraw itself.
+    if state.render_state.needs_cleanup {
+        state.render_state.dirty = false;
+        state.render_state.force_render = false;
+        return false;
+    }
+
     let force_render = state.render_state.force_render;
     let changed = flush_navigation_delta(state);
     if !force_render && !changed && state.input_accumulator.pending_block_delta == 0 {
@@ -498,8 +560,12 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
         b'q' | b'\x1b' => {
             state.view = ViewState::default();
             state.input_accumulator.pending_block_delta = 0;
-            state.render_state.dirty = true;
-            state.render_state.force_render = true;
+            // Set cleanup flag: the input thread will leave alt screen
+            // and reset terminal state (SGR, cursor visibility).
+            // The main screen is restored by the alt screen exit itself.
+            // We do NOT set dirty/force_render here to avoid rendering
+            // Plain view on top of the restored main screen.
+            state.render_state.needs_cleanup = true;
             true
         }
         b'j' => {
@@ -852,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn block_to_plain_back_forces_render() {
+    fn block_to_plain_back_sets_cleanup_flag() {
         let mut state = runtime_state();
         add_block(&mut state, "echo one");
         enter_block_view(&mut state);
@@ -862,8 +928,9 @@ mod tests {
         assert!(handle_block_view_byte(b'q', &mut state));
 
         assert!(matches!(state.view.view, ViewKind::Plain));
-        assert!(state.render_state.dirty);
-        assert!(state.render_state.force_render);
+        assert!(!state.render_state.dirty);
+        assert!(!state.render_state.force_render);
+        assert!(state.render_state.needs_cleanup);
     }
 
     #[test]
