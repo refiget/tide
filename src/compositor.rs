@@ -694,28 +694,22 @@ fn footer_text(blocks: &BlockStore, view: &ViewState, flash_message: Option<&str
             + 1
     };
 
-    let mut tags = Vec::new();
-    if !view.filter.command_query.is_empty() {
-        tags.push(format!("\"{}\"", view.filter.command_query));
-    }
-    if view.filter.failed_only {
-        tags.push("failed".to_string());
-    }
-
-    let count = if view.filter.is_active() {
+    if view.filter.is_active() {
+        let mut tags: Vec<String> = Vec::new();
+        if !view.filter.command_query.is_empty() {
+            tags.push(format!("\"{}\"", view.filter.command_query));
+        }
+        if view.filter.failed_only {
+            tags.push("failed".to_string());
+        }
         let tag_str = tags.join(" \u{b7} ");
-        format!("#{current}/{visible_count} of {total_count} \u{b7} {tag_str}")
-    } else {
-        format!("#{current}/{total_count}")
-    };
 
-    let search_hint = if view.filter.is_active() {
-        " / new search"
+        format!(
+            "Block #{current}/{visible_count} of {total_count} \u{b7} {tag_str}  / edit  f off  j/k  i  q"
+        )
     } else {
-        " / search"
-    };
-
-    format!("Block {count}{search_hint} f filter  j/k move  Enter expand  i detail  g/G  q quit")
+        format!("Block #{current}/{total_count}  / search  f failed  j/k  Enter  i  g/G  q")
+    }
 }
 
 #[cfg(test)]
