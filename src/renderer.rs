@@ -183,22 +183,20 @@ fn render_line<W: Write>(
         VisualLine::DetailBodyLine {
             text, is_cursor, ..
         } => {
+            let content = with_margin(
+                &framed_text(
+                    text,
+                    block_width(width, block_view),
+                    block_view.body_padding,
+                ),
+                block_view,
+            );
             if *is_cursor {
                 queue!(w, SetAttribute(Attribute::Reverse))?;
-            }
-            queue!(
-                w,
-                Print(with_margin(
-                    &framed_text(
-                        text,
-                        block_width(width, block_view),
-                        block_view.body_padding
-                    ),
-                    block_view,
-                ))
-            )?;
-            if *is_cursor {
+                queue!(w, Print(pad_to_width(&content, width)))?;
                 queue!(w, SetAttribute(Attribute::Reset))?;
+            } else {
+                queue!(w, Print(content))?;
             }
         }
         VisualLine::Footer { text } => {
@@ -224,18 +222,16 @@ fn render_border<W: Write>(
         (false, false) => ('└', '┘'),
     };
 
+    let content = with_margin(
+        &titled_border(left, right, label, block_width(width, block_view)),
+        block_view,
+    );
     if selected {
         queue!(w, SetAttribute(Attribute::Reverse))?;
-    }
-    queue!(
-        w,
-        Print(with_margin(
-            &titled_border(left, right, label, block_width(width, block_view)),
-            block_view
-        ))
-    )?;
-    if selected {
+        queue!(w, Print(pad_to_width(&content, width)))?;
         queue!(w, SetAttribute(Attribute::Reset))?;
+    } else {
+        queue!(w, Print(content))?;
     }
 
     Ok(())
@@ -249,22 +245,20 @@ fn render_framed_text<W: Write>(
     _layout: &BlockLayoutConfig,
     block_view: &BlockViewConfig,
 ) -> io::Result<()> {
-    if selected && block_view.selected_body_reverse {
+    let content = with_margin(
+        &framed_text(
+            text,
+            block_width(width, block_view),
+            block_view.body_padding,
+        ),
+        block_view,
+    );
+    if selected {
         queue!(w, SetAttribute(Attribute::Reverse))?;
-    }
-    queue!(
-        w,
-        Print(with_margin(
-            &framed_text(
-                text,
-                block_width(width, block_view),
-                block_view.body_padding
-            ),
-            block_view
-        ))
-    )?;
-    if selected && block_view.selected_body_reverse {
+        queue!(w, Print(pad_to_width(&content, width)))?;
         queue!(w, SetAttribute(Attribute::Reset))?;
+    } else {
+        queue!(w, Print(content))?;
     }
 
     Ok(())
