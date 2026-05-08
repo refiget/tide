@@ -211,6 +211,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
                 Ok(0) => break,
                 Ok(n) => {
                     let mut index = 0;
+                    let mut pending_bytes: Vec<u8> = Vec::new();
                     while index < n {
                         let byte = buffer[index];
 
@@ -227,6 +228,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
                                 .map(|s| s.render_state.needs_cleanup)
                                 .unwrap_or(false)
                             {
+                                pending_bytes.extend_from_slice(&buffer[index..n]);
                                 break;
                             }
                             continue;
@@ -287,6 +289,13 @@ pub fn run_shell(config: &Config) -> Result<()> {
                             state.render_state.force_render = false;
                         }
 
+                        // Forward any bytes that followed the cleanup key in the same read
+                        // chunk. They belong to the restored Plain view (shell input).
+                        if !pending_bytes.is_empty() {
+                            let _ = writer.write_all(&pending_bytes);
+                            let _ = writer.flush();
+                        }
+
                         // The alt screen exit alone restored the main screen correctly.
                         // Do not render Plain view on top of it.
                         continue;
@@ -318,14 +327,19 @@ pub fn run_shell(config: &Config) -> Result<()> {
             if let Ok(master) = resize_master.lock() {
                 let _ = master.resize(size);
             }
-            if let Ok(mut state) = resize_state.lock() {
+            let should_render = if let Ok(mut state) = resize_state.lock() {
                 state.rows = size.rows;
                 state.cols = size.cols;
-            }
-            let should_render = resize_state
-                .lock()
-                .map(|state| !matches!(state.view.view, ViewKind::Plain))
-                .unwrap_or(false);
+                let not_plain = !matches!(state.view.view, ViewKind::Plain);
+                if not_plain {
+                    ensure_selected_visible(&mut state);
+                    state.render_state.dirty = true;
+                    state.render_state.force_render = true;
+                }
+                not_plain
+            } else {
+                false
+            };
             if should_render {
                 let _ = render_runtime(&resize_state, &resize_stdout);
             }
@@ -529,7 +543,7 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
             [] => None,
         },
         ViewKind::Detail => match bytes {
-            [b'q', ..] | [b'\x1b', ..] => {
+            [b'q', ..] | [b'\x1b'] => {
                 state.view.view = ViewKind::Blocks;
                 state.view.expanded_block = None;
                 if matches!(state.view.block_viewport.anchor, ViewAnchor::Tail) {
@@ -541,6 +555,7 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                 state.render_state.force_render = true;
                 Some(1)
             }
+            [b'\x1b', ..] => Some(bytes.len().min(3)),
             [_byte, ..] => Some(1),
             [] => None,
         },
@@ -1064,6 +1079,102 @@ mod tests {
         assert!(!state.render_state.dirty);
         assert!(!state.render_state.force_render);
         assert!(!flush_render_state(&mut state));
+    }
+
+    #[test]
+    fn resize_clamps_line_offset_to_keep_selected_visible() {
+        let mut state = runtime_state();
+        state.rows = 30;
+        add_block_with_lines(
+            &mut state,
+            "tall",
+            &["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
+        );
+        add_block(&mut state, "b");
+        add_block(&mut state, "c");
+        enter_block_view(&mut state);
+
+        select_block_index(&mut state, 0, ViewAnchor::Manual);
+        assert!(selected_span_is_fully_visible(&state));
+
+        // Simulate resize to a much smaller terminal
+        state.rows = 10;
+        ensure_selected_visible(&mut state);
+        assert!(selected_span_is_fully_visible(&state));
+    }
+
+    #[test]
+    fn detail_esc_sequences_consumed_but_not_exited() {
+        let state = Arc::new(Mutex::new(runtime_state()));
+        {
+            let mut s = state.lock().unwrap();
+            add_block(&mut s, "echo one");
+            enter_block_view(&mut s);
+            s.view.view = ViewKind::Detail;
+            s.view.expanded_block = s.view.selected_block;
+        }
+
+        for seq in [b"\x1b[A", b"\x1b[B", b"\x1b[C", b"\x1b[D"] {
+            {
+                let mut s = state.lock().unwrap();
+                s.view.view = ViewKind::Detail;
+                s.view.expanded_block = s.view.selected_block;
+                s.render_state.needs_cleanup = false;
+            }
+            assert_eq!(
+                handle_view_key_sequence(seq, &state),
+                Some(3),
+                "sequence {:?} should be consumed",
+                seq
+            );
+            let s = state.lock().unwrap();
+            assert!(
+                matches!(s.view.view, ViewKind::Detail),
+                "sequence {:?} should not exit Detail",
+                seq
+            );
+            assert!(!s.render_state.needs_cleanup);
+        }
+
+        {
+            let mut s = state.lock().unwrap();
+            s.view.view = ViewKind::Detail;
+            s.view.expanded_block = s.view.selected_block;
+            s.render_state.needs_cleanup = false;
+        }
+        assert_eq!(handle_view_key_sequence(b"\x1b", &state), Some(1));
+        let s = state.lock().unwrap();
+        assert!(matches!(s.view.view, ViewKind::Blocks));
+    }
+
+    #[test]
+    fn remaining_bytes_after_cleanup_are_preserved() {
+        let state = Arc::new(Mutex::new(runtime_state()));
+        {
+            let mut s = state.lock().unwrap();
+            add_block(&mut s, "echo one");
+            enter_block_view(&mut s);
+        }
+
+        // Simulate the input loop receiving "q\n" in one chunk.
+        let buffer = b"q\n";
+        let mut index = 0;
+        let mut pending_bytes = Vec::new();
+
+        if let Some(consumed) = handle_view_key_sequence(&buffer[index..], &state) {
+            index += consumed;
+            let needs_cleanup = state
+                .lock()
+                .map(|s| s.render_state.needs_cleanup)
+                .unwrap_or(false);
+            if needs_cleanup {
+                pending_bytes.extend_from_slice(&buffer[index..]);
+            }
+        }
+
+        // 'q' consumed 1 byte, leaving "\n" as pending for PTY forwarding after cleanup.
+        assert_eq!(pending_bytes, b"\n");
+        assert!(state.lock().unwrap().render_state.needs_cleanup);
     }
 }
 

@@ -63,6 +63,7 @@ impl BlockStore {
                 exit_code: None,
                 output_raw: Vec::new(),
                 output_text: String::new(),
+                output_truncated: false,
                 kind,
                 status: BlockStatus::Running,
                 git_context: None,
@@ -88,11 +89,15 @@ impl BlockStore {
             .max_output_bytes_per_block
             .saturating_sub(block.output_raw.len());
         if remaining == 0 {
+            block.output_truncated = true;
             return;
         }
 
         let to_append = remaining.min(bytes.len());
         block.output_raw.extend_from_slice(&bytes[..to_append]);
+        if to_append < bytes.len() {
+            block.output_truncated = true;
+        }
     }
 
     pub fn finish_command(&mut self, exit_code: i32, end_line: usize) {
@@ -245,5 +250,20 @@ mod tests {
         }
 
         assert_eq!(store.blocks_oldest_first().len(), 12);
+    }
+
+    #[test]
+    fn block_marks_truncated_when_limit_reached() {
+        let mut store = BlockStore::new(PathBuf::from("/tmp"), None, 10);
+        let id = store.start_command("echo hi".to_string(), 0, BlockKind::NormalCommand);
+
+        store.append_output(b"1234567890");
+        assert!(!store.block(id).unwrap().output_truncated);
+
+        store.append_output(b"extra");
+        assert!(store.block(id).unwrap().output_truncated);
+
+        store.finish_command(0, 0);
+        assert!(store.block(id).unwrap().output_truncated);
     }
 }

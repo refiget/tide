@@ -439,6 +439,11 @@ fn detail_lines(block: &CommandBlock, selected: bool) -> Vec<VisualLine> {
         String::new(),
     ];
 
+    if block.output_truncated {
+        lines.push("capture: output was truncated".to_string());
+        lines.push(String::new());
+    }
+
     if block.kind == BlockKind::RawProgram {
         lines.extend([
             "type: interactive program".to_string(),
@@ -477,9 +482,15 @@ fn bottom_label(block: &CommandBlock) -> String {
     } else {
         status
     };
+    let truncated = if block.output_truncated {
+        " · truncated"
+    } else {
+        ""
+    };
     format!(
-        "{status} · {exit} · {}",
-        format_duration_ms(block.duration_ms)
+        "{status} · {exit} · {}{}",
+        format_duration_ms(block.duration_ms),
+        truncated
     )
 }
 
@@ -927,5 +938,29 @@ mod tests {
         let padding = count_top_padding(&tail_visible);
         assert!(padding > 0);
         assert_eq!(padding, 20 - layout.total_height);
+    }
+
+    #[test]
+    fn truncated_hint_appears_in_bottom_label_and_detail() {
+        let (mut shell, mut store, mut view, config) = fixture();
+        let id = add_block(&mut shell, &mut store, "long", &["1", "2", "3"]);
+        if let Some(block) = store.block_mut(id) {
+            block.output_truncated = true;
+        }
+        tail_view(&mut view, &store);
+
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        assert!(layout.lines.iter().any(|line| matches!(
+            line,
+            VisualLine::BlockBottomBorder { label, .. } if label.contains("truncated")
+        )));
+
+        view.view = ViewKind::Detail;
+        view.expanded_block = Some(id);
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        assert!(layout.lines.iter().any(|line| matches!(
+            line,
+            VisualLine::BlockDetailLine { text, .. } if text.contains("truncated")
+        )));
     }
 }

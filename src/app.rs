@@ -207,6 +207,7 @@ pub struct CommandBlock {
     pub suggestions: Vec<SuggestedAction>,
     pub start_line: usize,
     pub end_line: usize,
+    pub output_truncated: bool,
 }
 
 pub type ExecutionBlock = CommandBlock;
