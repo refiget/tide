@@ -413,7 +413,11 @@ fn maybe_flush_navigation_and_render(
         let mut state = state
             .lock()
             .map_err(|_| io::Error::other("runtime state lock poisoned"))?;
-        flush_navigation_delta(&mut state);
+        let changed = flush_navigation_delta(&mut state);
+        if !changed && state.input_accumulator.pending_block_delta == 0 {
+            state.render_state.dirty = false;
+            return Ok(());
+        }
         state.render_state.dirty = false;
         state.render_state.last_render_at = Instant::now();
     }
@@ -502,6 +506,10 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
 }
 
 fn accumulate_block_delta(state: &mut RuntimeState, delta: isize) {
+    if is_navigation_boundary_noop(state, delta) {
+        return;
+    }
+
     state.input_accumulator.pending_block_delta = state
         .input_accumulator
         .pending_block_delta
@@ -510,21 +518,35 @@ fn accumulate_block_delta(state: &mut RuntimeState, delta: isize) {
     state.render_state.dirty = true;
 }
 
-fn flush_navigation_delta(state: &mut RuntimeState) {
+fn flush_navigation_delta(state: &mut RuntimeState) -> bool {
     let delta = state.input_accumulator.pending_block_delta;
-    if delta == 0 {
-        return;
-    }
     state.input_accumulator.pending_block_delta = 0;
-    select_relative_block(state, delta);
+    if delta == 0 {
+        return false;
+    }
+    select_relative_block(state, delta)
 }
 
-fn select_relative_block(state: &mut RuntimeState, delta: isize) {
+fn is_navigation_boundary_noop(state: &RuntimeState, delta: isize) -> bool {
+    let pending = state.input_accumulator.pending_block_delta;
+    if state.blocks.is_empty() || pending.saturating_add(delta) != delta {
+        return false;
+    }
+
+    let selected = state
+        .view
+        .block_viewport
+        .selected_index
+        .min(state.blocks.len().saturating_sub(1));
+    (delta < 0 && selected == 0) || (delta > 0 && selected == state.blocks.len().saturating_sub(1))
+}
+
+fn select_relative_block(state: &mut RuntimeState, delta: isize) -> bool {
     if state.blocks.is_empty() {
         state.view.selected_block = None;
         state.view.block_viewport.selected_index = 0;
         state.view.block_viewport.scroll_offset = 0;
-        return;
+        return false;
     }
 
     let current = state
@@ -537,12 +559,20 @@ fn select_relative_block(state: &mut RuntimeState, delta: isize) {
     } else {
         (current + delta as usize).min(state.blocks.len().saturating_sub(1))
     };
+    if next == current {
+        return false;
+    }
+    let old_scroll = state.view.block_viewport.scroll_offset;
+    let old_anchor = state.view.block_viewport.anchor;
     let anchor = if !delta.is_negative() && next == state.blocks.len().saturating_sub(1) {
         ViewAnchor::Tail
     } else {
         ViewAnchor::Manual
     };
     select_block_index(state, next, anchor);
+    state.view.block_viewport.selected_index != current
+        || state.view.block_viewport.scroll_offset != old_scroll
+        || state.view.block_viewport.anchor != old_anchor
 }
 
 fn sync_block_viewport_after_history_change(state: &mut RuntimeState) {
