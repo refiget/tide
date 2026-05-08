@@ -282,17 +282,27 @@ pub fn run_shell(config: &Config) -> Result<()> {
                             let _ = renderer::leave_block_render(&mut *stdout);
                         }
 
-                        // Clear cleanup flags (state lock isolated, no stdout lock held).
-                        if let Ok(mut state) = input_state.lock() {
+                        // Clear cleanup flags and extract pending_paste (state lock isolated,
+                        // no stdout lock held).
+                        let paste = if let Ok(mut state) = input_state.lock() {
                             state.render_state.needs_cleanup = false;
                             state.render_state.dirty = false;
                             state.render_state.force_render = false;
-                        }
+                            state.render_state.pending_paste.take()
+                        } else {
+                            None
+                        };
 
                         // Forward any bytes that followed the cleanup key in the same read
                         // chunk. They belong to the restored Plain view (shell input).
                         if !pending_bytes.is_empty() {
                             let _ = writer.write_all(&pending_bytes);
+                            let _ = writer.flush();
+                        }
+
+                        // Write pending paste (rerun command) after alt screen is gone.
+                        if let Some(cmd) = paste {
+                            let _ = writer.write_all(cmd.as_bytes());
                             let _ = writer.flush();
                         }
 
@@ -711,6 +721,20 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                 state.render_state.force_render = true;
                 Some(1)
             }
+            [b'r', ..] => {
+                let command = state
+                    .view
+                    .expanded_block
+                    .and_then(|id| state.blocks.block(id))
+                    .map(|b| b.command.clone())
+                    .unwrap_or_default();
+                if !command.is_empty() {
+                    state.view = ViewState::default();
+                    state.render_state.needs_cleanup = true;
+                    state.render_state.pending_paste = Some(command);
+                }
+                Some(1)
+            }
             [b'q', ..] | [b'\x1b'] => {
                 state.view.view = ViewKind::Blocks;
                 state.view.expanded_block = None;
@@ -782,6 +806,21 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
         }
         b'Y' => {
             perform_block_action(state, BlockAction::CopyCommand);
+            true
+        }
+        b'r' => {
+            let command = state
+                .view
+                .selected_block
+                .and_then(|id| state.blocks.block(id))
+                .map(|b| b.command.clone())
+                .unwrap_or_default();
+            if !command.is_empty() {
+                state.view = ViewState::default();
+                state.input_accumulator.pending_block_delta = 0;
+                state.render_state.needs_cleanup = true;
+                state.render_state.pending_paste = Some(command);
+            }
             true
         }
         _ => true,

@@ -68,6 +68,9 @@ pub struct ViewState {
     pub expanded_block: Option<BlockId>,
     pub scroll_offset: usize,
     pub block_viewport: BlockViewport,
+    /// Scroll offset for the full-screen Detail View pager (number of
+    /// output lines scrolled past the top). Reset to 0 on each Enter.
+    pub detail_scroll_offset: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +97,7 @@ impl Default for ViewState {
             expanded_block: None,
             scroll_offset: 0,
             block_viewport: BlockViewport::default(),
+            detail_scroll_offset: 0,
         }
     }
 }
@@ -129,6 +133,9 @@ pub struct RenderState {
     /// Number of rows rendered in the previous frame, used to clear stale
     /// tail lines when the new frame is shorter than the previous one.
     pub last_rendered_rows: usize,
+    /// Command text pending paste to PTY after alt-screen cleanup (Rerun).
+    /// Set by the r key handler, consumed by the cleanup handler.
+    pub pending_paste: Option<String>,
 }
 
 impl Default for RenderState {
@@ -140,6 +147,7 @@ impl Default for RenderState {
             needs_cleanup: false,
             flash_message: None,
             last_rendered_rows: 0,
+            pending_paste: None,
         }
     }
 }
