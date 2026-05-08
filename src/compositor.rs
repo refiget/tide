@@ -268,8 +268,7 @@ impl Compositor {
             });
         } else {
             let all_body_lines = &shell_lines[body_start..=body_end];
-            let expanded =
-                matches!(view.view, ViewKind::Detail) && view.expanded_block == Some(block_id);
+            let expanded = view.expanded_block == Some(block_id);
             let shown = if expanded {
                 all_body_lines.len()
             } else {
@@ -295,7 +294,7 @@ impl Compositor {
             }
         }
 
-        if matches!(view.view, ViewKind::Detail) && view.expanded_block == Some(block_id) {
+        if view.expanded_block == Some(block_id) {
             lines.extend(detail_lines(block, selected));
         }
 

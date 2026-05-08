@@ -773,13 +773,16 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
         }
         b'\r' | b'\n' => {
             flush_navigation_delta(state);
-            state.view.expanded_block = state.view.selected_block;
-            state.view.view = ViewKind::Detail;
-            if matches!(state.view.block_viewport.anchor, ViewAnchor::Tail) {
-                state.view.block_viewport.line_offset = compute_tail_scroll_offset(state);
+            let selected = state.view.selected_block;
+            if state.view.expanded_block == selected && selected.is_some() {
+                // Already expanded → collapse.
+                state.view.expanded_block = None;
             } else {
-                ensure_selected_visible(state);
+                // Not expanded → expand.
+                state.view.expanded_block = selected;
             }
+            // Stay in Block View — no ViewKind change.
+            ensure_selected_visible(state);
             state.render_state.dirty = true;
             state.render_state.force_render = true;
             true
