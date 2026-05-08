@@ -192,6 +192,14 @@ pub struct BlockViewConfig {
     pub scroll_margin_blocks: usize,
     #[serde(default)]
     pub auto_follow_on_reach_bottom: bool,
+    #[serde(default = "default_horizontal_margin")]
+    pub horizontal_margin: usize,
+    #[serde(default = "default_body_padding")]
+    pub body_padding: usize,
+    #[serde(default = "default_show_footer")]
+    pub show_footer: bool,
+    #[serde(default)]
+    pub selected_body_reverse: bool,
 }
 
 impl Default for BlockViewConfig {
@@ -203,6 +211,10 @@ impl Default for BlockViewConfig {
             block_gap: default_block_gap(),
             scroll_margin_blocks: default_scroll_margin_blocks(),
             auto_follow_on_reach_bottom: false,
+            horizontal_margin: default_horizontal_margin(),
+            body_padding: default_body_padding(),
+            show_footer: default_show_footer(),
+            selected_body_reverse: false,
         }
     }
 }
@@ -278,7 +290,7 @@ fn default_history_max_blocks() -> Option<usize> {
 }
 
 fn default_preview_lines() -> usize {
-    6
+    4
 }
 
 fn default_expanded_lines() -> usize {
@@ -295,6 +307,18 @@ fn default_block_gap() -> usize {
 
 fn default_scroll_margin_blocks() -> usize {
     2
+}
+
+fn default_horizontal_margin() -> usize {
+    1
+}
+
+fn default_body_padding() -> usize {
+    1
+}
+
+fn default_show_footer() -> bool {
+    true
 }
 
 fn default_max_output_bytes_per_block() -> usize {
@@ -327,12 +351,16 @@ mod tests {
 
         assert_eq!(runtime.block_layout.horizontal_padding, 1);
         assert!(runtime.block_layout.show_padding_in_plain);
-        assert_eq!(runtime.block_view.preview_lines, 6);
+        assert_eq!(runtime.block_view.preview_lines, 4);
         assert_eq!(runtime.block_view.expanded_lines, 30);
         assert!(runtime.block_view.follow_tail);
         assert_eq!(runtime.block_view.block_gap, 0);
         assert_eq!(runtime.block_view.scroll_margin_blocks, 2);
         assert!(!runtime.block_view.auto_follow_on_reach_bottom);
+        assert_eq!(runtime.block_view.horizontal_margin, 1);
+        assert_eq!(runtime.block_view.body_padding, 1);
+        assert!(runtime.block_view.show_footer);
+        assert!(!runtime.block_view.selected_body_reverse);
         assert_eq!(runtime.max_blocks, Some(1000));
     }
 

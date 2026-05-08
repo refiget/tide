@@ -17,12 +17,16 @@ persist_session = false
 max_blocks = 1000
 
 [block_view]
-preview_lines = 6
+preview_lines = 4
 expanded_lines = 30
 follow_tail = true
 block_gap = 0
 scroll_margin_blocks = 2
 auto_follow_on_reach_bottom = false
+horizontal_margin = 1
+body_padding = 1
+show_footer = true
+selected_body_reverse = false
 
 [block_layout]
 horizontal_padding = 1

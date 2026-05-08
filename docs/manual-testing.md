@@ -227,8 +227,10 @@ printf 'line 1\nline 2\n'
 - 不进入独立列表页或弹窗。
 - 同一份 shell 历史被重新渲染，并在命令输出范围前后插入 block top/bottom metadata line。
 - 每条命令显示 block id、command、status、exit code、duration。
-- `false` 应显示为失败状态。
-- 当前选中 block 使用高亮边框或不同边框字符显示。
+- `false` 应显示为失败状态，top border 有 `✗`，bottom metadata 显示 `failed · <exit> · <duration>`。
+- 当前选中 block 使用 `╭╮╰╯` 或高亮边框显示，但 body 文本不应整块反色。
+- block 左右有外边距，右边框对齐，不贴终端边缘。
+- 底部显示简短 footer：`j/k move  Enter detail  g/G top/bottom  q quit`。
 
 ### 2. Block View 选择
 

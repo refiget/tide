@@ -349,7 +349,7 @@ fn render_runtime(
     state: &Arc<Mutex<RuntimeState>>,
     stdout: &Arc<Mutex<io::Stdout>>,
 ) -> io::Result<()> {
-    let (visual_lines, view, cursor, layout, rows, cols) = {
+    let (visual_lines, view, cursor, layout, block_view, rows, cols) = {
         let state = state
             .lock()
             .map_err(|_| io::Error::other("runtime state lock poisoned"))?;
@@ -367,6 +367,7 @@ fn render_runtime(
             state.view.clone(),
             state.shell.cursor_position(),
             state.config.block_layout.clone(),
+            state.config.block_view.clone(),
             state.rows,
             state.cols,
         )
@@ -381,6 +382,7 @@ fn render_runtime(
         &view,
         Some(cursor),
         &layout,
+        &block_view,
         rows,
         cols,
     )

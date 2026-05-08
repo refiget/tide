@@ -32,6 +32,9 @@ pub enum VisualLine {
         text: String,
         selected: bool,
     },
+    Footer {
+        text: String,
+    },
 }
 
 pub struct Compositor;
@@ -79,8 +82,15 @@ impl Compositor {
         let shell_lines = shell.snapshot();
         let mut visual_lines = Vec::new();
         let height = height as usize;
-        let range =
-            Self::compute_visible_range_from_lines(&shell_lines, blocks, view, height, block_view);
+        let footer_height = usize::from(block_view.show_footer);
+        let content_height = height.saturating_sub(footer_height);
+        let range = Self::compute_visible_range_from_lines(
+            &shell_lines,
+            blocks,
+            view,
+            content_height,
+            block_view,
+        );
 
         for index in range.start..=range.end {
             let Some(block_id) = blocks.block_id_at(index) else {
@@ -100,20 +110,25 @@ impl Compositor {
             visual_lines.extend(block_lines);
         }
 
-        if visual_lines.len() > height {
-            visual_lines.truncate(height);
+        if visual_lines.len() > content_height {
+            visual_lines.truncate(content_height);
         }
 
         if range.top_padding_lines > 0 {
-            let mut bottom_aligned = Vec::with_capacity(height);
+            let mut bottom_aligned = Vec::with_capacity(content_height);
             bottom_aligned.extend(std::iter::repeat_n(
                 VisualLine::Empty,
                 range.top_padding_lines,
             ));
             bottom_aligned.extend(visual_lines);
-            return bottom_aligned;
+            visual_lines = bottom_aligned;
         }
 
+        if block_view.show_footer {
+            visual_lines.push(VisualLine::Footer {
+                text: footer_text(blocks, view),
+            });
+        }
         visual_lines
     }
 
@@ -129,7 +144,7 @@ impl Compositor {
         lines.push(VisualLine::BlockTopBorder {
             block_id,
             selected,
-            label: format!("#{} · {}", block.id, block.command),
+            label: top_label(block),
         });
 
         let body_start = block.start_line.min(shell_lines.len());
@@ -172,7 +187,7 @@ impl Compositor {
                 let text = if expanded {
                     format!("... {remaining} more lines")
                 } else {
-                    format!("... {remaining} more lines, press Enter to expand")
+                    format!("... {remaining} more lines, Enter to expand")
                 };
                 lines.push(VisualLine::BlockBodyLine {
                     text,
@@ -207,6 +222,7 @@ impl Compositor {
         block_view: &BlockViewConfig,
     ) -> VisibleBlockRange {
         let shell_lines = shell.snapshot();
+        let height = height.saturating_sub(usize::from(block_view.show_footer));
         Self::compute_visible_range_from_lines(&shell_lines, blocks, view, height, block_view)
     }
 
@@ -275,6 +291,7 @@ impl Compositor {
         block_view: &BlockViewConfig,
     ) -> usize {
         let shell_lines = shell.snapshot();
+        let height = height.saturating_sub(usize::from(block_view.show_footer));
         let mut used_height = 0_usize;
         let mut offset = blocks.len();
 
@@ -312,6 +329,7 @@ impl Compositor {
         block_view: &BlockViewConfig,
     ) -> usize {
         let shell_lines = shell.snapshot();
+        let height = height.saturating_sub(usize::from(block_view.show_footer));
         let mut used_height = 0_usize;
         let mut offset = selected_index.saturating_add(1).min(blocks.len());
 
@@ -352,6 +370,15 @@ impl Compositor {
         // by block_id, width, view mode, expanded state, and config.
         Self::build_one_block_lines(shell_lines, block, view, block_view, selected).len()
     }
+}
+
+fn top_label(block: &CommandBlock) -> String {
+    let marker = match block.status {
+        crate::app::BlockStatus::Failed => "  ✗",
+        crate::app::BlockStatus::Running => "  …",
+        _ => "",
+    };
+    format!("#{}  {}{}", block.id, block.command, marker)
 }
 
 fn detail_lines(block: &CommandBlock, selected: bool) -> Vec<VisualLine> {
@@ -412,11 +439,28 @@ fn bottom_label(block: &CommandBlock) -> String {
         .map(|code| code.to_string())
         .unwrap_or_else(|| "-".to_string());
 
+    let status = if block.kind == BlockKind::RawProgram {
+        "raw"
+    } else {
+        status
+    };
     format!(
-        "#{} · {status} · exit {exit} · {}",
-        block.id,
+        "{status} · {exit} · {}",
         format_duration_ms(block.duration_ms)
     )
+}
+
+fn footer_text(blocks: &BlockStore, view: &ViewState) -> String {
+    let total = blocks.len();
+    let current = if total == 0 {
+        0
+    } else {
+        view.block_viewport
+            .selected_index
+            .min(total.saturating_sub(1))
+            + 1
+    };
+    format!("Block #{current}/{total}  j/k move  Enter detail  g/G top/bottom  q quit")
 }
 
 #[cfg(test)]
@@ -509,7 +553,13 @@ mod tests {
         assert_eq!(
             range.top_padding_lines
                 + rendered_block_lines(shell, store, view, config, range.start, range.end),
-            visual.len()
+            visual.len() - usize::from(config.show_footer)
+        );
+        assert_eq!(
+            visual.len(),
+            range.top_padding_lines
+                + rendered_block_lines(shell, store, view, config, range.start, range.end)
+                + usize::from(config.show_footer)
         );
     }
 
@@ -561,7 +611,7 @@ mod tests {
 
         assert_eq!(range.start, 0);
         assert_eq!(range.end, 0);
-        assert_eq!(range.top_padding_lines, 10);
+        assert_eq!(range.top_padding_lines, 9);
         assert_eq!(visual.len(), 10);
     }
 

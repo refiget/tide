@@ -439,6 +439,10 @@ pub struct BlockViewConfig {
     pub block_gap: usize,
     pub scroll_margin_blocks: usize,
     pub auto_follow_on_reach_bottom: bool,
+    pub horizontal_margin: usize,
+    pub body_padding: usize,
+    pub show_footer: bool,
+    pub selected_body_reverse: bool,
 }
 
 pub struct BlockLayoutConfig {
@@ -454,12 +458,16 @@ If no config file exists, defaults are used.
 Defaults:
 
 - `history.max_blocks = 1000`
-- `block_view.preview_lines = 6`
+- `block_view.preview_lines = 4`
 - `block_view.expanded_lines = 30`
 - `block_view.follow_tail = true`
 - `block_view.block_gap = 0`
 - `block_view.scroll_margin_blocks = 2`
 - `block_view.auto_follow_on_reach_bottom = false`
+- `block_view.horizontal_margin = 1`
+- `block_view.body_padding = 1`
+- `block_view.show_footer = true`
+- `block_view.selected_body_reverse = false`
 - `block_layout.horizontal_padding = 1`
 - `block_layout.show_padding_in_plain = true`
 

@@ -31,12 +31,16 @@ Block View has its own viewport and preview limits:
 
 ```toml
 [block_view]
-preview_lines = 6
+preview_lines = 4
 expanded_lines = 30
 follow_tail = true
 block_gap = 0
 scroll_margin_blocks = 2
 auto_follow_on_reach_bottom = false
+horizontal_margin = 1
+body_padding = 1
+show_footer = true
+selected_body_reverse = false
 ```
 
 - `preview_lines` limits body lines for collapsed blocks.
@@ -45,6 +49,10 @@ auto_follow_on_reach_bottom = false
 - `block_gap` inserts blank visual lines between blocks in Block View.
 - `scroll_margin_blocks` keeps a small block margin around the selected block during keyboard navigation.
 - `auto_follow_on_reach_bottom` controls whether pressing `j` onto the newest block re-enters Tail anchor.
+- `horizontal_margin` keeps block borders away from terminal edges.
+- `body_padding` controls inner body padding.
+- `show_footer` displays Block View shortcuts on the last line.
+- `selected_body_reverse` is false by default so selected output remains readable.
 
 ## Block Layout
 

@@ -123,6 +123,10 @@ Block View overlays block metadata on the same shell history.
 - `BlockViewConfig.block_gap` controls blank visual lines between blocks.
 - `BlockViewConfig.scroll_margin_blocks` keeps navigation from pinning the selected block to the edge.
 - `BlockViewConfig.auto_follow_on_reach_bottom` controls whether pressing `j` onto the newest block re-enters Tail anchor (default `false`).
+- `BlockViewConfig.horizontal_margin` keeps borders away from terminal edges.
+- `BlockViewConfig.body_padding` controls inner body padding.
+- `BlockViewConfig.show_footer` reserves a compact shortcut footer.
+- `BlockViewConfig.selected_body_reverse` should stay `false` by default so selected output remains readable.
 
 For each block:
 
@@ -132,24 +136,25 @@ insert VisualLine::BlockBodyLine values for lines belonging to the block
 insert VisualLine::BlockBottomBorder
 ```
 
-The top border should show at least:
+The top border should stay compact:
 
 - block id
 - command
+- failed marker `✗` when applicable
+- running marker `…` when applicable
 
-The bottom border should show at least:
+The bottom border should stay compact:
 
-- block id
 - status
 - exit code
 - duration
 
-The selected block should be visibly highlighted. Do not rely only on color; using a distinct border shape such as `╭ ╮ ╰ ╯` is acceptable.
+The selected block should be visibly highlighted without reversing the whole body. Use `╭ ╮ ╰ ╯` and border/label emphasis; keep body text normally readable.
 
 Collapsed blocks show at most `preview_lines` body lines. If more output exists, append:
 
 ```text
-... N more lines, press Enter to expand
+... N more lines, Enter to expand
 ```
 
 ## Detail View Generation
