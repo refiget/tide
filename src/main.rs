@@ -1,10 +1,11 @@
 mod app;
 mod block;
+mod buffer;
+mod compositor;
 mod config;
 mod pty;
 mod renderer;
 mod shell_hooks;
-mod ui;
 
 use anyhow::Result;
 use tracing::debug;

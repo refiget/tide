@@ -199,9 +199,9 @@ stty sane
 
 这些都是 Milestone 1 的预期限制，不应当视为测试失败。
 
-## Block Mode 雏形：最近 10 条 Block
+## Layered Block Renderer 雏形
 
-目标：Tide 默认保持透明 shell。用户显式按 `Ctrl-X Ctrl-B` 后，进入 alternate-screen Block Mode，浏览当前 Tide session 最近 10 条命令 block。
+目标：Tide 默认显示 Plain View，只渲染 shell 文本层。用户显式按 `Ctrl-B` 后，在同一份 shell 历史上叠加 Block Metadata Layer；按 `Enter` 可内联展开当前 block 的 Detail 信息。
 
 ### 1. 捕获普通命令
 
@@ -220,34 +220,53 @@ false
 printf 'line 1\nline 2\n'
 ```
 
-然后按 `Ctrl-X Ctrl-B`。
+然后按 `Ctrl-B`。
 
 预期：
 
-- 进入一个线框包裹的 `Tide Blocks` 页面。
-- 能看到刚才执行过的命令。
-- 最近执行的命令显示在列表上方。
+- 不进入独立列表页或弹窗。
+- 同一份 shell 历史被重新渲染，并在命令输出范围前后插入 block top/bottom metadata line。
+- 每条命令显示 block id、command、status、exit code、duration。
 - `false` 应显示为失败状态。
-- 选中 block 后，下方能看到 command、cwd、exit、duration 和 output。
+- 当前选中 block 使用高亮边框或不同边框字符显示。
 
-### 2. Block Mode 选择
+### 2. Block View 选择
 
-在 Block Mode 内按：
+在 Block View 内按：
 
 ```text
 j
 k
+Down
+Up
 ```
 
 预期：
 
 - `j` 选择下一条 block。
 - `k` 选择上一条 block。
-- 选中项变化后，下方详情同步变化。
+- 上下方向键也可移动选中 block。
+- 选中 block 的 top/bottom metadata line 高亮变化。
+- 选中屏幕外的历史 block 时，视口应跟随选中项移动，类似 tmux copy-mode 的历史浏览体验。
 
-### 3. 返回透明 shell
+### 3. Detail View 内联展开
 
-在 Block Mode 内按：
+在 Block View 内按：
+
+```text
+Enter
+```
+
+预期：
+
+- 不出现弹窗。
+- 当前选中 block 的输出之后、bottom metadata line 之前插入 Detail 信息。
+- Detail 信息包含 command、cwd、exit code、duration、status、stdout/stderr 摘要和 actions。
+- 按 `q` 或 `Esc` 返回 Block View。
+
+### 4. 返回 Plain View
+
+在 Block View 内按：
 
 ```text
 Esc
@@ -261,13 +280,13 @@ q
 
 预期：
 
-- 退出 alternate screen。
-- 回到原来的 zsh shell 画面。
+- 回到 Plain View。
+- 屏幕只显示 shell 文本层，不显示 block metadata line。
 - shell 仍然可继续输入命令。
 
-### 4. 最近 10 条限制
+### 5. 历史保留和 viewport
 
-在 Tide 内连续运行 12 条简单命令：
+在 Tide 内连续运行多条简单命令：
 
 ```sh
 echo 1
@@ -284,37 +303,48 @@ echo 11
 echo 12
 ```
 
-然后按 `Ctrl-X Ctrl-B`。
+然后按 `Ctrl-B`。
 
 预期：
 
-- Block Mode 中最多显示最近 10 条 block。
-- 最旧的 `echo 1` 和 `echo 2` 不再保留。
-- `echo 12` 应在列表最上方。
+- BlockStore 不应固定只保留 10 条。
+- 屏幕只显示当前 viewport 能容纳的 block。
+- `j` / Down 和 `k` / Up 可以移动 selected block，并带动 viewport 滚动。
+- `G` 跳到最后一个 block，并恢复 follow-tail。
+- `g` 跳到第一个 block，并关闭 follow-tail。
+- 少量 block 总高度小于屏幕高度时，应底部对齐，顶部留空。
+- 大量 block 超出屏幕高度时，应默认显示最新可见 blocks，最后一个 block 靠近底部。
+- 未展开 block 最多显示 `preview_lines` 行，并在超出时提示还有多少行。
+- `Enter` 后当前 block 才展开 Detail，并最多显示 `expanded_lines` 行。
 
-### 5. 当前雏形限制
+### 6. 当前雏形限制
 
-- Block Mode 暂时只读，只支持选择和查看。
+- Block View / Detail View 暂时只读，只支持选择和查看。
 - 暂不支持复制、重跑、保存、删除、AI 解释等操作。
 - Block output 只保存在当前 Tide 进程内，退出 Tide 后丢弃。
 - 暂不接入数据库或文件日志。
-- zsh hook 注入方式仍是早期实现，后续需要继续打磨。
+- Normal / Plain View 当前应为透明 passthrough；Block / Detail View 才使用 Tide renderer 重绘捕获历史。
 
-## 下一步手动测试重点：Hook 注入稳定化
+## zsh integration 手动测试
 
-下一步实现应优先改进 zsh hook 注入方式，而不是完善 UI。
+Tide 不再通过临时 `ZDOTDIR` 注入 hook。用户需要在自己的 `.zshrc` 中 source Tide integration。
 
-当前原型会在启动 zsh 后向 PTY 写入 hook setup。后续应改成更干净的启动期安装机制，例如临时 hook 文件或等价方案。
+测试前确认 `.zshrc` 中存在：
 
-完成下一步后，需要重点确认：
+```zsh
+source ~/.tide/zsh-integration.zsh
+```
+
+需要重点确认：
 
 - `cargo run` 启动时不应 visibly 打印 hook 脚本内容。
 - hook 安装命令不应污染 shell history。
 - 用户正常 `.zshrc`、prompt 和插件行为不应被破坏。
+- powerlevel10k / starship / zsh-autosuggestions / zsh-syntax-highlighting / fzf-tab / atuin / zoxide 等插件行为不应被 Tide 修改。
 - 普通命令仍能被捕获为 block。
 - `false` 仍能记录为 failed。
-- `Ctrl-X Ctrl-B` 仍能进入 latest-10 Block Mode。
-- 退出 Tide 后临时 hook 文件应被清理，或至少不会影响后续 shell。
+- `Ctrl-B` 仍能进入 Block View。
+- 如果没有安装 integration，Tide 不应崩溃，但会进入无法捕获 command block 的 degraded mode。
 
 ## Block Capture 调试
 
@@ -351,6 +381,40 @@ false
 - 同一个 PTY chunk 内出现多个 hook 事件时，事件顺序不乱。
 - hook 事件被拆成多个 PTY chunk 时，普通输出不会被长时间延迟。
 
+## 全屏程序兼容性冒烟测试
+
+目标：Normal 模式本身是透明 passthrough，因此全屏交互程序不需要白名单也应正常工作。退出后，Tide 仍能通过 zsh marker 记录一次命令执行。
+
+启动 Tide：
+
+```sh
+cargo run
+```
+
+在 Tide 内测试本机已安装的任意命令：
+
+```sh
+vim
+nvim
+yazi
+fzf
+less Cargo.toml
+top
+htop
+ssh user@host
+lazygit
+man tmux
+```
+
+预期：
+
+- 程序运行期间画面和输入不被 Block renderer 干扰。
+- `Ctrl-B`、`j`、`k`、`Enter`、`Esc` 等按键属于该交互程序本身，不触发 Tide Block View。
+- 退出程序后仍停留在透明 Normal View。
+- 按 `Ctrl-B` 后能看到对应 command block。
+- 如果没有可线性重绘的 captured output，Block View 显示 `no captured text output`。
+- Detail View 显示 command、cwd、exit code、duration 和 status。
+
 ## 回归检查清单
 
 提交任何影响终端行为的变更前，至少确认：
@@ -365,7 +429,9 @@ false
 - Tide 退出后外层终端输入正常。
 - resize 能更新 PTY size。
 - 简单全屏 TUI 仍然能以透明转发方式工作。
-- `Ctrl-X Ctrl-B` 能进入 Block Mode。
-- Block Mode 能浏览最近 10 条命令 block。
-- `Esc` 或 `q` 能从 Block Mode 回到透明 shell。
+- `Ctrl-B` 能进入 Block View。
+- Block View 能在同一 shell 历史上通过 viewport 浏览命令 block。
+- `Enter` 能内联展开当前 block 的 Detail View。
+- `Esc` 或 `q` 能从 Detail View 回到 Block View，再从 Block View 回到 Plain View。
+- `vim` / `nvim` / `yazi` / `fzf` / `less` 等全屏程序运行期间应 passthrough，退出后仍回到 Normal View。
 - 修改 hook / parser 后，`cargo test` 中的 parser 测试全部通过。

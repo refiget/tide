@@ -1,11 +1,22 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file gives Claude Code / Claude agents repository-specific working instructions.
+
+## Read First
+
+Before editing code, read these documents:
+
+- [docs/architecture.md](docs/architecture.md)
+- [docs/block-layer.md](docs/block-layer.md)
+- [docs/internal-api.md](docs/internal-api.md)
+- [AGENTS.md](AGENTS.md)
+
+These documents define the target architecture. Keep changes consistent with them.
 
 ## Commands
 
 | Action | Command |
-|--------|---------|
+| --- | --- |
 | Build | `cargo build` |
 | Type-check | `cargo check` |
 | Run tests | `cargo test` |
@@ -14,89 +25,133 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | Run Tide | `cargo run` |
 | Run with block debug | `TIDE_DEBUG_BLOCKS=1 cargo run` |
 
-Before committing: all three of `cargo fmt --check`, `cargo check`, and `cargo test` must pass.
+Before committing terminal behavior changes, run:
 
-## Architecture
-
-Tide is a Rust PTY wrapper around real `zsh` that renders shell output through a terminal grid (tmux-style). The current implementation uses `vt100` for grid parsing and diff-based screen rendering.
-
-```
-real terminal ← Tide renders grid here
-  |
-TermRenderer ← vt100 grid + diff rendering
-  |
-Osc777Parser ← splits visible output from hook events
-  |
-PTY master
-  |
-zsh → child commands / TUIs
+```sh
+cargo fmt --check
+cargo check
+cargo test
 ```
 
-### Components
+## Current Development Stage
 
-**`src/main.rs`** — Thin entry point: init tracing, load config, call `pty::run_shell()`.
+Current target: implement transparent Normal mode plus Block/Detail redraw from captured sidecar state.
 
-**`src/config.rs`** — Loads optional `config/tide.toml`. All fields have `#[serde(default)]`.
+The required user-visible loop is:
 
-**`src/app.rs`** — Pure data model. `AppMode` (6-state enum), `CommandBlock`, `AppEvent`, `BlockAction`, `TuiSession`.
+- run `tide`
+- Tide starts real `zsh`
+- simple commands like `ls`, `pwd`, `echo hello`, and `false` run normally
+- command lifecycle markers create `ExecutionBlock` entries
+- Plain / Normal mode passthrough shows real zsh output directly
+- Block View overlays block metadata on the same shell history
+- Detail View expands the selected block inline
+- full-screen interactive commands work naturally because Normal mode is transparent
 
-**`src/renderer.rs`** — `TermRenderer`: wraps `vt100::Term`. Maintains terminal grid with 10000-line scrollback. Diff-based rendering — only writes changed cells to screen. `process(bytes)` feeds bytes to the terminal parser, `render(writer)` outputs grid changes.
+Required current view support:
 
-**`src/pty.rs`** — Core shell runner. Three `std::thread` threads:
-- **Output thread**: PTY → `Osc777Parser` → `renderer.process(visible)` + `BlockStore.append_output()` + block decorations → `renderer.render(stdout)`
-- **Input thread**: stdin → forwards to PTY writer, intercepts `Ctrl-X Ctrl-B` for block mode
-- **Resize thread**: SIGWINCH → PTY resize
+- `ViewKind::Plain`
+- `ViewKind::Blocks`
+- `ViewKind::Detail`
+- `ViewKind::RawProgram` is reserved for future metadata only; current passthrough does not depend on it
 
-State shared via `Arc<Mutex<BlockStore>>`. `TermRenderer` lives exclusively in the output thread.
+Required current input support:
 
-**`src/shell_hooks.rs`** — `Osc777Parser`: streaming parser for OSC 777 escape sequences. `TempHookFiles`: creates per-process ZDOTDIR temp dir with hook scripts. zsh sources hooks at startup via ZDOTDIR env var.
+- Plain View: ordinary key input goes to zsh
+- `Ctrl-B`: enter Block View
+- Block View: `j` / `k` or Up / Down moves selected block
+- Block View: `g` jumps to the oldest block
+- Block View: `G` jumps to the newest block and resumes follow-tail
+- Block View: `Enter` enters Detail View
+- Detail View: `q` / `Esc` returns to Block View
+- Block View: `q` / `Esc` returns to Plain View
+- In Normal mode, all ordinary input goes directly to the PTY. Tide only intercepts the Block View shortcut.
 
-**`src/block.rs`** — `BlockStore`: `VecDeque<CommandBlock>` ring buffer (max 10 blocks, 1 MiB output cap per block).
+## Claude Working Rules
 
-**`src/ui.rs`** — `run_block_mode()`: crossterm alternate screen, block list with borders, j/k selection with reverse-video highlight, Esc/q to exit. Read-only.
+- Read existing modules before adding new structures.
+- Check whether a responsibility already exists before creating a similarly named type.
+- Keep module boundaries clear.
+- Do not put PTY, parser, renderer, block store, and input handling into one giant file.
+- Prefer small, coherent changes.
+- After each implemented loop, update the relevant docs.
+- If existing code conflicts with the target architecture, do a modest refactor instead of hard-patching features into the wrong layer.
+- Do not introduce OpenCode, AI, database persistence, complex theme configuration, or a full natural-language mode unless the docs explicitly call for it.
+- Do not turn Block View into an alternate-screen list page.
+- Do not use popups for block detail.
+- Do not couple `BlockStore` retention to the number of blocks visible on screen.
+- Do not write block borders or detail lines into `ShellBuffer`.
+- Do not store selected or expanded state in `ExecutionBlock`.
+- Do not require a command-name whitelist for `vim`, `yazi`, `fzf`, `less`, `top`, `ssh`, or similar programs to work.
+- Do not try to emulate or replay alternate-screen program internals.
+- If a command has no captured linear text, render a placeholder in Block View instead of trying to classify or parse the program.
 
-### Data flow
+## Target Data Flow
 
+```text
+Normal:
+zsh PTY output
+  -> Marker Parser
+      -> visible bytes -> Real Terminal
+      -> sidecar capture -> ShellBuffer + BlockStore
+
+Block / Detail:
+ShellBuffer + BlockStore + ViewState
+  -> Compositor
+  -> VisualLine
+  -> Renderer
+  -> Real Terminal
 ```
-stdin → input thread → PTY master → zsh
-zsh output → PTY master → output thread → Osc777Parser
-  ├─ Visible → renderer.process() + BlockStore.append_output()
-  ├─ Preexec → header bytes → renderer.process()
-  └─ Precmd  → footer bytes → renderer.process()
-                      ↓
-            renderer.render(stdout)  ← diff to screen
-Ctrl-X Ctrl-B → ui::run_block_mode() → reads BlockStore
-```
 
-### Two modes
+Key implication: Normal mode is transparent, but Block View must not read real terminal scrollback. It renders only from Tide's captured `ShellBuffer` and `BlockStore`.
 
-- **Shell mode**: PTY output parsed through TermRenderer, grid rendered to screen with inline block frames
-- **TUI mode** (future): configured TUI apps get transparent passthrough, no parsing
+## Target Responsibilities
 
-## What NOT to build yet
+- PTY/session layer: starts zsh and moves bytes.
+- Shell integration layer: installs zsh hooks and emits/parses markers.
+- Capture layer: turns visible output and markers into buffer/store mutations.
+- Buffer layer: stores shell text lines only.
+- Block layer: stores structured command execution data only.
+- App state: stores input mode, view kind, selection, expansion, and block viewport state.
+- Compositor: produces `VisualLine` from `ShellBuffer + BlockStore + ViewState`.
+- Renderer: draws `VisualLine` to the real terminal.
+- Input/keymap: maps key events to app commands.
 
-- AI / LLM features
-- Animation or decorative styling
+`BlockStore.max_blocks` is retention. `BlockViewport` is view position and anchor (`Top`, `Tail`, `Manual`). `BlockViewConfig.preview_lines` and `expanded_lines` control output truncation.
+
+## Full-Screen Program Compatibility
+
+Do not add a first-phase RawProgram whitelist. Normal mode is passthrough, so full-screen and interactive commands naturally receive terminal input and output without Tide-specific detection.
+
+Examples:
+
+- `vim`, `nvim`, `vi`
+- `yazi`
+- `fzf`
+- `less`, `more`, `man`
+- `top`, `htop`, `btop`
+- `ssh`
+- `lazygit`, `lazydocker`, `tig`
+
+The only command lifecycle source is zsh integration:
+
+1. `block_start` creates an `ExecutionBlock`.
+2. Visible output is forwarded to the terminal and captured as best-effort plain text.
+3. `block_end` finishes the `ExecutionBlock`.
+4. If no linear text was captured for the block, Block View renders `no captured text output`.
+
+Do not try to store full-screen program screen state in `ShellBuffer`.
+
+## What Not To Build Now
+
+- OpenCode integration
+- AI explanations or fix generation
+- Natural-language command mode
 - ReturnPanel
-- Block actions (copy, rerun, explain, save)
-- TUI handoff detection
-- Database or file persistence
+- TUI handoff-return
+- Database or JSONL persistence
+- Complex styling/theme systems
+- Complete ANSI/VT terminal emulation
+- Capturing full-screen program internals as ShellLine data
 
-Block mode should remain **read-only** for now.
-
-## Key design rules
-
-- Use `vt100` for terminal parsing — do not write a custom ANSI/VT parser.
-- Tide renders shell output; TUI apps get full transparent passthrough.
-- Use `enum` + `match` for the state machine, no premature trait/generic abstraction.
-- Keep `main.rs` thin — it delegates, never owns logic.
-- Always restore terminal state on exit or error (RAII `TerminalGuard`).
-- Never steal control during TuiHandoff — full I/O forwarding, no key interception, no overlay.
-- AI commands are insert-only — inserted into zsh prompt, never auto-executed.
-- Store block output as raw bytes first, then derive stripped text.
-
-Read [AGENTS.md](./AGENTS.md) for detailed product vision, rendering architecture spec, and milestone planning.
-
-## Active development
-
-Current: migrating from transparent passthrough to `vt100`-based rendering. Next: implement TUI handoff detection so configured apps (nvim, lazygit, etc.) get transparent passthrough while shell output is rendered.
+The current implementation may use simplified ANSI handling as long as the architecture keeps shell text, block data, visual composition, and rendering separate.

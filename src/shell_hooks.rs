@@ -1,75 +1,13 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-};
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellHookEvent {
     Preexec { command: String },
-    Precmd { exit_code: i32 },
-    Cwd { cwd: String },
+    Precmd { exit_code: i32, cwd: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedPtyPart {
     Visible(Vec<u8>),
     Event(ShellHookEvent),
-}
-
-static HOOK_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-pub struct TempHookFiles {
-    dir: PathBuf,
-}
-
-impl TempHookFiles {
-    pub fn new() -> std::io::Result<Self> {
-        let dir = {
-            let pid = std::process::id();
-            let counter = HOOK_DIR_COUNTER.fetch_add(1, Ordering::SeqCst);
-            std::env::temp_dir().join(format!("tide-{}-{}", pid, counter))
-        };
-        fs::create_dir_all(&dir)?;
-
-        let hook_file = dir.join("tide-hooks.zsh");
-        fs::write(&hook_file, install_script())?;
-
-        let original_zdotdir = std::env::var("ZDOTDIR")
-            .ok()
-            .and_then(|s| if s.is_empty() { None } else { Some(s) })
-            .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| String::new()));
-
-        let zshenv_content = format!(
-            "[[ -f '{}'/.zshenv ]] && source '{}'/.zshenv\n",
-            escape_single_quotes(&original_zdotdir),
-            escape_single_quotes(&original_zdotdir),
-        );
-        fs::write(dir.join(".zshenv"), zshenv_content)?;
-
-        let zshrc_content = format!(
-            "export ZDOTDIR='{}'\n[[ -f $ZDOTDIR/.zshrc ]] && source $ZDOTDIR/.zshrc\nsource '{}'\n",
-            escape_single_quotes(&original_zdotdir),
-            escape_single_quotes(hook_file.to_str().unwrap_or(""))
-        );
-        fs::write(dir.join(".zshrc"), zshrc_content)?;
-
-        Ok(Self { dir })
-    }
-
-    pub fn zdotdir(&self) -> &Path {
-        &self.dir
-    }
-}
-
-impl Drop for TempHookFiles {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
-    }
-}
-
-fn escape_single_quotes(s: &str) -> String {
-    s.replace('\'', "'\\''")
 }
 
 #[derive(Debug, Default)]
@@ -111,49 +49,61 @@ impl Osc777Parser {
     }
 }
 
+#[allow(dead_code)]
 pub fn install_script() -> &'static str {
     r#"autoload -Uz add-zsh-hook
-_tide_hex_encode() {
-  command od -An -tx1 -v | command tr -d ' \n'
+
+_tide_escape_osc() {
+  printf '%s' "$1" | command od -An -tx1 -v | command tr -d ' \n'
 }
+
 _tide_preexec() {
-  local payload
-  payload=$(printf '%s' "$1" | _tide_hex_encode)
-  print -rn -- $'\e]777;tide;preexec;hex:'"${payload}"$'\a'
+  local cmd="$1"
+  cmd="$(_tide_escape_osc "$cmd")"
+  printf '\033]777;block_start;cmd=hex:%s\a' "$cmd"
 }
+
 _tide_precmd() {
-  local exit_code=$?
-  local payload
-  payload=$(printf '%s' "${exit_code}" | _tide_hex_encode)
-  print -rn -- $'\e]777;tide;precmd;hex:'"${payload}"$'\a'
+  local ec=$?
+  local cwd="$PWD"
+  cwd="$(_tide_escape_osc "$cwd")"
+  printf '\033]777;block_end;exit=%d;cwd=hex:%s\a' "$ec" "$cwd"
 }
-_tide_chpwd() {
-  local payload
-  payload=$(printf '%s' "$PWD" | _tide_hex_encode)
-  print -rn -- $'\e]777;tide;cwd;hex:'"${payload}"$'\a'
-}
+
 add-zsh-hook preexec _tide_preexec
 add-zsh-hook precmd _tide_precmd
-add-zsh-hook chpwd _tide_chpwd
 "#
 }
 
 fn parse_osc777_event(bytes: &[u8]) -> Option<ShellHookEvent> {
     let text = std::str::from_utf8(bytes).ok()?;
-    let text = text.strip_prefix("\x1b]777;tide;")?.strip_suffix('\x07')?;
+    let text = text.strip_prefix("\x1b]777;")?.strip_suffix('\x07')?;
 
-    let (kind, payload) = text.split_once(';')?;
+    parse_block_marker(text)
+}
 
-    let payload = decode_payload(payload)?;
-
-    match kind {
-        "preexec" => Some(ShellHookEvent::Preexec { command: payload }),
-        "precmd" => Some(ShellHookEvent::Precmd {
-            exit_code: payload.parse().unwrap_or(-1),
-        }),
-        "cwd" => Some(ShellHookEvent::Cwd { cwd: payload }),
-        _ => None,
+fn parse_block_marker(text: &str) -> Option<ShellHookEvent> {
+    if let Some(payload) = text.strip_prefix("block_start;cmd=") {
+        return Some(ShellHookEvent::Preexec {
+            command: decode_payload(payload)?,
+        });
     }
+
+    let payload = text.strip_prefix("block_end;")?;
+    let mut exit_code = None;
+    let mut cwd = None;
+    for part in payload.split(';') {
+        if let Some(value) = part.strip_prefix("exit=") {
+            exit_code = Some(value.parse().unwrap_or(-1));
+        } else if let Some(value) = part.strip_prefix("cwd=") {
+            cwd = Some(decode_payload(value)?);
+        }
+    }
+
+    Some(ShellHookEvent::Precmd {
+        exit_code: exit_code.unwrap_or(-1),
+        cwd,
+    })
 }
 
 fn decode_payload(payload: &str) -> Option<String> {
@@ -175,7 +125,7 @@ fn decode_payload(payload: &str) -> Option<String> {
 }
 
 fn marker() -> &'static [u8] {
-    b"\x1b]777;tide;"
+    b"\x1b]777;block_"
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -206,90 +156,48 @@ fn push_visible_part(parts: &mut Vec<ParsedPtyPart>, bytes: impl Iterator<Item =
 
 #[cfg(test)]
 mod tests {
-    use super::{Osc777Parser, ParsedPtyPart, ShellHookEvent, TempHookFiles, escape_single_quotes};
-    use std::fs;
+    use super::{Osc777Parser, ParsedPtyPart, ShellHookEvent, install_script};
 
     #[test]
-    fn temp_hook_files_create_dir_and_files() {
-        let hooks = TempHookFiles::new().expect("create temp hook files");
+    fn install_script_contains_additive_hooks_without_visible_ui() {
+        let script = install_script();
 
-        assert!(hooks.zdotdir().exists());
-        assert!(hooks.zdotdir().join(".zshenv").exists());
-        assert!(hooks.zdotdir().join(".zshrc").exists());
-        assert!(hooks.zdotdir().join("tide-hooks.zsh").exists());
+        assert!(script.contains("add-zsh-hook preexec _tide_preexec"));
+        assert!(script.contains("add-zsh-hook precmd _tide_precmd"));
+        assert!(script.contains("block_start"));
+        assert!(script.contains("block_end"));
+        assert!(!script.contains("PROMPT="));
+        assert!(!script.contains("RPROMPT="));
     }
 
     #[test]
-    fn temp_hook_files_zshrc_sources_original_and_hooks() {
-        let hooks = TempHookFiles::new().expect("create temp hook files");
-
-        let zshrc = fs::read_to_string(hooks.zdotdir().join(".zshrc")).expect("read .zshrc");
-
-        assert!(zshrc.contains("export ZDOTDIR="));
-        assert!(zshrc.contains("source $ZDOTDIR/.zshrc"));
-        assert!(zshrc.contains("source '"));
-        assert!(zshrc.contains("tide-hooks.zsh"));
-    }
-
-    #[test]
-    fn temp_hook_files_zshenv_sources_original() {
-        let hooks = TempHookFiles::new().expect("create temp hook files");
-
-        let zshenv = fs::read_to_string(hooks.zdotdir().join(".zshenv")).expect("read .zshenv");
-
-        assert!(
-            !zshenv.contains("export ZDOTDIR="),
-            ".zshenv must not change ZDOTDIR"
-        );
-        assert!(zshenv.contains(".zshenv"), "must source original .zshenv");
-    }
-
-    #[test]
-    fn temp_hook_files_hook_file_contains_preexec() {
-        let hooks = TempHookFiles::new().expect("create temp hook files");
-
-        let hook_script = fs::read_to_string(hooks.zdotdir().join("tide-hooks.zsh"))
-            .expect("read tide-hooks.zsh");
-
-        assert!(hook_script.contains("_tide_preexec"));
-        assert!(hook_script.contains("_tide_precmd"));
-        assert!(hook_script.contains("_tide_chpwd"));
-        assert!(hook_script.contains("add-zsh-hook"));
-    }
-
-    #[test]
-    fn temp_hook_files_cleanup_on_drop() {
-        let dir: std::path::PathBuf;
-        {
-            let hooks = TempHookFiles::new().expect("create temp hook files");
-            dir = hooks.zdotdir().to_path_buf();
-            assert!(dir.exists());
-        }
-        assert!(!dir.exists());
-    }
-
-    #[test]
-    fn escape_single_quotes_handles_plain_string() {
-        assert_eq!(escape_single_quotes("hello"), "hello");
-    }
-
-    #[test]
-    fn escape_single_quotes_handles_embedded_quote() {
-        assert_eq!(escape_single_quotes("it's working"), "it'\\''s working");
-    }
-
-    #[test]
-    fn strips_hook_event_from_visible_output() {
+    fn strips_block_start_marker_from_visible_output() {
         let mut parser = Osc777Parser::default();
-        let parsed = parser.push(b"hello\x1b]777;tide;precmd;hex:30\x07world");
+        let parsed = parser.push(b"hello\x1b]777;block_start;cmd=hex:6563686f206869\x07world");
 
         assert_eq!(
             parsed,
             vec![
                 ParsedPtyPart::Visible(b"hello".to_vec()),
-                ParsedPtyPart::Event(ShellHookEvent::Precmd { exit_code: 0 }),
+                ParsedPtyPart::Event(ShellHookEvent::Preexec {
+                    command: "echo hi".to_string()
+                }),
                 ParsedPtyPart::Visible(b"world".to_vec()),
             ]
+        );
+    }
+
+    #[test]
+    fn strips_block_end_marker_from_visible_output() {
+        let mut parser = Osc777Parser::default();
+        let parsed = parser.push(b"\x1b]777;block_end;exit=1;cwd=hex:2f746d70\x07");
+
+        assert_eq!(
+            parsed,
+            vec![ParsedPtyPart::Event(ShellHookEvent::Precmd {
+                exit_code: 1,
+                cwd: Some("/tmp".to_string()),
+            })]
         );
     }
 
@@ -297,10 +205,10 @@ mod tests {
     fn handles_split_hook_event() {
         let mut parser = Osc777Parser::default();
 
-        let first = parser.push(b"abc\x1b]777;tide;pre");
+        let first = parser.push(b"abc\x1b]777;block_st");
         assert_eq!(first, vec![ParsedPtyPart::Visible(b"abc".to_vec())]);
 
-        let second = parser.push(b"exec;hex:6563686f206869\x07def");
+        let second = parser.push(b"art;cmd=hex:6563686f206869\x07def");
         assert_eq!(
             second,
             vec![
@@ -323,7 +231,7 @@ mod tests {
     #[test]
     fn decodes_command_with_semicolon_and_newline() {
         let mut parser = Osc777Parser::default();
-        let parsed = parser.push(b"\x1b]777;tide;preexec;hex:6563686f2068693b0a707764\x07");
+        let parsed = parser.push(b"\x1b]777;block_start;cmd=hex:6563686f2068693b0a707764\x07");
 
         assert_eq!(
             parsed,
@@ -336,8 +244,9 @@ mod tests {
     #[test]
     fn handles_multiple_events_in_one_chunk() {
         let mut parser = Osc777Parser::default();
-        let parsed = parser
-            .push(b"\x1b]777;tide;preexec;hex:66616c7365\x07out\x1b]777;tide;precmd;hex:31\x07");
+        let parsed = parser.push(
+            b"\x1b]777;block_start;cmd=hex:66616c7365\x07out\x1b]777;block_end;exit=1;cwd=hex:2f\x07",
+        );
 
         assert_eq!(
             parsed,
@@ -346,8 +255,22 @@ mod tests {
                     command: "false".to_string()
                 }),
                 ParsedPtyPart::Visible(b"out".to_vec()),
-                ParsedPtyPart::Event(ShellHookEvent::Precmd { exit_code: 1 }),
+                ParsedPtyPart::Event(ShellHookEvent::Precmd {
+                    exit_code: 1,
+                    cwd: Some("/".to_string()),
+                }),
             ]
+        );
+    }
+
+    #[test]
+    fn leaves_non_tide_osc_777_visible() {
+        let mut parser = Osc777Parser::default();
+        let parsed = parser.push(b"\x1b]777;not-tide\x07");
+
+        assert_eq!(
+            parsed,
+            vec![ParsedPtyPart::Visible(b"\x1b]777;not-tide\x07".to_vec())]
         );
     }
 }

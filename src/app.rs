@@ -1,8 +1,15 @@
 #![allow(dead_code)]
 
-use std::{path::PathBuf, time::SystemTime};
+use std::{fmt, path::PathBuf, time::SystemTime};
 
-pub type BlockId = u64;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BlockId(pub u64);
+
+impl fmt::Display for BlockId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct App {
@@ -29,6 +36,70 @@ pub enum AppMode {
     Returning,
     BlockInteraction,
     ReturnPanel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewKind {
+    Plain,
+    Blocks,
+    Detail,
+    Agent,
+    RawProgram,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputMode {
+    Shell,
+    BlockNav,
+    DetailNav,
+    NaturalLanguage,
+    OpenCode,
+    RawProgram,
+}
+
+#[derive(Debug, Clone)]
+pub struct ViewState {
+    pub view: ViewKind,
+    pub selected_block: Option<BlockId>,
+    pub expanded_block: Option<BlockId>,
+    pub scroll_offset: usize,
+    pub block_viewport: BlockViewport,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockViewport {
+    pub selected_index: usize,
+    pub scroll_offset: usize,
+    pub anchor: ViewAnchor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewAnchor {
+    Top,
+    Tail,
+    Manual,
+}
+
+impl Default for ViewState {
+    fn default() -> Self {
+        Self {
+            view: ViewKind::Plain,
+            selected_block: None,
+            expanded_block: None,
+            scroll_offset: 0,
+            block_viewport: BlockViewport::default(),
+        }
+    }
+}
+
+impl Default for BlockViewport {
+    fn default() -> Self {
+        Self {
+            selected_index: 0,
+            scroll_offset: 0,
+            anchor: ViewAnchor::Tail,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -100,16 +171,23 @@ pub struct CommandBlock {
     pub status: BlockStatus,
     pub git_context: Option<GitContext>,
     pub suggestions: Vec<SuggestedAction>,
+    pub start_line: usize,
+    pub end_line: usize,
 }
+
+pub type ExecutionBlock = CommandBlock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockKind {
     NormalCommand,
     FailedCommand,
     TuiSession,
+    RawProgram,
     AiGenerated,
     SystemEvent,
 }
+
+pub type ExecutionKind = BlockKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockStatus {

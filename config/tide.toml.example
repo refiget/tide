@@ -9,10 +9,30 @@ skip_if_fast_under_ms = 80
 reduced_motion = false
 
 [blocks]
-max_blocks = 10
 max_output_bytes_per_block = 1048576
 strip_ansi_for_text = true
 persist_session = false
+
+[history]
+max_blocks = 1000
+
+[block_view]
+preview_lines = 6
+expanded_lines = 30
+follow_tail = true
+block_gap = 0
+
+[block_layout]
+horizontal_padding = 1
+show_padding_in_plain = true
+
+# Legacy compatibility field. Current Normal mode is transparent passthrough,
+# so this is not required for vim/yazi/fzf/less/ssh/etc. to work.
+raw_programs = [
+  "my-tui-app",
+  "lg",
+  "v",
+]
 
 [tui_apps.nvim]
 commands = ["nvim", "vim"]
