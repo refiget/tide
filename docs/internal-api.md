@@ -272,10 +272,13 @@ pub struct RenderState {
     pub dirty: bool,
     pub force_render: bool,
     pub last_render_at: Instant,
+    pub needs_cleanup: bool,
 }
 ```
 
-`dirty` is set `true` whenever navigation or view state changes. `force_render` is set `true` on view mode switches (enter/exit Block View, enter/exit Detail, g/G jumps) to bypass frame-rate limiting and guarantee an immediate redraw.
+`dirty` is set `true` whenever navigation or view state changes. `force_render` is set `true` on view mode switches to bypass frame-rate limiting and guarantee an immediate redraw.
+
+`needs_cleanup` is set instead of `dirty`/`force_render` when leaving Block/Detail view (q/Esc). The input thread's cleanup handler leaves the alternate screen, resets SGR, and shows the cursor — without rendering Plain view through the normal render path. `flush_render_state` returns early when `needs_cleanup` is set.
 
 ## VisualLine
 
@@ -415,13 +418,21 @@ pub fn render<W: Write>(
     rows: u16,
     cols: u16,
 ) -> io::Result<()>;
+
+pub fn enter_block_render<W: Write>(w: &mut W) -> io::Result<()>;
+
+pub fn leave_block_render<W: Write>(w: &mut W) -> io::Result<()>;
 ```
 
-The renderer draws visual lines to the terminal via crossterm. It clears the screen, draws each line with appropriate formatting, and positions the cursor.
+`render` draws visual lines to the terminal via crossterm. It clears the screen, draws each line with appropriate formatting, and positions the cursor. The clear and all drawing commands are batched via `queue!` and flushed atomically at the end to avoid intermediate blank frames.
 
 For Plain View, cursor position is drawn from `ShellBuffer.cursor_position()`. For Block/Detail views, the cursor is hidden.
 
-Normal mode should not continuously redraw through the renderer. The renderer is used for reconstructed views (Blocks, Detail) and for restoring Plain View after exiting Block View.
+`enter_block_render` switches to the alternate screen buffer and hides the cursor. Called once when entering Block View (Ctrl-B). Must not be called while holding the `RuntimeState` lock (deadlock risk — output thread locks state → stdout).
+
+`leave_block_render` leaves the alternate screen, resets SGR (`ResetColor`), and shows the cursor. **`LeaveAlternateScreen` must come before `ResetColor`/`Show`** so that SGR and cursor state are applied on the newly-restored main screen, not on the discarded alt screen.
+
+Normal mode should not continuously redraw through the renderer. The renderer is used for reconstructed views (Blocks, Detail) which render in the alternate screen.
 
 For Blocks/Detail, the compositor receives terminal height, subtracts footer height, and slices the complete `VisualLayout` by `BlockViewport.line_offset`. Plain/Normal mode remains transparent passthrough and does not use this block viewport.
 

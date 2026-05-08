@@ -201,7 +201,7 @@ stty sane
 
 ## Layered Block Renderer 雏形
 
-目标：Tide 默认显示 Plain View，只渲染 shell 文本层。用户显式按 `Ctrl-B` 后，在同一份 shell 历史上叠加 Block Metadata Layer；按 `Enter` 可内联展开当前 block 的 Detail 信息。
+目标：Tide 默认显示 Plain View，只渲染 shell 文本层。用户显式按 `Ctrl-B` 后，在同一份 shell 历史上叠加 Block Metadata Layer；按 `Enter` 可内联展开当前 block 的 Detail 信息。Block/Detail 使用 alternate screen 渲染，不会影响主屏显示内容。
 
 ### 1. 捕获普通命令
 
@@ -266,7 +266,7 @@ Enter
 - Detail 信息包含 command、cwd、exit code、duration、status、stdout/stderr 摘要和 actions。
 - 按 `q` 或 `Esc` 返回 Block View。
 
-### 4. 返回 Plain View
+### 4. 返回 Plain View（alternate screen 恢复）
 
 在 Block View 内按：
 
@@ -282,9 +282,13 @@ q
 
 预期：
 
-- 回到 Plain View。
-- 屏幕只显示 shell 文本层，不显示 block metadata line。
-- shell 仍然可继续输入命令。
+- 回到 Plain View，主屏 zsh prompt 立即恢复正常，没有闪烁。
+- prompt 位置正确，光标在 prompt 后。
+- prompt 颜色正常，SGR 属性不泄漏（block 选中时的 Reverse 属性不应残留）。
+- 不需要额外输入命令来恢复显示。
+- 多次 Ctrl-B / q 循环不累计错位。
+- 其它 shell 功能（zsh-autosuggestions, zsh-syntax-highlighting, fzf-tab 等）不受破坏。
+- 退出后 TUI 应用（vim/nvim/fzf/less）不受影响。
 
 ### 5. 历史保留和 viewport
 
@@ -333,9 +337,10 @@ echo 12
 预期：
 
 - 每次切换 View 后，屏幕立刻重绘，不应残留前一模式的 UI 元素。
-- 从 Plain 进入 Block View 时，正常显示 block metadata。
-- 从 Block View 返回 Plain 时，屏幕应只显示 shell 文本，没有 block 边框残留。
+- 从 Plain 进入 Block View 时，正常显示 block metadata（在 alternate screen 中）。
+- 从 Block View 返回 Plain 时，主屏 prompt 立即恢复，没有 block 边框残留、颜色不泄漏。
 - 从 Detail 返回 Block View 时，不再显示 Detail 行。
+- 退出 Block View 时不应出现白屏闪烁——clear 和所有绘制命令在同一个 `flush()` 中原子化到达终端。
 
 ### 7. auto_follow_on_reach_bottom 行为验证
 

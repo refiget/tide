@@ -83,7 +83,16 @@ Owns top-level app state types: `ViewKind`, `InputMode`, `ViewState`, `BlockView
 
 ### pty.rs
 
-Starts and manages the zsh PTY, runs input and output threads, integrates the marker parser, captures shell output into `ShellBuffer` and `BlockStore`, handles keyboard input (including view-mode switching and Block View navigation), and coordinates frame-rate-limited rendering. Block View uses a visual-line viewport: selection moves by block, but the viewport slices the complete visual layout by `line_offset`.
+Starts and manages the zsh PTY, runs input/output/resize threads, integrates the marker parser, captures shell output into `ShellBuffer` and `BlockStore`, handles keyboard input (view-mode switching and Block View navigation), and coordinates frame-rate-limited rendering.
+
+Three-thread runtime: output thread (reads PTY, captures output, renders Block/Detail), input thread (reads stdin, dispatches keys, forwards to PTY, calls `maybe_flush_navigation_and_render`), resize thread (SIGWINCH → PTY + stored dimensions).
+
+Block View uses a visual-line viewport: selection moves by block, but the viewport slices the complete visual layout by `line_offset`.
+
+**Alternate screen lifecycle** — Block/Detail rendering happens in the alternate screen buffer, completely isolated from the main terminal display:
+- `Ctrl-B` → input thread drops the state lock, locks stdout to enter alt screen (`enter_block_render`), re-acquires state, and sets view to Blocks. All subsequent Block/Detail renders write to the alt screen.
+- `q`/`Esc` in Block View → `handle_block_view_byte` sets `needs_cleanup = true` (not `dirty`/`force_render`, to avoid rendering Plain view through the renderer). The input thread's post-byte-loop handler leaves the alt screen (`leave_block_render`) and resets cleanup flags. PTY output after cleanup goes to the restored main screen normally.
+- Lock ordering: output thread always locks `(state) → (stdout)`. The input thread's Ctrl-B handler explicitly drops the state guard before locking stdout, then re-acquires state — never holding both simultaneously.
 
 ### block.rs
 
@@ -99,7 +108,11 @@ Core of Block/Detail View rendering. `build_visual_layout` produces a complete `
 
 ### renderer.rs
 
-Provides the `render()` function that draws `&[VisualLine]` to the real terminal via crossterm. Handles border characters (selected: `╭ ╮ ╰ ╯`, unselected: `┌ ┐ └ ┘`), framed text, titled borders, and cursor positioning.
+Provides `render()` that draws `&[VisualLine]` to the terminal. Handles border characters (selected: `╭ ╮ ╰ ╯`, unselected: `┌ ┐ └ ┘`), framed text, titled borders, footer, cursor positioning, and unicode-width-aware truncation.
+
+Also exposes `enter_block_render()` / `leave_block_render()` for alternate screen lifecycle:
+- `enter_block_render` — switches to the alternate screen buffer and hides the cursor. Called when entering Block View (Ctrl-B).
+- `leave_block_render` — leaves the alternate screen, resets SGR attributes, and shows the cursor. Called in the cleanup path when returning to Plain view (q/Esc). **Order matters**: `LeaveAlternateScreen` must come first so that `ResetColor` and `Show` apply on the newly-restored main screen, not on the alt screen that is about to be discarded.
 
 ### shell_hooks.rs
 
@@ -225,6 +238,7 @@ Current implementation is the minimal Block Layer loop with the following in pla
 - Config-gated `auto_follow_on_reach_bottom` for controlling `j`→Tail anchor behavior
 - Block store retention limits, alternate-screen detection for capture suspension
 - Frame-rate-limited rendering (16ms FRAME_DURATION)
+- **Alternate screen for Block/Detail views**: entering Block View (Ctrl-B) enters the alternate screen buffer via `EnterAlternateScreen`; leaving (q/Esc) leaves it. Block/Detail rendering never touches the main terminal display. On exit, SGR and cursor are reset on the restored main screen, and zsh integration provides an optional `^X^R` debug binding for manual `zle reset-prompt` if needed.
 
 Next-stage items (not yet implemented):
 
