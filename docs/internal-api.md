@@ -226,6 +226,8 @@ pub struct ViewState {
 #[derive(Debug, Clone)]
 pub struct BlockViewport {
     pub selected_index: usize,
+    pub line_offset: usize,
+    /// Deprecated: old block-index offset. New rendering uses line_offset.
     pub scroll_offset: usize,
     pub anchor: ViewAnchor,
 }
@@ -242,9 +244,11 @@ pub enum ViewAnchor {
 
 `BlockViewport` controls which portion of block history is visible. It does not store block content.
 
-- `ViewAnchor::Tail` bottom-aligns the visible block region; new blocks shift the viewport.
-- `ViewAnchor::Top` displays from the oldest visible block.
-- `ViewAnchor::Manual` preserves the current viewport unless the selected block leaves the visible range or crosses the scroll margin.
+- `line_offset` is the primary viewport offset. It is the first visible visual line in the full `VisualLayout`.
+- `scroll_offset` is deprecated compatibility from the old block-index viewport model.
+- `ViewAnchor::Tail` follows the end of the visual layout; new blocks shift the viewport only while Tail is active.
+- `ViewAnchor::Top` displays from the first visual line.
+- `ViewAnchor::Manual` preserves the current `line_offset` unless the selected block would become partially clipped.
 
 Default for both `ViewState` and `BlockViewport` is `Plain` view + `Tail` anchor.
 
@@ -284,6 +288,7 @@ pub enum VisualLine {
     BlockTopBorder { block_id: BlockId, selected: bool, label: String },
     BlockBottomBorder { block_id: BlockId, selected: bool, label: String },
     BlockDetailLine { block_id: BlockId, text: String, selected: bool },
+    Footer { text: String },
 }
 ```
 
@@ -302,6 +307,29 @@ pub struct VisibleBlockRange {
 
 Returned by `Compositor::compute_visible_range`. `start` and `end` are inclusive block indices. `top_padding_lines` is the number of `VisualLine::Empty` lines the compositor will insert at the top for bottom-alignment (non-Top anchors).
 
+`VisibleBlockRange` is retained for tests and diagnostics. The render path uses `VisualLayout + line_offset` directly.
+
+## VisualLayout
+
+```rust
+#[derive(Debug, Clone)]
+pub struct VisualLayout {
+    pub lines: Vec<VisualLine>,
+    pub spans: Vec<BlockVisualSpan>,
+    pub total_height: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockVisualSpan {
+    pub block_id: BlockId,
+    pub block_index: usize,
+    pub start_line: usize,
+    pub end_line: usize,
+}
+```
+
+`VisualLayout` is the single layout source for Block and Detail views. It contains the complete visual document plus block spans with exclusive `end_line` values. The viewport slices `layout.lines[line_offset..line_offset + content_height]`, allowing partial non-selected blocks at the top or bottom. Selection still moves by block index, and the viewport is adjusted so the selected block is fully visible when possible.
+
 ## Compositor API
 
 ```rust
@@ -317,6 +345,14 @@ impl Compositor {
         layout: &BlockLayoutConfig,
         block_view: &BlockViewConfig,
     ) -> Vec<VisualLine>;
+
+    pub fn build_visual_layout(
+        shell: &ShellBuffer,
+        blocks: &BlockStore,
+        view: &ViewState,
+        width: u16,
+        block_view: &BlockViewConfig,
+    ) -> VisualLayout;
 
     pub fn compute_visible_range(
         shell: &ShellBuffer,
@@ -345,9 +381,9 @@ impl Compositor {
 }
 ```
 
-The compositor is responsible for turning `ShellBuffer + BlockStore + ViewState` into renderable `VisualLine` values, AND is the single source of truth for viewport math (visible range, tail offset, scroll offset).
+The compositor is responsible for turning `ShellBuffer + BlockStore + ViewState` into renderable `VisualLine` values, AND is the single source of truth for viewport math (visual layout, visible range, tail line offset).
 
-Height calculations inside the compositor use `build_one_block_lines().len()` — the same function that generates the actual visual lines — guaranteeing that viewport estimates match rendered output.
+Height calculations come from the generated visual layout. This intentionally avoids separate estimated block heights that can drift from rendered output.
 
 Plain View generation (`build_visual_lines` with `ViewKind::Plain`):
 
@@ -358,11 +394,13 @@ ShellBuffer.lines -> VisualLine::ShellText
 Block View generation (`ViewKind::Blocks` or `ViewKind::Detail`):
 
 ```text
-for each visible block:
+for each block in the full VisualLayout:
   BlockTopBorder
   BlockBodyLine values for shell lines in the block's range
   (if Detail and expanded: BlockDetailLine values)
   BlockBottomBorder
+
+then slice by BlockViewport.line_offset and content height
 ```
 
 ## Renderer API
@@ -385,7 +423,7 @@ For Plain View, cursor position is drawn from `ShellBuffer.cursor_position()`. F
 
 Normal mode should not continuously redraw through the renderer. The renderer is used for reconstructed views (Blocks, Detail) and for restoring Plain View after exiting Block View.
 
-The viewport start is computed from `view.view`: Plain uses `lines.len() - height` (bottom of buffer), Blocks/Detail uses 0 (from the scroll offset's first visible block).
+For Blocks/Detail, the compositor receives terminal height, subtracts footer height, and slices the complete `VisualLayout` by `BlockViewport.line_offset`. Plain/Normal mode remains transparent passthrough and does not use this block viewport.
 
 ## Osc777Parser and ShellHookEvent
 
@@ -438,6 +476,7 @@ pub struct BlockViewConfig {
     pub follow_tail: bool,
     pub block_gap: usize,
     pub scroll_margin_blocks: usize,
+    pub scroll_margin_lines: usize,
     pub auto_follow_on_reach_bottom: bool,
     pub horizontal_margin: usize,
     pub body_padding: usize,
@@ -462,7 +501,8 @@ Defaults:
 - `block_view.expanded_lines = 30`
 - `block_view.follow_tail = true`
 - `block_view.block_gap = 0`
-- `block_view.scroll_margin_blocks = 2`
+- `block_view.scroll_margin_lines = 2`
+- `block_view.scroll_margin_blocks = 2` legacy compatibility
 - `block_view.auto_follow_on_reach_bottom = false`
 - `block_view.horizontal_margin = 1`
 - `block_view.body_padding = 1`
@@ -523,7 +563,7 @@ Frame rate is controlled by `FRAME_DURATION` (16ms ≈ 60fps). View mode switche
 ## Ownership Summary
 
 - `selected_block` and `expanded_block` belong to `ViewState`.
-- `selected_index`, block viewport `scroll_offset`, and `anchor` belong to `BlockViewport`.
+- `selected_index`, block viewport `line_offset`, deprecated `scroll_offset`, and `anchor` belong to `BlockViewport`.
 - `start_line` and `end_line` belong to `CommandBlock`.
 - `ShellLine.block_id` lets the compositor identify block-owned shell output.
 - Block borders and detail text are `VisualLine` values.

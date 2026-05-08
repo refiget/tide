@@ -73,6 +73,8 @@ pub struct ViewState {
 #[derive(Debug, Clone)]
 pub struct BlockViewport {
     pub selected_index: usize,
+    pub line_offset: usize,
+    /// Deprecated: old block-index offset. New Block View rendering uses line_offset.
     pub scroll_offset: usize,
     pub anchor: ViewAnchor,
 }
@@ -100,6 +102,7 @@ impl Default for BlockViewport {
     fn default() -> Self {
         Self {
             selected_index: 0,
+            line_offset: 0,
             scroll_offset: 0,
             anchor: ViewAnchor::Tail,
         }

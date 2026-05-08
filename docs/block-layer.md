@@ -117,18 +117,32 @@ Block View overlays block metadata on the same shell history.
 
 - `BlockStore.max_blocks` controls retention.
 - `BlockViewport.selected_index` controls selected history index.
-- `BlockViewport.scroll_offset` controls first visible block.
+- `BlockViewport.line_offset` controls the first visible visual line in the complete Block View layout.
+- `BlockViewport.scroll_offset` is a deprecated compatibility field from the old block-index viewport model.
 - `BlockViewConfig.preview_lines` controls collapsed output height.
 - `BlockViewConfig.expanded_lines` controls expanded output height.
 - `BlockViewConfig.block_gap` controls blank visual lines between blocks.
-- `BlockViewConfig.scroll_margin_blocks` keeps navigation from pinning the selected block to the edge.
+- `BlockViewConfig.scroll_margin_lines` keeps navigation from pinning the selected block to the edge.
+- `BlockViewConfig.scroll_margin_blocks` is legacy and should not drive new viewport logic.
 - `BlockViewConfig.auto_follow_on_reach_bottom` controls whether pressing `j` onto the newest block re-enters Tail anchor (default `false`).
 - `BlockViewConfig.horizontal_margin` keeps borders away from terminal edges.
 - `BlockViewConfig.body_padding` controls inner body padding.
 - `BlockViewConfig.show_footer` reserves a compact shortcut footer.
 - `BlockViewConfig.selected_body_reverse` should stay `false` by default so selected output remains readable.
 
-For each block:
+Compositor first builds a complete `VisualLayout`:
+
+```rust
+pub struct VisualLayout {
+    pub lines: Vec<VisualLine>,
+    pub spans: Vec<BlockVisualSpan>,
+    pub total_height: usize,
+}
+```
+
+Each `BlockVisualSpan` records a block's `[start_line, end_line)` range inside that complete visual document. The viewport then slices `layout.lines` by `line_offset`, so the top and bottom of the screen may show partial non-selected blocks. This is intentional: the viewport scrolls by visual lines, while selection still moves by block.
+
+For each block in the full layout:
 
 ```text
 insert VisualLine::BlockTopBorder
@@ -150,6 +164,8 @@ The bottom border should stay compact:
 - duration
 
 The selected block should be visibly highlighted without reversing the whole body. Use `╭ ╮ ╰ ╯` and border/label emphasis; keep body text normally readable.
+
+The selected block must be fully visible whenever its visual height fits in the content area. If navigation would leave the selected block partially clipped, `ensure_selected_block_fully_visible` adjusts `line_offset` before rendering. Partial blocks above or below the selected block are allowed and are not a separate data state.
 
 Collapsed blocks show at most `preview_lines` body lines. If more output exists, append:
 
@@ -245,15 +261,16 @@ Store these in `ViewState`:
 - `selected_block: Option<BlockId>`
 - `expanded_block: Option<BlockId>`
 - `view: ViewKind`
-- `scroll_offset: usize`
+- `scroll_offset: usize` legacy top-level field
 
 Store block viewport state in `BlockViewport`:
 
 - `selected_index: usize`
-- `scroll_offset: usize`
+- `line_offset: usize`
+- `scroll_offset: usize` deprecated block-index offset
 - `anchor: ViewAnchor`
 
-`ViewAnchor::Tail` bottom-aligns the visible block region. `ViewAnchor::Manual` preserves viewport position while the selected block remains visible. `ViewAnchor::Top` is used after `g`.
+`ViewAnchor::Tail` follows the end of the visual layout. `ViewAnchor::Manual` preserves the current `line_offset` unless the selected block would become partial. `ViewAnchor::Top` is used after `g`.
 
 Do not write selected or expanded flags into `ExecutionBlock`.
 

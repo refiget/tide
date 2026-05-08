@@ -83,7 +83,7 @@ Owns top-level app state types: `ViewKind`, `InputMode`, `ViewState`, `BlockView
 
 ### pty.rs
 
-Starts and manages the zsh PTY, runs input and output threads, integrates the marker parser, captures shell output into `ShellBuffer` and `BlockStore`, handles keyboard input (including view-mode switching and Block View navigation), and coordinates frame-rate-limited rendering. Viewport math (visible range, tail scroll offset, scroll margin) was recently moved into the `Compositor` for a single source of truth on block height.
+Starts and manages the zsh PTY, runs input and output threads, integrates the marker parser, captures shell output into `ShellBuffer` and `BlockStore`, handles keyboard input (including view-mode switching and Block View navigation), and coordinates frame-rate-limited rendering. Block View uses a visual-line viewport: selection moves by block, but the viewport slices the complete visual layout by `line_offset`.
 
 ### block.rs
 
@@ -95,7 +95,7 @@ Owns shell text storage via `ShellBuffer`. Supports `append` with ANSI escape se
 
 ### compositor.rs
 
-Core of Block/Detail View rendering. `build_visual_lines` produces `Vec<VisualLine>` from `ShellBuffer + BlockStore + ViewState`. Also provides `compute_visible_range`, `compute_tail_scroll_offset`, and `compute_scroll_offset_ending_at` — these are the single source of truth for viewport math, using `build_one_block_lines().len()` instead of estimating height from `output_text`.
+Core of Block/Detail View rendering. `build_visual_layout` produces a complete `VisualLayout` with `VisualLine` values and per-block spans; `build_visual_lines` slices that layout by `BlockViewport.line_offset` and content height. This is the single source of truth for viewport math and allows partial non-selected blocks at the top or bottom while keeping the selected block fully visible when possible.
 
 ### renderer.rs
 
@@ -215,7 +215,7 @@ Current implementation is the minimal Block Layer loop with the following in pla
 - Creating one `ExecutionBlock` per simple command with command, cwd, status, exit code, duration, and line range
 - Preserving transparent Normal mode; full-screen programs work without a whitelist
 - Rendering Block View with metadata borders (id, command, status, exit code, duration)
-- Controlling visible block history through `BlockViewport` (selected_index, scroll_offset, anchor), separate from `BlockStore` retention (`max_blocks`)
+- Controlling visible block history through `BlockViewport` (`selected_index`, `line_offset`, `anchor`), separate from `BlockStore` retention (`max_blocks`)
 - Truncating collapsed blocks with `preview_lines` and expanded blocks with `expanded_lines`
 - Rendering Detail View by inserting detail lines inside the selected block before the bottom border
 - Navigation: `j`/`k` (accumulated and flushed at frame cadence), `g`, `G`, `Enter`, `q`, `Esc`, Up/Down arrows

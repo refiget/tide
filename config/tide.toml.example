@@ -22,6 +22,7 @@ expanded_lines = 30
 follow_tail = true
 block_gap = 0
 scroll_margin_blocks = 2
+scroll_margin_lines = 2
 auto_follow_on_reach_bottom = false
 horizontal_margin = 1
 body_padding = 1

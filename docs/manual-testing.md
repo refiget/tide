@@ -316,6 +316,8 @@ echo 12
 - `g` 跳到第一个 block，并关闭 follow-tail。
 - 少量 block 总高度小于屏幕高度时，应底部对齐，顶部留空。
 - 大量 block 超出屏幕高度时，应默认显示最新可见 blocks，最后一个 block 靠近底部。
+- viewport 按 visual line 截取，因此屏幕顶部和底部可以显示非选中 block 的半截内容。
+- selected block 仍按 block 移动，并且在高度允许时必须完整可见；半截 block 不应成为 selected 高亮。
 - 未展开 block 最多显示 `preview_lines` 行，并在超出时提示还有多少行。
 - `Enter` 后当前 block 才展开 Detail，并最多显示 `expanded_lines` 行。
 
@@ -371,6 +373,8 @@ echo 12
 - 屏幕不会每次按键都重绘（不应出现闪烁）。
 - 最多每秒约 60 帧的更新频率（16ms FRAME_DURATION）。
 - 最终选中的 block 和 viewport 位置正确。
+- 高速移动时，viewport 应连续按 visual line 变化，不应每次强制跳到某个完整 block 顶部。
+- selected block 应保持完整可见；上下相邻 block 可以被截断显示。
 
 ### 9. 当前雏形限制
 

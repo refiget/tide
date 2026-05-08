@@ -104,7 +104,7 @@ Tide is not:
 - selected block
 - expanded block
 - scroll offset
-- block viewport state, including selected index, viewport offset, and follow-tail
+- block viewport state, including selected index, visual line offset, and anchor
 
 `Compositor` owns visual composition:
 
@@ -142,7 +142,8 @@ Block View overlays Block Metadata Layer on the same shell history.
 
 - Every command execution maps to one `ExecutionBlock`
 - `BlockStore` history retention is separate from viewport visibility
-- `BlockViewport` controls which blocks are currently visible and whether the view is anchored to Top, Tail, or Manual
+- Block View viewport scrolls by visual line (`BlockViewport.line_offset`); selection still moves by block
+- `BlockViewport` controls the visual-line viewport and whether the view is anchored to Top, Tail, or Manual
 - Collapsed blocks show only a configured output preview
 - Top and bottom metadata lines are inserted around that block's output range
 - Metadata shows block id, command, status, exit code, and duration

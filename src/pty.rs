@@ -478,6 +478,11 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
             [b'q', ..] | [b'\x1b', ..] => {
                 state.view.view = ViewKind::Blocks;
                 state.view.expanded_block = None;
+                if matches!(state.view.block_viewport.anchor, ViewAnchor::Tail) {
+                    state.view.block_viewport.line_offset = compute_tail_scroll_offset(&state);
+                } else {
+                    ensure_selected_visible(&mut state);
+                }
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
                 Some(1)
@@ -524,7 +529,9 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
             state.view.expanded_block = state.view.selected_block;
             state.view.view = ViewKind::Detail;
             if matches!(state.view.block_viewport.anchor, ViewAnchor::Tail) {
-                state.view.block_viewport.scroll_offset = compute_tail_scroll_offset(state);
+                state.view.block_viewport.line_offset = compute_tail_scroll_offset(state);
+            } else {
+                ensure_selected_visible(state);
             }
             state.render_state.dirty = true;
             state.render_state.force_render = true;
@@ -577,6 +584,7 @@ fn select_relative_block(state: &mut RuntimeState, delta: isize) -> bool {
         state.view.selected_block = None;
         state.view.block_viewport.selected_index = 0;
         state.view.block_viewport.scroll_offset = 0;
+        state.view.block_viewport.line_offset = 0;
         return false;
     }
 
@@ -594,7 +602,7 @@ fn select_relative_block(state: &mut RuntimeState, delta: isize) -> bool {
     if next == current {
         return false;
     }
-    let old_scroll = state.view.block_viewport.scroll_offset;
+    let old_scroll = state.view.block_viewport.line_offset;
     let old_anchor = state.view.block_viewport.anchor;
     let anchor = if state.config.block_view.auto_follow_on_reach_bottom
         && !delta.is_negative()
@@ -606,7 +614,7 @@ fn select_relative_block(state: &mut RuntimeState, delta: isize) -> bool {
     };
     select_block_index(state, next, anchor);
     state.view.block_viewport.selected_index != current
-        || state.view.block_viewport.scroll_offset != old_scroll
+        || state.view.block_viewport.line_offset != old_scroll
         || state.view.block_viewport.anchor != old_anchor
 }
 
@@ -623,6 +631,7 @@ fn clamp_viewport_to_history(state: &mut RuntimeState) {
         state.view.selected_block = None;
         state.view.block_viewport.selected_index = 0;
         state.view.block_viewport.scroll_offset = 0;
+        state.view.block_viewport.line_offset = 0;
         return;
     }
 
@@ -636,6 +645,7 @@ fn select_block_index(state: &mut RuntimeState, index: usize, anchor: ViewAnchor
         state.view.selected_block = None;
         state.view.block_viewport.selected_index = 0;
         state.view.block_viewport.scroll_offset = 0;
+        state.view.block_viewport.line_offset = 0;
         state.view.block_viewport.anchor = anchor;
         return;
     }
@@ -646,10 +656,11 @@ fn select_block_index(state: &mut RuntimeState, index: usize, anchor: ViewAnchor
     state.view.block_viewport.anchor = anchor;
     match anchor {
         ViewAnchor::Tail => {
-            state.view.block_viewport.scroll_offset = compute_tail_scroll_offset(state);
+            state.view.block_viewport.line_offset = compute_tail_scroll_offset(state);
         }
         ViewAnchor::Top => {
             state.view.block_viewport.scroll_offset = 0;
+            state.view.block_viewport.line_offset = 0;
         }
         ViewAnchor::Manual => {
             ensure_selected_visible(state);
@@ -662,6 +673,7 @@ fn select_tail_block(state: &mut RuntimeState) {
         state.view.selected_block = None;
         state.view.block_viewport.selected_index = 0;
         state.view.block_viewport.scroll_offset = 0;
+        state.view.block_viewport.line_offset = 0;
         state.view.block_viewport.anchor = ViewAnchor::Tail;
         return;
     }
@@ -670,7 +682,7 @@ fn select_tail_block(state: &mut RuntimeState) {
     state.view.block_viewport.selected_index = last;
     state.view.selected_block = state.blocks.block_id_at(last);
     state.view.block_viewport.anchor = ViewAnchor::Tail;
-    state.view.block_viewport.scroll_offset = compute_tail_scroll_offset(state);
+    state.view.block_viewport.line_offset = compute_tail_scroll_offset(state);
 }
 
 fn compute_tail_scroll_offset(state: &RuntimeState) -> usize {
@@ -688,44 +700,52 @@ fn ensure_selected_visible(state: &mut RuntimeState) {
         return;
     }
 
-    let range = Compositor::compute_visible_range(
+    let layout = Compositor::build_visual_layout(
         &state.shell,
         &state.blocks,
         &state.view,
-        state.rows as usize,
+        state.cols,
         &state.config.block_view,
     );
-    let selected = state.view.block_viewport.selected_index;
-    if selected < range.start {
-        state.view.block_viewport.scroll_offset = selected;
-    } else if selected > range.end {
-        state.view.block_viewport.scroll_offset = compute_scroll_offset_ending_at(state, selected);
-    } else {
-        let margin = state.config.block_view.scroll_margin_blocks;
-        if range.start > 0 && selected <= range.start.saturating_add(margin) {
-            state.view.block_viewport.scroll_offset = selected.saturating_sub(margin);
-        } else if range.end < state.blocks.len().saturating_sub(1)
-            && selected.saturating_add(margin) >= range.end
-        {
-            let target = selected
-                .saturating_add(margin)
-                .min(state.blocks.len().saturating_sub(1));
-            state.view.block_viewport.scroll_offset =
-                compute_scroll_offset_ending_at(state, target);
-        }
-    }
+    let content_height = content_height(state);
+    let margin_lines = state.config.block_view.scroll_margin_lines;
+    ensure_selected_block_fully_visible(
+        &mut state.view.block_viewport,
+        &layout,
+        content_height,
+        margin_lines,
+    );
     state.view.block_viewport.anchor = ViewAnchor::Manual;
 }
 
-fn compute_scroll_offset_ending_at(state: &RuntimeState, selected_index: usize) -> usize {
-    Compositor::compute_scroll_offset_ending_at(
-        &state.shell,
-        &state.blocks,
-        &state.view,
-        selected_index,
-        state.rows as usize,
-        &state.config.block_view,
-    )
+fn ensure_selected_block_fully_visible(
+    viewport: &mut crate::app::BlockViewport,
+    layout: &crate::compositor::VisualLayout,
+    content_height: usize,
+    margin_lines: usize,
+) {
+    let Some(span) = layout.span_for_block_index(viewport.selected_index) else {
+        return;
+    };
+    let max_offset = layout.total_height.saturating_sub(content_height);
+    if span.end_line.saturating_sub(span.start_line) > content_height {
+        viewport.line_offset = span.start_line.saturating_sub(margin_lines).min(max_offset);
+        return;
+    }
+
+    let top = viewport.line_offset;
+    let bottom = top.saturating_add(content_height);
+    if span.start_line < top.saturating_add(margin_lines) {
+        viewport.line_offset = span.start_line.saturating_sub(margin_lines);
+    } else if span.end_line > bottom.saturating_sub(margin_lines) {
+        let desired_bottom = span.end_line.saturating_add(margin_lines);
+        viewport.line_offset = desired_bottom.saturating_sub(content_height);
+    }
+    viewport.line_offset = viewport.line_offset.min(max_offset);
+}
+
+fn content_height(state: &RuntimeState) -> usize {
+    (state.rows as usize).saturating_sub(usize::from(state.config.block_view.show_footer))
 }
 
 fn contains_alternate_screen_switch(bytes: &[u8]) -> bool {
@@ -782,20 +802,39 @@ mod tests {
     }
 
     fn add_block(state: &mut RuntimeState, command: &str) {
+        add_block_with_lines(state, command, &[command]);
+    }
+
+    fn add_block_with_lines(state: &mut RuntimeState, command: &str, lines: &[&str]) {
         let id = state.blocks.start_command(
             command.to_string(),
             state.shell.line_count(),
             BlockKind::NormalCommand,
         );
-        state
-            .shell
-            .append(format!("{command}\n").as_bytes(), Some(id));
-        state
-            .blocks
-            .append_output(format!("{command}\n").as_bytes());
+        for line in lines {
+            state.shell.append(format!("{line}\n").as_bytes(), Some(id));
+            state.blocks.append_output(format!("{line}\n").as_bytes());
+        }
         state
             .blocks
             .finish_command(0, state.shell.line_count().saturating_sub(1));
+    }
+
+    fn selected_span_is_fully_visible(state: &RuntimeState) -> bool {
+        let layout = Compositor::build_visual_layout(
+            &state.shell,
+            &state.blocks,
+            &state.view,
+            state.cols,
+            &state.config.block_view,
+        );
+        let Some(span) = layout.span_for_block_index(state.view.block_viewport.selected_index)
+        else {
+            return false;
+        };
+        let top = state.view.block_viewport.line_offset;
+        let bottom = top.saturating_add(content_height(state));
+        span.start_line >= top && span.end_line <= bottom
     }
 
     #[test]
@@ -858,11 +897,99 @@ mod tests {
 
         assert!(handle_block_view_byte(b'g', &mut state));
         assert!(state.render_state.force_render);
+        assert_eq!(state.view.block_viewport.selected_index, 0);
+        assert_eq!(state.view.block_viewport.line_offset, 0);
+        assert!(matches!(state.view.block_viewport.anchor, ViewAnchor::Top));
 
         state.render_state.force_render = false;
         state.render_state.dirty = false;
         assert!(handle_block_view_byte(b'G', &mut state));
         assert!(state.render_state.force_render);
+        assert_eq!(
+            state.view.block_viewport.selected_index,
+            state.blocks.len() - 1
+        );
+        assert_eq!(
+            state.view.block_viewport.line_offset,
+            compute_tail_scroll_offset(&state)
+        );
+        assert!(matches!(state.view.block_viewport.anchor, ViewAnchor::Tail));
+    }
+
+    #[test]
+    fn enter_block_view_uses_tail_line_offset() {
+        let mut state = runtime_state();
+        state.rows = 8;
+        for index in 0..8 {
+            add_block(&mut state, &format!("echo {index}"));
+        }
+
+        enter_block_view(&mut state);
+
+        assert_eq!(
+            state.view.block_viewport.selected_index,
+            state.blocks.len() - 1
+        );
+        assert_eq!(
+            state.view.block_viewport.line_offset,
+            compute_tail_scroll_offset(&state)
+        );
+        assert!(state.view.block_viewport.line_offset > 0);
+    }
+
+    #[test]
+    fn ensure_selected_visible_moves_line_offset_only_when_needed() {
+        let mut state = runtime_state();
+        state.rows = 9;
+        add_block_with_lines(&mut state, "a", &["a1", "a2", "a3", "a4"]);
+        add_block(&mut state, "b");
+        add_block(&mut state, "c");
+        state.view.view = ViewKind::Blocks;
+        select_block_index(&mut state, 1, ViewAnchor::Manual);
+        let offset_after_select = state.view.block_viewport.line_offset;
+
+        ensure_selected_visible(&mut state);
+
+        assert_eq!(state.view.block_viewport.line_offset, offset_after_select);
+        assert!(selected_span_is_fully_visible(&state));
+    }
+
+    #[test]
+    fn selecting_partial_block_adjusts_line_offset_to_show_it_fully() {
+        let mut state = runtime_state();
+        state.rows = 9;
+        add_block_with_lines(&mut state, "a", &["a1", "a2", "a3", "a4"]);
+        add_block_with_lines(&mut state, "b", &["b1", "b2", "b3"]);
+        add_block(&mut state, "c");
+        state.view.view = ViewKind::Blocks;
+        state.view.block_viewport.anchor = ViewAnchor::Manual;
+        state.view.block_viewport.selected_index = 1;
+        state.view.selected_block = state.blocks.block_id_at(1);
+        state.view.block_viewport.line_offset = 3;
+
+        ensure_selected_visible(&mut state);
+
+        assert!(selected_span_is_fully_visible(&state));
+        assert!(matches!(
+            state.view.block_viewport.anchor,
+            ViewAnchor::Manual
+        ));
+    }
+
+    #[test]
+    fn boundary_navigation_noop_preserves_line_offset() {
+        let mut state = runtime_state();
+        add_block(&mut state, "echo one");
+        enter_block_view(&mut state);
+        let old_line_offset = state.view.block_viewport.line_offset;
+
+        assert!(!select_relative_block(&mut state, 1));
+        assert_eq!(state.view.block_viewport.selected_index, 0);
+        assert_eq!(state.view.block_viewport.line_offset, old_line_offset);
+
+        assert!(!select_relative_block(&mut state, -1));
+        assert_eq!(state.view.block_viewport.selected_index, 0);
+        assert_eq!(state.view.block_viewport.line_offset, old_line_offset);
     }
 
     #[test]

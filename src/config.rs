@@ -190,6 +190,8 @@ pub struct BlockViewConfig {
     pub block_gap: usize,
     #[serde(default = "default_scroll_margin_blocks")]
     pub scroll_margin_blocks: usize,
+    #[serde(default = "default_scroll_margin_lines")]
+    pub scroll_margin_lines: usize,
     #[serde(default)]
     pub auto_follow_on_reach_bottom: bool,
     #[serde(default = "default_horizontal_margin")]
@@ -210,6 +212,7 @@ impl Default for BlockViewConfig {
             follow_tail: default_follow_tail(),
             block_gap: default_block_gap(),
             scroll_margin_blocks: default_scroll_margin_blocks(),
+            scroll_margin_lines: default_scroll_margin_lines(),
             auto_follow_on_reach_bottom: false,
             horizontal_margin: default_horizontal_margin(),
             body_padding: default_body_padding(),
@@ -309,6 +312,10 @@ fn default_scroll_margin_blocks() -> usize {
     2
 }
 
+fn default_scroll_margin_lines() -> usize {
+    2
+}
+
 fn default_horizontal_margin() -> usize {
     1
 }
@@ -356,6 +363,7 @@ mod tests {
         assert!(runtime.block_view.follow_tail);
         assert_eq!(runtime.block_view.block_gap, 0);
         assert_eq!(runtime.block_view.scroll_margin_blocks, 2);
+        assert_eq!(runtime.block_view.scroll_margin_lines, 2);
         assert!(!runtime.block_view.auto_follow_on_reach_bottom);
         assert_eq!(runtime.block_view.horizontal_margin, 1);
         assert_eq!(runtime.block_view.body_padding, 1);
