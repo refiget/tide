@@ -317,7 +317,60 @@ echo 12
 - 未展开 block 最多显示 `preview_lines` 行，并在超出时提示还有多少行。
 - `Enter` 后当前 block 才展开 Detail，并最多显示 `expanded_lines` 行。
 
-### 6. 当前雏形限制
+### 6. 强制重绘验证
+
+目标：View 模式切换后，屏幕应立刻更新，不留残留 UI。
+
+1. 在 Plain View 下运行几条命令后按 `Ctrl-B` 进入 Block View。
+2. 在 Block View 中按 `j`、`k` 选择不同 block。
+3. 按 `Enter` 进入 Detail View。
+4. 按 `q` 或 `Esc` 返回 Block View，再按 `q` 或 `Esc` 返回 Plain View。
+
+预期：
+
+- 每次切换 View 后，屏幕立刻重绘，不应残留前一模式的 UI 元素。
+- 从 Plain 进入 Block View 时，正常显示 block metadata。
+- 从 Block View 返回 Plain 时，屏幕应只显示 shell 文本，没有 block 边框残留。
+- 从 Detail 返回 Block View 时，不再显示 Detail 行。
+
+### 7. auto_follow_on_reach_bottom 行为验证
+
+目标：`auto_follow_on_reach_bottom = false`（默认）时，`j` 到达最后一条 block 后不应切到 Tail anchor；新命令出现时 viewport 应保持在原位。
+
+1. 配置中设置 `auto_follow_on_reach_bottom = false`（或保持默认）。
+2. 启动 Tide，运行 5-8 条命令。
+3. 按 `Ctrl-B` 进入 Block View。
+4. 按 `g` 跳到第一条 block（Top anchor）。
+5. 多次按 `j` 逐渐向下移动，直到到达最后一条 block。
+6. 注意观察 anchor 标记（或判断 scroll behavior：再运行一条新命令，viewport 不应自动跟随新命令）。
+
+预期：
+
+- `j` 到达最后一条 block 后，anchor 保持 Manual（而不是 Tail）。
+- 此时运行新命令，viewport 不应自动滚动到新 block。
+- 只有按 `G` 时，才会启用 Tail anchor 并跟随新命令。
+
+然后改为 `auto_follow_on_reach_bottom = true` 重复测试：
+
+预期：
+
+- `j` 到达最后一条 block 时 anchor 变成 Tail。
+- 新命令出现时 viewport 自动跟随。
+
+### 8. 输入累积和帧率限制验证
+
+目标：快速重复按 `j`/`k` 时，输入被累积，仅在帧间隔到达时刷新屏幕。
+
+1. 进入 Block View，快速重复按 `j` 5-10 次（不需要等待每次渲染）。
+2. 观察屏幕更新节奏。
+
+预期：
+
+- 屏幕不会每次按键都重绘（不应出现闪烁）。
+- 最多每秒约 60 帧的更新频率（16ms FRAME_DURATION）。
+- 最终选中的 block 和 viewport 位置正确。
+
+### 9. 当前雏形限制
 
 - Block View / Detail View 暂时只读，只支持选择和查看。
 - 暂不支持复制、重跑、保存、删除、AI 解释等操作。

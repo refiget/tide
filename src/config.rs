@@ -190,6 +190,8 @@ pub struct BlockViewConfig {
     pub block_gap: usize,
     #[serde(default = "default_scroll_margin_blocks")]
     pub scroll_margin_blocks: usize,
+    #[serde(default)]
+    pub auto_follow_on_reach_bottom: bool,
 }
 
 impl Default for BlockViewConfig {
@@ -200,6 +202,7 @@ impl Default for BlockViewConfig {
             follow_tail: default_follow_tail(),
             block_gap: default_block_gap(),
             scroll_margin_blocks: default_scroll_margin_blocks(),
+            auto_follow_on_reach_bottom: false,
         }
     }
 }
@@ -329,6 +332,7 @@ mod tests {
         assert!(runtime.block_view.follow_tail);
         assert_eq!(runtime.block_view.block_gap, 0);
         assert_eq!(runtime.block_view.scroll_margin_blocks, 2);
+        assert!(!runtime.block_view.auto_follow_on_reach_bottom);
         assert_eq!(runtime.max_blocks, Some(1000));
     }
 

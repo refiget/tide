@@ -36,6 +36,13 @@ pub enum VisualLine {
 
 pub struct Compositor;
 
+#[derive(Debug, Clone, Copy)]
+pub struct VisibleBlockRange {
+    pub start: usize,
+    pub end: usize,
+    pub top_padding_lines: usize,
+}
+
 impl Compositor {
     pub fn build_visual_lines(
         shell: &ShellBuffer,
@@ -71,11 +78,11 @@ impl Compositor {
     ) -> Vec<VisualLine> {
         let shell_lines = shell.snapshot();
         let mut visual_lines = Vec::new();
-        let viewport_start = view.block_viewport.scroll_offset.min(blocks.len());
-        let mut used_height = 0_usize;
         let height = height as usize;
+        let range =
+            Self::compute_visible_range_from_lines(&shell_lines, blocks, view, height, block_view);
 
-        for index in viewport_start..blocks.len() {
+        for index in range.start..=range.end {
             let Some(block_id) = blocks.block_id_at(index) else {
                 continue;
             };
@@ -90,19 +97,18 @@ impl Compositor {
                 block_view,
                 view.selected_block == Some(block_id),
             );
-            let block_height = block_lines.len();
-            if used_height > 0 && used_height.saturating_add(block_height) > height {
-                break;
-            }
-            used_height = used_height.saturating_add(block_height);
             visual_lines.extend(block_lines);
         }
 
-        if !matches!(view.block_viewport.anchor, ViewAnchor::Top) && visual_lines.len() < height {
+        if visual_lines.len() > height {
+            visual_lines.truncate(height);
+        }
+
+        if range.top_padding_lines > 0 {
             let mut bottom_aligned = Vec::with_capacity(height);
             bottom_aligned.extend(std::iter::repeat_n(
                 VisualLine::Empty,
-                height.saturating_sub(visual_lines.len()),
+                range.top_padding_lines,
             ));
             bottom_aligned.extend(visual_lines);
             return bottom_aligned;
@@ -192,6 +198,160 @@ impl Compositor {
 
         lines
     }
+
+    pub fn compute_visible_range(
+        shell: &ShellBuffer,
+        blocks: &BlockStore,
+        view: &ViewState,
+        height: usize,
+        block_view: &BlockViewConfig,
+    ) -> VisibleBlockRange {
+        let shell_lines = shell.snapshot();
+        Self::compute_visible_range_from_lines(&shell_lines, blocks, view, height, block_view)
+    }
+
+    fn compute_visible_range_from_lines(
+        shell_lines: &[crate::buffer::ShellLine],
+        blocks: &BlockStore,
+        view: &ViewState,
+        height: usize,
+        block_view: &BlockViewConfig,
+    ) -> VisibleBlockRange {
+        if blocks.is_empty() {
+            return VisibleBlockRange {
+                start: 0,
+                end: 0,
+                top_padding_lines: height,
+            };
+        }
+
+        let start = view
+            .block_viewport
+            .scroll_offset
+            .min(blocks.len().saturating_sub(1));
+        let mut used_height = 0_usize;
+        let mut end = start;
+
+        for index in start..blocks.len() {
+            let Some(block_id) = blocks.block_id_at(index) else {
+                break;
+            };
+            let Some(block) = blocks.block(block_id) else {
+                break;
+            };
+            let block_height = Self::visual_height_for_block_from_lines(
+                shell_lines,
+                block,
+                view,
+                block_view,
+                view.selected_block == Some(block_id),
+            );
+            if used_height > 0 && used_height.saturating_add(block_height) > height {
+                break;
+            }
+            used_height = used_height.saturating_add(block_height);
+            end = index;
+        }
+
+        let top_padding_lines =
+            if !matches!(view.block_viewport.anchor, ViewAnchor::Top) && used_height < height {
+                height.saturating_sub(used_height)
+            } else {
+                0
+            };
+
+        VisibleBlockRange {
+            start,
+            end,
+            top_padding_lines,
+        }
+    }
+
+    pub fn compute_tail_scroll_offset(
+        shell: &ShellBuffer,
+        blocks: &BlockStore,
+        view: &ViewState,
+        height: usize,
+        block_view: &BlockViewConfig,
+    ) -> usize {
+        let shell_lines = shell.snapshot();
+        let mut used_height = 0_usize;
+        let mut offset = blocks.len();
+
+        while offset > 0 {
+            let index = offset - 1;
+            let Some(block_id) = blocks.block_id_at(index) else {
+                break;
+            };
+            let Some(block) = blocks.block(block_id) else {
+                break;
+            };
+            let block_height = Self::visual_height_for_block_from_lines(
+                &shell_lines,
+                block,
+                view,
+                block_view,
+                view.selected_block == Some(block_id),
+            );
+            if used_height.saturating_add(block_height) > height {
+                break;
+            }
+            used_height = used_height.saturating_add(block_height);
+            offset -= 1;
+        }
+
+        offset
+    }
+
+    pub fn compute_scroll_offset_ending_at(
+        shell: &ShellBuffer,
+        blocks: &BlockStore,
+        view: &ViewState,
+        selected_index: usize,
+        height: usize,
+        block_view: &BlockViewConfig,
+    ) -> usize {
+        let shell_lines = shell.snapshot();
+        let mut used_height = 0_usize;
+        let mut offset = selected_index.saturating_add(1).min(blocks.len());
+
+        while offset > 0 {
+            let index = offset - 1;
+            let Some(block_id) = blocks.block_id_at(index) else {
+                break;
+            };
+            let Some(block) = blocks.block(block_id) else {
+                break;
+            };
+            let block_height = Self::visual_height_for_block_from_lines(
+                &shell_lines,
+                block,
+                view,
+                block_view,
+                view.selected_block == Some(block_id),
+            );
+            if used_height.saturating_add(block_height) > height {
+                break;
+            }
+            used_height = used_height.saturating_add(block_height);
+            offset -= 1;
+        }
+
+        offset
+    }
+
+    fn visual_height_for_block_from_lines(
+        shell_lines: &[crate::buffer::ShellLine],
+        block: &CommandBlock,
+        view: &ViewState,
+        block_view: &BlockViewConfig,
+        selected: bool,
+    ) -> usize {
+        // Keep viewport math and rendered output on exactly the same code path.
+        // If scrolling performance becomes an issue, cache visual heights keyed
+        // by block_id, width, view mode, expanded state, and config.
+        Self::build_one_block_lines(shell_lines, block, view, block_view, selected).len()
+    }
 }
 
 fn detail_lines(block: &CommandBlock, selected: bool) -> Vec<VisualLine> {
@@ -257,4 +417,299 @@ fn bottom_label(block: &CommandBlock) -> String {
         block.id,
         format_duration_ms(block.duration_ms)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::{
+        app::{BlockKind, BlockStatus, ViewAnchor},
+        block::BlockStore,
+        buffer::ShellBuffer,
+        config::BlockViewConfig,
+    };
+
+    use super::*;
+
+    fn fixture() -> (ShellBuffer, BlockStore, ViewState, BlockViewConfig) {
+        (
+            ShellBuffer::new(),
+            BlockStore::new(PathBuf::from("/tmp"), None, 1024 * 1024),
+            ViewState::default(),
+            BlockViewConfig::default(),
+        )
+    }
+
+    fn add_block(
+        shell: &mut ShellBuffer,
+        store: &mut BlockStore,
+        command: &str,
+        lines: &[&str],
+    ) -> BlockId {
+        let start = shell.line_count();
+        let id = store.start_command(command.to_string(), start, BlockKind::NormalCommand);
+        for line in lines {
+            shell.append(format!("{line}\n").as_bytes(), Some(id));
+            store.append_output(format!("{line}\n").as_bytes());
+        }
+        let end = if lines.is_empty() {
+            start.saturating_sub(1)
+        } else {
+            shell.line_count().saturating_sub(1)
+        };
+        store.finish_command(0, end);
+        id
+    }
+
+    fn add_raw_block(shell: &ShellBuffer, store: &mut BlockStore, command: &str) -> BlockId {
+        let id = store.start_command(
+            command.to_string(),
+            shell.line_count(),
+            BlockKind::RawProgram,
+        );
+        store.finish_command(0, shell.line_count().saturating_sub(1));
+        if let Some(block) = store.block_mut(id) {
+            block.kind = BlockKind::RawProgram;
+            block.status = BlockStatus::Success;
+        }
+        id
+    }
+
+    fn tail_view(view: &mut ViewState, store: &BlockStore) {
+        view.view = ViewKind::Blocks;
+        view.block_viewport.anchor = ViewAnchor::Tail;
+        let selected = store.len().saturating_sub(1);
+        view.block_viewport.selected_index = selected;
+        view.selected_block = store.block_id_at(selected);
+    }
+
+    fn assert_lines_match_range(
+        shell: &ShellBuffer,
+        store: &BlockStore,
+        view: &ViewState,
+        config: &BlockViewConfig,
+        height: usize,
+    ) {
+        let range = Compositor::compute_visible_range(shell, store, view, height, config);
+        let visual = Compositor::build_visual_lines(
+            shell,
+            store,
+            view,
+            80,
+            height as u16,
+            &Default::default(),
+            config,
+        );
+
+        assert!(visual.len() <= height);
+        if !store.is_empty() {
+            assert!(range.start <= range.end);
+        }
+        assert_eq!(
+            range.top_padding_lines
+                + rendered_block_lines(shell, store, view, config, range.start, range.end),
+            visual.len()
+        );
+    }
+
+    fn rendered_block_lines(
+        shell: &ShellBuffer,
+        store: &BlockStore,
+        view: &ViewState,
+        config: &BlockViewConfig,
+        start: usize,
+        end: usize,
+    ) -> usize {
+        if store.is_empty() {
+            return 0;
+        }
+        let shell_lines = shell.snapshot();
+        (start..=end)
+            .filter_map(|index| {
+                let block_id = store.block_id_at(index)?;
+                let block = store.block(block_id)?;
+                Some(
+                    Compositor::build_one_block_lines(
+                        &shell_lines,
+                        block,
+                        view,
+                        config,
+                        view.selected_block == Some(block_id),
+                    )
+                    .len(),
+                )
+            })
+            .sum()
+    }
+
+    #[test]
+    fn visible_range_for_empty_store_is_safe() {
+        let (shell, store, mut view, config) = fixture();
+        view.view = ViewKind::Blocks;
+        view.block_viewport.anchor = ViewAnchor::Tail;
+        let range = Compositor::compute_visible_range(&shell, &store, &view, 10, &config);
+        let visual = Compositor::build_visual_lines(
+            &shell,
+            &store,
+            &view,
+            80,
+            10,
+            &Default::default(),
+            &config,
+        );
+
+        assert_eq!(range.start, 0);
+        assert_eq!(range.end, 0);
+        assert_eq!(range.top_padding_lines, 10);
+        assert_eq!(visual.len(), 10);
+    }
+
+    #[test]
+    fn single_tail_block_bottom_aligns_when_shorter_than_screen() {
+        let (mut shell, mut store, mut view, config) = fixture();
+        add_block(&mut shell, &mut store, "echo one", &["one"]);
+        tail_view(&mut view, &store);
+
+        let range = Compositor::compute_visible_range(&shell, &store, &view, 10, &config);
+
+        assert_eq!(range.start, 0);
+        assert_eq!(range.end, 0);
+        assert!(range.top_padding_lines > 0);
+        assert_lines_match_range(&shell, &store, &view, &config, 10);
+    }
+
+    #[test]
+    fn range_limits_visible_blocks_when_history_exceeds_screen() {
+        let (mut shell, mut store, mut view, config) = fixture();
+        for index in 0..6 {
+            add_block(
+                &mut shell,
+                &mut store,
+                &format!("echo {index}"),
+                &[&format!("{index}")],
+            );
+        }
+        tail_view(&mut view, &store);
+        view.block_viewport.scroll_offset =
+            Compositor::compute_tail_scroll_offset(&shell, &store, &view, 8, &config);
+
+        let range = Compositor::compute_visible_range(&shell, &store, &view, 8, &config);
+
+        assert!(range.start > 0);
+        assert!(range.end < store.len());
+        assert_eq!(range.end, store.len() - 1);
+        assert!(range.top_padding_lines > 0);
+        assert_lines_match_range(&shell, &store, &view, &config, 8);
+    }
+
+    #[test]
+    fn mixed_height_blocks_do_not_overrun_visible_range() {
+        let (mut shell, mut store, mut view, config) = fixture();
+        add_block(&mut shell, &mut store, "short", &["one"]);
+        add_block(
+            &mut shell,
+            &mut store,
+            "long",
+            &["1", "2", "3", "4", "5", "6", "7", "8"],
+        );
+        add_block(&mut shell, &mut store, "tail", &["tail"]);
+        tail_view(&mut view, &store);
+        view.block_viewport.scroll_offset =
+            Compositor::compute_tail_scroll_offset(&shell, &store, &view, 12, &config);
+
+        assert_lines_match_range(&shell, &store, &view, &config, 12);
+    }
+
+    #[test]
+    fn raw_and_empty_blocks_have_consistent_placeholder_height() {
+        let (mut shell, mut store, mut view, config) = fixture();
+        add_block(&mut shell, &mut store, "true", &[]);
+        add_raw_block(&shell, &mut store, "vim");
+        tail_view(&mut view, &store);
+
+        let range = Compositor::compute_visible_range(&shell, &store, &view, 20, &config);
+        let visual = Compositor::build_visual_lines(
+            &shell,
+            &store,
+            &view,
+            80,
+            20,
+            &Default::default(),
+            &config,
+        );
+
+        assert_eq!(range.start, 0);
+        assert!(visual.iter().any(|line| matches!(line, VisualLine::BlockBodyLine { text, .. } if text == "no captured text output")));
+        assert!(visual.iter().any(|line| matches!(line, VisualLine::BlockBodyLine { text, .. } if text == "interactive program; screen output was not captured")));
+        assert_lines_match_range(&shell, &store, &view, &config, 20);
+    }
+
+    #[test]
+    fn detail_expansion_participates_in_visible_range_and_tail_offset() {
+        let (mut shell, mut store, mut view, config) = fixture();
+        add_block(&mut shell, &mut store, "one", &["one"]);
+        let tail = add_block(
+            &mut shell,
+            &mut store,
+            "two",
+            &["1", "2", "3", "4", "5", "6"],
+        );
+        tail_view(&mut view, &store);
+        view.view = ViewKind::Detail;
+        view.expanded_block = Some(tail);
+        view.selected_block = Some(tail);
+        view.block_viewport.scroll_offset =
+            Compositor::compute_tail_scroll_offset(&shell, &store, &view, 14, &config);
+
+        let range = Compositor::compute_visible_range(&shell, &store, &view, 14, &config);
+        let visual = Compositor::build_visual_lines(
+            &shell,
+            &store,
+            &view,
+            80,
+            14,
+            &Default::default(),
+            &config,
+        );
+
+        assert_eq!(range.end, store.len() - 1);
+        assert!(visual.iter().any(
+            |line| matches!(line, VisualLine::BlockDetailLine { text, .. } if text == "Detail")
+        ));
+        assert!(visual.len() <= 14);
+    }
+
+    #[test]
+    fn tail_offset_is_zero_when_history_is_shorter_than_screen() {
+        let (mut shell, mut store, mut view, config) = fixture();
+        add_block(&mut shell, &mut store, "one", &["one"]);
+        add_block(&mut shell, &mut store, "two", &["two"]);
+        tail_view(&mut view, &store);
+
+        let offset = Compositor::compute_tail_scroll_offset(&shell, &store, &view, 20, &config);
+
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn tail_offset_points_to_recent_blocks_when_history_exceeds_screen() {
+        let (mut shell, mut store, mut view, config) = fixture();
+        for index in 0..8 {
+            add_block(
+                &mut shell,
+                &mut store,
+                &format!("cmd {index}"),
+                &[&format!("{index}")],
+            );
+        }
+        tail_view(&mut view, &store);
+
+        let offset = Compositor::compute_tail_scroll_offset(&shell, &store, &view, 8, &config);
+
+        assert!(offset > 0);
+        view.block_viewport.scroll_offset = offset;
+        let range = Compositor::compute_visible_range(&shell, &store, &view, 8, &config);
+        assert_eq!(range.end, store.len() - 1);
+    }
 }

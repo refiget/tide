@@ -225,7 +225,11 @@ pub fn run_shell(config: &Config) -> Result<()> {
                                 {
                                     enter_block_view(&mut state);
                                     drop(state);
-                                    let _ = render_runtime(&input_state, &input_stdout);
+                                    let _ = maybe_flush_navigation_and_render(
+                                        &input_state,
+                                        &input_stdout,
+                                        false,
+                                    );
                                 } else if writer.write_all(&[byte]).is_err() {
                                     return;
                                 }
@@ -394,12 +398,15 @@ fn maybe_flush_navigation_and_render(
         if !state.render_state.dirty {
             return Ok(());
         }
-
-        let elapsed = state.render_state.last_render_at.elapsed();
-        if elapsed < FRAME_DURATION {
-            FRAME_DURATION - elapsed
-        } else {
+        if state.render_state.force_render {
             Duration::ZERO
+        } else {
+            let elapsed = state.render_state.last_render_at.elapsed();
+            if elapsed < FRAME_DURATION {
+                FRAME_DURATION - elapsed
+            } else {
+                Duration::ZERO
+            }
         }
     };
 
@@ -413,22 +420,34 @@ fn maybe_flush_navigation_and_render(
         let mut state = state
             .lock()
             .map_err(|_| io::Error::other("runtime state lock poisoned"))?;
-        let changed = flush_navigation_delta(&mut state);
-        if !changed && state.input_accumulator.pending_block_delta == 0 {
-            state.render_state.dirty = false;
+        if !flush_render_state(&mut state) {
             return Ok(());
         }
-        state.render_state.dirty = false;
-        state.render_state.last_render_at = Instant::now();
     }
 
     render_runtime(state, stdout)
+}
+
+fn flush_render_state(state: &mut RuntimeState) -> bool {
+    let force_render = state.render_state.force_render;
+    let changed = flush_navigation_delta(state);
+    if !force_render && !changed && state.input_accumulator.pending_block_delta == 0 {
+        state.render_state.dirty = false;
+        return false;
+    }
+
+    state.render_state.dirty = false;
+    state.render_state.force_render = false;
+    state.render_state.last_render_at = Instant::now();
+    true
 }
 
 fn enter_block_view(state: &mut RuntimeState) {
     state.view.view = ViewKind::Blocks;
     state.view.expanded_block = None;
     select_tail_block(state);
+    state.render_state.dirty = true;
+    state.render_state.force_render = true;
 }
 
 fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> Option<usize> {
@@ -458,6 +477,7 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                 state.view.view = ViewKind::Blocks;
                 state.view.expanded_block = None;
                 state.render_state.dirty = true;
+                state.render_state.force_render = true;
                 Some(1)
             }
             [_byte, ..] => Some(1),
@@ -472,6 +492,7 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
             state.view = ViewState::default();
             state.input_accumulator.pending_block_delta = 0;
             state.render_state.dirty = true;
+            state.render_state.force_render = true;
             true
         }
         b'j' => {
@@ -486,19 +507,25 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
             state.input_accumulator.pending_block_delta = 0;
             select_tail_block(state);
             state.render_state.dirty = true;
+            state.render_state.force_render = true;
             true
         }
         b'g' => {
             state.input_accumulator.pending_block_delta = 0;
             select_block_index(state, 0, ViewAnchor::Top);
             state.render_state.dirty = true;
+            state.render_state.force_render = true;
             true
         }
         b'\r' | b'\n' => {
             flush_navigation_delta(state);
             state.view.expanded_block = state.view.selected_block;
             state.view.view = ViewKind::Detail;
+            if matches!(state.view.block_viewport.anchor, ViewAnchor::Tail) {
+                state.view.block_viewport.scroll_offset = compute_tail_scroll_offset(state);
+            }
             state.render_state.dirty = true;
+            state.render_state.force_render = true;
             true
         }
         _ => true,
@@ -510,10 +537,12 @@ fn accumulate_block_delta(state: &mut RuntimeState, delta: isize) {
         return;
     }
 
+    let limit = (state.blocks.len().max(1).min(500)) as isize;
     state.input_accumulator.pending_block_delta = state
         .input_accumulator
         .pending_block_delta
-        .saturating_add(delta);
+        .saturating_add(delta)
+        .clamp(-limit, limit);
     state.input_accumulator.last_input_at = Some(Instant::now());
     state.render_state.dirty = true;
 }
@@ -555,7 +584,8 @@ fn select_relative_block(state: &mut RuntimeState, delta: isize) -> bool {
         .selected_index
         .min(state.blocks.len().saturating_sub(1));
     let next = if delta.is_negative() {
-        current.saturating_sub(delta.unsigned_abs())
+        let magnitude = delta.checked_abs().unwrap_or(isize::MAX) as usize;
+        current.saturating_sub(magnitude)
     } else {
         (current + delta as usize).min(state.blocks.len().saturating_sub(1))
     };
@@ -564,7 +594,10 @@ fn select_relative_block(state: &mut RuntimeState, delta: isize) -> bool {
     }
     let old_scroll = state.view.block_viewport.scroll_offset;
     let old_anchor = state.view.block_viewport.anchor;
-    let anchor = if !delta.is_negative() && next == state.blocks.len().saturating_sub(1) {
+    let anchor = if state.config.block_view.auto_follow_on_reach_bottom
+        && !delta.is_negative()
+        && next == state.blocks.len().saturating_sub(1)
+    {
         ViewAnchor::Tail
     } else {
         ViewAnchor::Manual
@@ -639,64 +672,13 @@ fn select_tail_block(state: &mut RuntimeState) {
 }
 
 fn compute_tail_scroll_offset(state: &RuntimeState) -> usize {
-    let mut used_height = 0_usize;
-    let mut offset = state.blocks.len();
-    let terminal_height = state.rows as usize;
-
-    while offset > 0 {
-        let Some(block_id) = state.blocks.block_id_at(offset - 1) else {
-            break;
-        };
-        let Some(block) = state.blocks.block(block_id) else {
-            break;
-        };
-        let height = block_preview_height(block, &state.config.block_view);
-
-        if used_height.saturating_add(height) > terminal_height {
-            break;
-        }
-
-        used_height = used_height.saturating_add(height);
-        offset -= 1;
-    }
-
-    offset
-}
-
-#[derive(Debug, Clone, Copy)]
-struct VisibleRange {
-    start: usize,
-    end: usize,
-}
-
-fn compute_visible_range_from_offset(state: &RuntimeState) -> VisibleRange {
-    let start = state
-        .view
-        .block_viewport
-        .scroll_offset
-        .min(state.blocks.len());
-    let mut used_height = 0_usize;
-    let mut end = start;
-    let terminal_height = state.rows as usize;
-
-    for index in start..state.blocks.len() {
-        let Some(block_id) = state.blocks.block_id_at(index) else {
-            break;
-        };
-        let Some(block) = state.blocks.block(block_id) else {
-            break;
-        };
-        let expanded = state.view.expanded_block == Some(block_id)
-            && matches!(state.view.view, ViewKind::Detail);
-        let height = compute_block_height(block, &state.config.block_view, expanded);
-        if end > start && used_height.saturating_add(height) > terminal_height {
-            break;
-        }
-        used_height = used_height.saturating_add(height);
-        end = index;
-    }
-
-    VisibleRange { start, end }
+    Compositor::compute_tail_scroll_offset(
+        &state.shell,
+        &state.blocks,
+        &state.view,
+        state.rows as usize,
+        &state.config.block_view,
+    )
 }
 
 fn ensure_selected_visible(state: &mut RuntimeState) {
@@ -704,7 +686,13 @@ fn ensure_selected_visible(state: &mut RuntimeState) {
         return;
     }
 
-    let range = compute_visible_range_from_offset(state);
+    let range = Compositor::compute_visible_range(
+        &state.shell,
+        &state.blocks,
+        &state.view,
+        state.rows as usize,
+        &state.config.block_view,
+    );
     let selected = state.view.block_viewport.selected_index;
     if selected < range.start {
         state.view.block_viewport.scroll_offset = selected;
@@ -728,71 +716,14 @@ fn ensure_selected_visible(state: &mut RuntimeState) {
 }
 
 fn compute_scroll_offset_ending_at(state: &RuntimeState, selected_index: usize) -> usize {
-    let mut used_height = 0_usize;
-    let mut offset = selected_index.saturating_add(1).min(state.blocks.len());
-    let terminal_height = state.rows as usize;
-
-    while offset > 0 {
-        let index = offset - 1;
-        let Some(block_id) = state.blocks.block_id_at(index) else {
-            break;
-        };
-        let Some(block) = state.blocks.block(block_id) else {
-            break;
-        };
-        let expanded = state.view.expanded_block == Some(block_id)
-            && matches!(state.view.view, ViewKind::Detail);
-        let height = compute_block_height(block, &state.config.block_view, expanded);
-
-        if used_height.saturating_add(height) > terminal_height {
-            break;
-        }
-
-        used_height = used_height.saturating_add(height);
-        offset -= 1;
-    }
-
-    offset
-}
-
-fn compute_block_height(
-    block: &crate::app::CommandBlock,
-    config: &crate::config::BlockViewConfig,
-    expanded: bool,
-) -> usize {
-    let body_lines = if block.kind == BlockKind::RawProgram {
-        1
-    } else {
-        let output_lines = block.output_text.lines().count().max(1);
-        let limit = if expanded {
-            config.expanded_lines
-        } else {
-            config.preview_lines
-        };
-        let shown = output_lines.min(limit);
-        let truncation = usize::from(output_lines > shown);
-        shown + truncation
-    };
-    let detail_lines = if expanded { 10 } else { 0 };
-
-    1 + body_lines + detail_lines + 1 + config.block_gap
-}
-
-fn block_preview_height(
-    block: &crate::app::CommandBlock,
-    config: &crate::config::BlockViewConfig,
-) -> usize {
-    let body_lines = if block.kind == BlockKind::RawProgram {
-        1
-    } else {
-        let output_lines = block.output_text.lines().count();
-        let output_lines = output_lines.max(1);
-        let shown = output_lines.min(config.preview_lines);
-        let truncation = usize::from(output_lines > shown);
-        shown + truncation
-    };
-
-    1 + body_lines + 1 + config.block_gap
+    Compositor::compute_scroll_offset_ending_at(
+        &state.shell,
+        &state.blocks,
+        &state.view,
+        selected_index,
+        state.rows as usize,
+        &state.config.block_view,
+    )
 }
 
 fn contains_alternate_screen_switch(bytes: &[u8]) -> bool {
@@ -815,6 +746,133 @@ fn current_pty_size() -> PtySize {
         cols,
         pixel_width: 0,
         pixel_height: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::PathBuf,
+        sync::{Arc, Mutex},
+    };
+
+    use super::*;
+    use crate::config::Config;
+
+    fn runtime_state() -> RuntimeState {
+        let config = Config::default();
+        let runtime_config = build_runtime_config(config.clone());
+        RuntimeState {
+            shell: ShellBuffer::new(),
+            blocks: BlockStore::new(
+                PathBuf::from("/tmp"),
+                runtime_config.max_blocks,
+                config.blocks.max_output_bytes_per_block,
+            ),
+            view: ViewState::default(),
+            input_accumulator: InputAccumulator::default(),
+            render_state: RenderState::default(),
+            config: runtime_config,
+            capture_suspended: false,
+            rows: 24,
+            cols: 80,
+        }
+    }
+
+    fn add_block(state: &mut RuntimeState, command: &str) {
+        let id = state.blocks.start_command(
+            command.to_string(),
+            state.shell.line_count(),
+            BlockKind::NormalCommand,
+        );
+        state
+            .shell
+            .append(format!("{command}\n").as_bytes(), Some(id));
+        state
+            .blocks
+            .append_output(format!("{command}\n").as_bytes());
+        state
+            .blocks
+            .finish_command(0, state.shell.line_count().saturating_sub(1));
+    }
+
+    #[test]
+    fn entering_block_view_forces_render() {
+        let mut state = runtime_state();
+        add_block(&mut state, "echo one");
+
+        enter_block_view(&mut state);
+
+        assert!(state.render_state.dirty);
+        assert!(state.render_state.force_render);
+        assert!(flush_render_state(&mut state));
+        assert!(!state.render_state.dirty);
+        assert!(!state.render_state.force_render);
+    }
+
+    #[test]
+    fn block_to_plain_back_forces_render() {
+        let mut state = runtime_state();
+        add_block(&mut state, "echo one");
+        enter_block_view(&mut state);
+        state.render_state.dirty = false;
+        state.render_state.force_render = false;
+
+        assert!(handle_block_view_byte(b'q', &mut state));
+
+        assert!(matches!(state.view.view, ViewKind::Plain));
+        assert!(state.render_state.dirty);
+        assert!(state.render_state.force_render);
+    }
+
+    #[test]
+    fn detail_to_block_back_forces_render() {
+        let state = Arc::new(Mutex::new(runtime_state()));
+        {
+            let mut state = state.lock().unwrap();
+            add_block(&mut state, "echo one");
+            enter_block_view(&mut state);
+            state.view.view = ViewKind::Detail;
+            state.render_state.dirty = false;
+            state.render_state.force_render = false;
+        }
+
+        assert_eq!(handle_view_key_sequence(b"q", &state), Some(1));
+
+        let state = state.lock().unwrap();
+        assert!(matches!(state.view.view, ViewKind::Blocks));
+        assert!(state.render_state.dirty);
+        assert!(state.render_state.force_render);
+    }
+
+    #[test]
+    fn g_and_g_upper_force_render() {
+        let mut state = runtime_state();
+        add_block(&mut state, "echo one");
+        add_block(&mut state, "echo two");
+        enter_block_view(&mut state);
+        state.render_state.dirty = false;
+        state.render_state.force_render = false;
+
+        assert!(handle_block_view_byte(b'g', &mut state));
+        assert!(state.render_state.force_render);
+
+        state.render_state.force_render = false;
+        state.render_state.dirty = false;
+        assert!(handle_block_view_byte(b'G', &mut state));
+        assert!(state.render_state.force_render);
+    }
+
+    #[test]
+    fn force_render_flushes_once() {
+        let mut state = runtime_state();
+        state.render_state.dirty = true;
+        state.render_state.force_render = true;
+
+        assert!(flush_render_state(&mut state));
+        assert!(!state.render_state.dirty);
+        assert!(!state.render_state.force_render);
+        assert!(!flush_render_state(&mut state));
     }
 }
 

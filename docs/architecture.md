@@ -57,81 +57,57 @@ Responsibilities in this flow:
 - `Compositor` combines shell text, block data, and view state into visual lines for Block / Detail views.
 - `Renderer` draws visual lines only when Tide is in a reconstructed view.
 
-## Module Responsibilities
+## Module Layout
 
-Recommended long-term module layout:
+Current source layout (flat `src/` modules):
 
 ```text
 src/
-  app/
-    state.rs
-    runtime.rs
-    command.rs
-
-  pty/
-    session.rs
-
-  shell_integration/
-    zsh.rs
-    marker.rs
-
-  capture/
-    parser.rs
-    command_capture.rs
-
-  buffer/
-    shell_buffer.rs
-
-  block/
-    block.rs
-    store.rs
-    layout.rs
-
-  render/
-    compositor.rs
-    visual_line.rs
-    renderer.rs
-    styles.rs
-
-  input/
-    keymap.rs
+  main.rs          — thin entry point, loads config, starts PTY session
+  app.rs           — ViewState, BlockViewport, ViewAnchor, InputAccumulator,
+                     RenderState, AppEvent, CommandBlock, BlockKind, BlockStatus
+  pty.rs           — PTY session, marker parser integration, input/output threads,
+                     frame-rate-limited render loop, viewport math, navigation
+  block.rs         — BlockStore (timeline + HashMap), block lifecycle, duration formatting
+  buffer.rs        — ShellBuffer, ShellLine, ANSI escape sequence handling
+  compositor.rs    — VisualLine enum, compositor (ShellBuffer + BlockStore + ViewState → VisualLine),
+                     visible range computation, tail scroll offset, block height estimation
+  renderer.rs      — terminal render function, border drawing, framed text, truncation
+  shell_hooks.rs   — Osc777Parser, ShellHookEvent, ParsedPtyPart, zsh install script
+  config.rs        — Config loading (TOML), BlockViewConfig, BlockLayoutConfig, RuntimeConfig
 ```
 
-### app
+### app.rs
 
-Owns top-level app state, including input mode, view kind, selected block, expanded block, scroll offset, and runtime coordination.
+Owns top-level app state types: `ViewKind`, `InputMode`, `ViewState`, `BlockViewport`, `ViewAnchor`, `InputAccumulator`, `RenderState`, `AppEvent`, `CommandBlock`, `BlockKind`, `BlockStatus`, `BlockAction`.
 
-### pty
+### pty.rs
 
-Starts and manages the zsh PTY. It should move bytes between real stdin/stdout and the PTY, but should not own block layout or rendering policy.
+Starts and manages the zsh PTY, runs input and output threads, integrates the marker parser, captures shell output into `ShellBuffer` and `BlockStore`, handles keyboard input (including view-mode switching and Block View navigation), and coordinates frame-rate-limited rendering. Viewport math (visible range, tail scroll offset, scroll margin) was recently moved into the `Compositor` for a single source of truth on block height.
 
-### shell_integration
+### block.rs
 
-Owns zsh hook generation and shell marker definitions. Command lifecycle boundaries should come from markers such as `preexec`, `precmd`, and `chpwd`.
+Provides `BlockStore` with a `Vec<BlockId>` timeline and `HashMap<BlockId, CommandBlock>` lookup. Controls retention via `max_blocks`. Methods: `start_command`, `append_output`, `finish_command`, `block`, `block_id_at`, `len`.
 
-Tide must preserve the user's native zsh configuration. The runtime starts an interactive zsh and sets `TIDE=1` and `TIDE_SESSION_ID`. Users source Tide's integration from their own `.zshrc`; if they do not, Tide runs in degraded mode without command block boundaries.
+### buffer.rs
 
-### capture
+Owns shell text storage via `ShellBuffer`. Supports `append` with ANSI escape sequence handling (cursor movement, erase). Provides `snapshot()` for rendering and `cursor_position()` for Plain View cursor placement. Must not contain block borders, metadata, or detail text.
 
-Consumes PTY output and shell markers. It updates `ShellBuffer` and `BlockStore`.
+### compositor.rs
 
-### buffer
+Core of Block/Detail View rendering. `build_visual_lines` produces `Vec<VisualLine>` from `ShellBuffer + BlockStore + ViewState`. Also provides `compute_visible_range`, `compute_tail_scroll_offset`, and `compute_scroll_offset_ending_at` — these are the single source of truth for viewport math, using `build_one_block_lines().len()` instead of estimating height from `output_text`.
 
-Owns shell text storage. It must not contain block borders, block metadata lines, detail text, selected state, or expanded state.
+### renderer.rs
 
-### block
+Provides the `render()` function that draws `&[VisualLine]` to the real terminal via crossterm. Handles border characters (selected: `╭ ╮ ╰ ╯`, unselected: `┌ ┐ └ ┘`), framed text, titled borders, and cursor positioning.
 
-Owns structured command execution records and optional layout records.
+### shell_hooks.rs
 
-### render
+Owns zsh hook definitions (`install_script()`), the `Osc777Parser` that strips invisible OSC 777 markers from PTY output, and marker parsing (`parse_block_marker`).
 
-Owns visual composition and terminal drawing.
+### config.rs
 
-The compositor builds `VisualLine` values from `ShellBuffer + BlockStore + ViewState`. The renderer only draws those visual lines.
-
-### input
-
-Maps key events into app commands such as entering Block View, moving selection, expanding detail, returning, or forwarding bytes to zsh.
+Loads TOML config from `~/.config/tide/config.toml` or `config/tide.toml`. Provides `BlockViewConfig`, `BlockLayoutConfig`, `RuntimeConfig`, and defaults. See [config.md](config.md).
 
 ## Input Modes vs Display Layers
 
@@ -231,21 +207,31 @@ The block-end marker is the primary boundary. Do not rely on prompt regexes.
 
 ## Current Stage Scope
 
-Current implementation work should focus on:
+Current implementation is the minimal Block Layer loop with the following in place:
 
-- starting real zsh in a PTY
-- parsing zsh lifecycle markers
-- storing visible output in `ShellBuffer`
-- creating one `ExecutionBlock` per simple command
-- recording command, cwd, status, exit code, duration, and line range
-- preserving transparent Normal mode without RawProgram detection
-- rendering Block View by adding metadata lines around block ranges
-- controlling visible block history through `BlockViewport`, separate from `BlockStore` retention
-- truncating collapsed blocks with `preview_lines` and expanded blocks with `expanded_lines`
-- rendering Detail View by inserting detail lines inside the selected block
-- supporting simple navigation keys
+- Starting real zsh in a PTY with `TIDE=1` session environment
+- Parsing zsh lifecycle markers (`preexec` → block start, `precmd` → block end)
+- Storing visible output in `ShellBuffer`
+- Creating one `ExecutionBlock` per simple command with command, cwd, status, exit code, duration, and line range
+- Preserving transparent Normal mode; full-screen programs work without a whitelist
+- Rendering Block View with metadata borders (id, command, status, exit code, duration)
+- Controlling visible block history through `BlockViewport` (selected_index, scroll_offset, anchor), separate from `BlockStore` retention (`max_blocks`)
+- Truncating collapsed blocks with `preview_lines` and expanded blocks with `expanded_lines`
+- Rendering Detail View by inserting detail lines inside the selected block before the bottom border
+- Navigation: `j`/`k` (accumulated and flushed at frame cadence), `g`, `G`, `Enter`, `q`, `Esc`, Up/Down arrows
+- Viewport anchoring: `Tail` (follow newest), `Top` (oldest), `Manual` (preserve position)
+- Force render on view mode switches to prevent stale screen artifacts
+- Delta accumulation clamping to prevent unbounded growth
+- Config-gated `auto_follow_on_reach_bottom` for controlling `j`→Tail anchor behavior
+- Block store retention limits, alternate-screen detection for capture suspension
+- Frame-rate-limited rendering (16ms FRAME_DURATION)
 
-Complex terminal behavior may be simplified in this phase if the layer boundaries remain correct.
+Next-stage items (not yet implemented):
+
+- Return Panel
+- Block actions (copy, rerun, delete)
+- Persistence
+- AI-assisted explanations
 
 ## Future Extensions
 

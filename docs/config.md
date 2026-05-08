@@ -36,6 +36,7 @@ expanded_lines = 30
 follow_tail = true
 block_gap = 0
 scroll_margin_blocks = 2
+auto_follow_on_reach_bottom = false
 ```
 
 - `preview_lines` limits body lines for collapsed blocks.
@@ -43,6 +44,7 @@ scroll_margin_blocks = 2
 - `follow_tail` starts Block View with tail anchoring enabled.
 - `block_gap` inserts blank visual lines between blocks in Block View.
 - `scroll_margin_blocks` keeps a small block margin around the selected block during keyboard navigation.
+- `auto_follow_on_reach_bottom` controls whether pressing `j` onto the newest block re-enters Tail anchor.
 
 ## Block Layout
 

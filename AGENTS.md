@@ -153,6 +153,8 @@ Block View overlays Block Metadata Layer on the same shell history.
 - `Enter` opens Detail View
 - `q` / `Esc` returns to Plain View
 - repeated `j` / `k` input should be coalesced and rendered at frame cadence
+- `auto_follow_on_reach_bottom` config controls whether `j` reaching the last block re-enters Tail anchor (default false)
+- view mode switches use `force_render` to guarantee immediate redraw (no stale UI)
 
 Block View is not a list page and not a popup. It is a new rendering layer over the same shell history.
 

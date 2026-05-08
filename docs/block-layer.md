@@ -122,6 +122,7 @@ Block View overlays block metadata on the same shell history.
 - `BlockViewConfig.expanded_lines` controls expanded output height.
 - `BlockViewConfig.block_gap` controls blank visual lines between blocks.
 - `BlockViewConfig.scroll_margin_blocks` keeps navigation from pinning the selected block to the edge.
+- `BlockViewConfig.auto_follow_on_reach_bottom` controls whether pressing `j` onto the newest block re-enters Tail anchor (default `false`).
 
 For each block:
 
@@ -312,7 +313,11 @@ Block View:
 - `Enter` enters Detail View
 - `q` / `Esc` returns to Plain View
 
-Fast repeated `j` / `k` input should be coalesced before viewport adjustment and render. The viewport should only move when the selected block leaves the visible range or crosses the configured scroll margin.
+Fast repeated `j` / `k` input is accumulated via `InputAccumulator.pending_block_delta` and flushed at frame cadence (16ms `FRAME_DURATION`). The accumulated delta is clamped to `[-limit, limit]` where `limit = min(blocks.len(), 500)` to prevent unbounded growth. Navigation at block boundaries is a no-op only when there is no pending delta; accumulated delta is clamped on flush.
+
+View mode switches (enter Block View, return to Plain, enter/exit Detail, g/G jumps) set `RenderState.force_render = true`, which bypasses frame-rate limiting and forces an immediate redraw, preventing stale screen artifacts.
+
+`BlockViewConfig.auto_follow_on_reach_bottom` (default `false`) gates whether a `j`-driven arrival at the newest block changes the anchor to `Tail`. When `false` (the default), the anchor stays `Manual` — only the explicit `G` key re-enters Tail mode.
 
 Detail View:
 

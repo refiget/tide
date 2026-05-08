@@ -115,6 +115,7 @@ pub struct InputAccumulator {
 #[derive(Debug, Clone)]
 pub struct RenderState {
     pub dirty: bool,
+    pub force_render: bool,
     pub last_render_at: Instant,
 }
 
@@ -122,6 +123,7 @@ impl Default for RenderState {
     fn default() -> Self {
         Self {
             dirty: false,
+            force_render: false,
             last_render_at: Instant::now(),
         }
     }
