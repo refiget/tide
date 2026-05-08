@@ -225,6 +225,29 @@ pub struct CommandBlock {
     pub output_truncated: bool,
 }
 
+impl Default for CommandBlock {
+    fn default() -> Self {
+        Self {
+            id: BlockId(0),
+            command: String::new(),
+            cwd: PathBuf::new(),
+            started_at: std::time::UNIX_EPOCH,
+            finished_at: None,
+            duration_ms: None,
+            exit_code: None,
+            output_raw: Vec::new(),
+            output_text: String::new(),
+            kind: BlockKind::NormalCommand,
+            status: BlockStatus::Success,
+            git_context: None,
+            suggestions: Vec::new(),
+            start_line: 0,
+            end_line: 0,
+            output_truncated: false,
+        }
+    }
+}
+
 pub type ExecutionBlock = CommandBlock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

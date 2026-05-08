@@ -1,8 +1,11 @@
+use std::path::Path;
+
 use crate::{
     app::{BlockId, BlockKind, CommandBlock, ViewAnchor, ViewKind, ViewState},
     block::{BlockStore, format_duration_ms},
     buffer::ShellBuffer,
     config::{BlockLayoutConfig, BlockViewConfig},
+    format,
 };
 
 #[derive(Debug, Clone)]
@@ -112,6 +115,7 @@ impl Compositor {
         _layout: &BlockLayoutConfig,
         block_view: &BlockViewConfig,
         flash_message: Option<&str>,
+        home: Option<&Path>,
     ) -> Vec<VisualLine> {
         match view.view {
             ViewKind::Plain | ViewKind::RawProgram => shell
@@ -130,6 +134,7 @@ impl Compositor {
                 _width,
                 block_view,
                 flash_message,
+                home,
             ),
             ViewKind::Detail => Self::build_detail_lines(
                 shell,
@@ -139,6 +144,7 @@ impl Compositor {
                 height,
                 block_view,
                 flash_message,
+                home,
             ),
             ViewKind::Agent => Vec::new(),
         }
@@ -152,10 +158,11 @@ impl Compositor {
         width: u16,
         block_view: &BlockViewConfig,
         flash_message: Option<&str>,
+        home: Option<&Path>,
     ) -> Vec<VisualLine> {
         let height = height as usize;
         let content_height = height.saturating_sub(usize::from(block_view.show_footer));
-        let layout = Self::build_visual_layout(shell, blocks, view, width, block_view);
+        let layout = Self::build_visual_layout(shell, blocks, view, width, block_view, home);
         let mut visual_lines = Self::slice_visible_lines(&layout, view, content_height);
 
         if block_view.show_footer {
@@ -170,8 +177,9 @@ impl Compositor {
         shell: &ShellBuffer,
         blocks: &BlockStore,
         view: &ViewState,
-        _width: u16,
+        width: u16,
         block_view: &BlockViewConfig,
+        home: Option<&Path>,
     ) -> VisualLayout {
         let shell_lines = shell.snapshot();
         let mut lines = Vec::new();
@@ -188,6 +196,8 @@ impl Compositor {
                 view,
                 block_view,
                 view.selected_block == Some(block_id),
+                width,
+                home,
             );
             lines.extend(block_lines);
             spans.push(BlockVisualSpan {
@@ -266,13 +276,20 @@ impl Compositor {
         view: &ViewState,
         block_view: &BlockViewConfig,
         selected: bool,
+        width: u16,
+        home: Option<&Path>,
     ) -> Vec<VisualLine> {
         let block_id = block.id;
+
+        let block_frame_width =
+            (width as usize).saturating_sub(block_view.horizontal_margin.saturating_mul(2));
+        let available_label_width = block_frame_width.saturating_sub(5);
+
         let mut lines = Vec::new();
         lines.push(VisualLine::BlockTopBorder {
             block_id,
             selected,
-            label: top_label(block),
+            label: format::build_top_label(block, home, available_label_width),
         });
 
         let body_start = block.start_line.min(shell_lines.len());
@@ -348,7 +365,7 @@ impl Compositor {
         height: usize,
         block_view: &BlockViewConfig,
     ) -> VisibleBlockRange {
-        let layout = Self::build_visual_layout(shell, blocks, view, 0, block_view);
+        let layout = Self::build_visual_layout(shell, blocks, view, 0, block_view, None);
         let content_height = height.saturating_sub(usize::from(block_view.show_footer));
         if layout.spans.is_empty() {
             return VisibleBlockRange {
@@ -395,7 +412,7 @@ impl Compositor {
         height: usize,
         block_view: &BlockViewConfig,
     ) -> usize {
-        let layout = Self::build_visual_layout(shell, blocks, view, 0, block_view);
+        let layout = Self::build_visual_layout(shell, blocks, view, 0, block_view, None);
         let content_height = height.saturating_sub(usize::from(block_view.show_footer));
         layout.total_height.saturating_sub(content_height)
     }
@@ -409,7 +426,7 @@ impl Compositor {
         height: usize,
         block_view: &BlockViewConfig,
     ) -> usize {
-        let layout = Self::build_visual_layout(shell, blocks, view, 0, block_view);
+        let layout = Self::build_visual_layout(shell, blocks, view, 0, block_view, None);
         let content_height = height.saturating_sub(usize::from(block_view.show_footer));
         let Some(span) = layout.span_for_block_index(selected_index) else {
             return view.block_viewport.line_offset;
@@ -426,10 +443,11 @@ impl Compositor {
         shell: &ShellBuffer,
         blocks: &BlockStore,
         view: &ViewState,
-        _width: u16,
+        width: u16,
         height: u16,
-        _block_view: &BlockViewConfig,
+        block_view: &BlockViewConfig,
         flash_message: Option<&str>,
+        home: Option<&Path>,
     ) -> Vec<VisualLine> {
         let height = height as usize;
 
@@ -444,6 +462,11 @@ impl Compositor {
                 text: "Detail: block not found   q back".into(),
             }];
         };
+
+        let block_frame_width =
+            (width as usize).saturating_sub(block_view.horizontal_margin.saturating_mul(2));
+        let available_label_width = block_frame_width.saturating_sub(5);
+
         let shell_lines = shell.snapshot();
         let output_lines = get_block_output_lines(block, &shell_lines);
         let total = output_lines.len();
@@ -471,7 +494,7 @@ impl Compositor {
 
         result.push(VisualLine::DetailTopBorder {
             block_id,
-            label: top_label(block),
+            label: format::build_top_label(block, home, available_label_width),
         });
 
         if short_mode {
@@ -525,7 +548,7 @@ impl Compositor {
         // Keep viewport math and rendered output on exactly the same code path.
         // If scrolling performance becomes an issue, cache visual heights keyed
         // by block_id, width, view mode, expanded state, and config.
-        Self::build_one_block_lines(shell_lines, block, view, block_view, selected).len()
+        Self::build_one_block_lines(shell_lines, block, view, block_view, selected, 0, None).len()
     }
 }
 
@@ -569,15 +592,6 @@ fn detail_footer_text(
             "Detail #{id}   ↑↓ scroll   g/G top/bottom   q back   line {cursor_display}/{total_lines}"
         )
     }
-}
-
-fn top_label(block: &CommandBlock) -> String {
-    let marker = match block.status {
-        crate::app::BlockStatus::Failed => "  ✗",
-        crate::app::BlockStatus::Running => "  …",
-        _ => "",
-    };
-    format!("#{}  {}{}", block.id, block.command, marker)
 }
 
 fn detail_lines(block: &CommandBlock, selected: bool) -> Vec<VisualLine> {
@@ -758,6 +772,7 @@ mod tests {
             &Default::default(),
             config,
             None,
+            None,
         );
 
         assert!(visual.len() <= height);
@@ -782,6 +797,7 @@ mod tests {
             10,
             &Default::default(),
             &config,
+            None,
             None,
         );
 
@@ -864,6 +880,7 @@ mod tests {
             &Default::default(),
             &config,
             None,
+            None,
         );
 
         assert_eq!(range.start, 0);
@@ -898,6 +915,7 @@ mod tests {
             14,
             &Default::default(),
             &config,
+            None,
             None,
         );
 
@@ -949,7 +967,7 @@ mod tests {
         add_block(&mut shell, &mut store, "c", &["c"]);
         tail_view(&mut view, &store);
 
-        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
 
         assert_eq!(layout.total_height, layout.lines.len());
         assert_eq!(layout.spans.len(), 3);
@@ -971,7 +989,7 @@ mod tests {
         view.block_viewport.selected_index = 1;
         view.selected_block = store.block_id_at(1);
 
-        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
         let visible = Compositor::slice_visible_lines(&layout, &view, 5);
 
         assert_eq!(visible.len(), 5);
@@ -988,7 +1006,7 @@ mod tests {
         add_block(&mut shell, &mut store, "a", &["a"]);
         add_block(&mut shell, &mut store, "b", &["b"]);
         tail_view(&mut view, &store);
-        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
 
         assert_eq!(layout.block_index_at_line(0), Some(0));
         assert_eq!(
@@ -1022,7 +1040,7 @@ mod tests {
         tail_view(&mut view, &store);
         view.block_viewport.line_offset = 0;
 
-        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
         let visible = Compositor::slice_visible_lines(&layout, &view, 20);
 
         assert_eq!(visible.len(), 20);
@@ -1040,7 +1058,7 @@ mod tests {
         view.block_viewport.line_offset = 0;
         view.selected_block = store.block_id_at(0);
 
-        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
         let visible = Compositor::slice_visible_lines(&layout, &view, 20);
 
         assert_eq!(visible.len(), 20);
@@ -1062,7 +1080,7 @@ mod tests {
         view.block_viewport.line_offset = 0;
         view.selected_block = store.block_id_at(0);
 
-        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
         let visible = Compositor::slice_visible_lines(&layout, &view, 20);
 
         assert_eq!(visible.len(), 20);
@@ -1080,7 +1098,7 @@ mod tests {
         view.block_viewport.anchor = ViewAnchor::Top;
         view.block_viewport.line_offset = 0;
 
-        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
         let visible = Compositor::slice_visible_lines(&layout, &view, 20);
 
         assert_eq!(visible.len(), 20);
@@ -1099,7 +1117,7 @@ mod tests {
         view.block_viewport.selected_index = 0;
         view.block_viewport.line_offset = 0;
 
-        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
         let top_visible = Compositor::slice_visible_lines(&layout, &view, 20);
         assert_eq!(count_top_padding(&top_visible), 0);
 
@@ -1122,7 +1140,7 @@ mod tests {
         }
         tail_view(&mut view, &store);
 
-        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
         assert!(layout.lines.iter().any(|line| matches!(
             line,
             VisualLine::BlockBottomBorder { label, .. } if label.contains("truncated")
@@ -1130,7 +1148,7 @@ mod tests {
 
         view.view = ViewKind::Detail;
         view.expanded_block = Some(id);
-        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
         assert!(layout.lines.iter().any(|line| matches!(
             line,
             VisualLine::BlockDetailLine { text, .. } if text.contains("truncated")
@@ -1144,7 +1162,7 @@ mod tests {
         view.view = ViewKind::Detail;
         view.expanded_block = Some(id);
         view.selected_block = Some(id);
-        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
         let detail_texts: Vec<&str> = layout
             .lines
             .iter()
@@ -1183,6 +1201,7 @@ mod tests {
             &Default::default(),
             &config,
             Some("copied output"),
+            None,
         );
         let footer = visible.last().unwrap();
         match footer {
@@ -1209,6 +1228,7 @@ mod tests {
             10,
             &Default::default(),
             &config,
+            None,
             None,
         );
         let footer = visible.last().unwrap();
@@ -1239,16 +1259,16 @@ mod tests {
         view.expanded_block = Some(id);
         view.selected_block = Some(id);
 
-        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
         let body_lines: Vec<&VisualLine> = layout
             .lines
             .iter()
             .filter(|l| matches!(l, VisualLine::BlockBodyLine { .. }))
             .collect();
-        // expanded_lines = 20, + 1 truncation hint = 21 body-type lines
+        // expanded_lines = 15, + 1 truncation hint = 16 body-type lines
         assert_eq!(
             body_lines.len(),
-            21,
+            16,
             "expanded block should show expanded_lines + 1 truncation hint"
         );
         if let VisualLine::BlockBodyLine { text, .. } = body_lines.last().unwrap() {
@@ -1271,7 +1291,7 @@ mod tests {
         add_block(&mut shell, &mut store, "long", &refs);
         view.view = ViewKind::Blocks;
 
-        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
         // Body lines = preview_lines actual lines + 1 truncation hint line
         let body_count = layout
             .lines

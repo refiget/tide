@@ -200,8 +200,6 @@ pub struct BlockViewConfig {
     pub body_padding: usize,
     #[serde(default = "default_show_footer")]
     pub show_footer: bool,
-    #[serde(default)]
-    pub selected_body_reverse: bool,
 }
 
 impl Default for BlockViewConfig {
@@ -217,7 +215,6 @@ impl Default for BlockViewConfig {
             horizontal_margin: default_horizontal_margin(),
             body_padding: default_body_padding(),
             show_footer: default_show_footer(),
-            selected_body_reverse: false,
         }
     }
 }
@@ -297,7 +294,7 @@ fn default_preview_lines() -> usize {
 }
 
 fn default_expanded_lines() -> usize {
-    20
+    15
 }
 
 fn default_follow_tail() -> bool {
@@ -359,7 +356,7 @@ mod tests {
         assert_eq!(runtime.block_layout.horizontal_padding, 1);
         assert!(runtime.block_layout.show_padding_in_plain);
         assert_eq!(runtime.block_view.preview_lines, 4);
-        assert_eq!(runtime.block_view.expanded_lines, 20);
+        assert_eq!(runtime.block_view.expanded_lines, 15);
         assert!(runtime.block_view.follow_tail);
         assert_eq!(runtime.block_view.block_gap, 0);
         assert_eq!(runtime.block_view.scroll_margin_blocks, 2);
@@ -368,7 +365,6 @@ mod tests {
         assert_eq!(runtime.block_view.horizontal_margin, 1);
         assert_eq!(runtime.block_view.body_padding, 1);
         assert!(runtime.block_view.show_footer);
-        assert!(!runtime.block_view.selected_body_reverse);
         assert_eq!(runtime.max_blocks, Some(1000));
     }
 
