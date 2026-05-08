@@ -14,7 +14,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use signal_hook::{consts::signal::SIGWINCH, iterator::Signals};
 
 use crate::{
-    app::{BlockKind, InputAccumulator, RenderState, ViewAnchor, ViewKind, ViewState},
+    app::{BlockAction, BlockKind, InputAccumulator, RenderState, ViewAnchor, ViewKind, ViewState},
     block::BlockStore,
     buffer::ShellBuffer,
     compositor::Compositor,
@@ -406,14 +406,81 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
     }
 }
 
+fn write_to_clipboard(text: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::Write;
+        std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                child.stdin.take().unwrap().write_all(text.as_bytes())?;
+                child.wait()?;
+                Ok(())
+            })
+            .is_ok()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        arboard::Clipboard::new()
+            .and_then(|mut cb| cb.set_text(text))
+            .is_ok()
+    }
+}
+
+fn perform_block_action(state: &mut RuntimeState, action: BlockAction) {
+    let block_id = match state.view.view {
+        ViewKind::Detail => state.view.expanded_block,
+        _ => state.view.selected_block,
+    };
+    let Some(block_id) = block_id else { return };
+    let Some(block) = state.blocks.block(block_id) else {
+        return;
+    };
+
+    let text = match action {
+        BlockAction::CopyOutput => block.output_text.clone(),
+        BlockAction::CopyCommand => block.command.clone(),
+        _ => return,
+    };
+
+    if write_to_clipboard(&text) {
+        let msg = match action {
+            BlockAction::CopyOutput => "copied output".to_string(),
+            BlockAction::CopyCommand => "copied command".to_string(),
+            _ => unreachable!(),
+        };
+        state.render_state.flash_message = Some((msg, Instant::now()));
+        state.render_state.dirty = true;
+        state.render_state.force_render = true;
+    }
+}
+
 fn render_runtime(
     state: &Arc<Mutex<RuntimeState>>,
     stdout: &Arc<Mutex<io::Stdout>>,
 ) -> io::Result<()> {
     let (visual_lines, view, cursor, layout, block_view, rows, cols) = {
-        let state = state
+        let mut state = state
             .lock()
             .map_err(|_| io::Error::other("runtime state lock poisoned"))?;
+
+        // Clear expired flash message and extract text for compositor.
+        let flash_text = state
+            .render_state
+            .flash_message
+            .as_ref()
+            .and_then(|(msg, at)| {
+                if at.elapsed() < Duration::from_millis(1500) {
+                    Some(msg.clone())
+                } else {
+                    None
+                }
+            });
+        if flash_text.is_none() {
+            state.render_state.flash_message = None;
+        }
+
         let visual_lines = Compositor::build_visual_lines(
             &state.shell,
             &state.blocks,
@@ -422,6 +489,7 @@ fn render_runtime(
             state.rows,
             &state.config.block_layout,
             &state.config.block_view,
+            flash_text.as_deref(),
         );
         (
             visual_lines,
@@ -543,6 +611,14 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
             [] => None,
         },
         ViewKind::Detail => match bytes {
+            [b'y', ..] => {
+                perform_block_action(&mut state, BlockAction::CopyOutput);
+                Some(1)
+            }
+            [b'Y', ..] => {
+                perform_block_action(&mut state, BlockAction::CopyCommand);
+                Some(1)
+            }
             [b'q', ..] | [b'\x1b'] => {
                 state.view.view = ViewKind::Blocks;
                 state.view.expanded_block = None;
@@ -605,6 +681,14 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
             }
             state.render_state.dirty = true;
             state.render_state.force_render = true;
+            true
+        }
+        b'y' => {
+            perform_block_action(state, BlockAction::CopyOutput);
+            true
+        }
+        b'Y' => {
+            perform_block_action(state, BlockAction::CopyCommand);
             true
         }
         _ => true,
@@ -1175,6 +1259,96 @@ mod tests {
         // 'q' consumed 1 byte, leaving "\n" as pending for PTY forwarding after cleanup.
         assert_eq!(pending_bytes, b"\n");
         assert!(state.lock().unwrap().render_state.needs_cleanup);
+    }
+
+    #[test]
+    fn block_view_y_copies_output_to_clipboard() {
+        let mut state = runtime_state();
+        add_block(&mut state, "echo hello");
+        enter_block_view(&mut state);
+        state.render_state.dirty = false;
+        state.render_state.force_render = false;
+
+        assert!(handle_block_view_byte(b'y', &mut state));
+        // Clipboard write may fail in headless CI, but flash_message should
+        // be set when clipboard succeeds, and the handler never panics.
+        if write_to_clipboard("test") {
+            let (msg, _) = state.render_state.flash_message.as_ref().unwrap();
+            assert_eq!(msg, "copied output");
+        }
+    }
+
+    #[test]
+    fn block_view_y_upper_copies_command_to_clipboard() {
+        let mut state = runtime_state();
+        add_block(&mut state, "echo hello");
+        enter_block_view(&mut state);
+
+        assert!(handle_block_view_byte(b'Y', &mut state));
+        if write_to_clipboard("test") {
+            let (msg, _) = state.render_state.flash_message.as_ref().unwrap();
+            assert_eq!(msg, "copied command");
+        }
+    }
+
+    #[test]
+    fn block_view_y_does_not_panic_with_empty_output() {
+        let mut state = runtime_state();
+        add_block(&mut state, "true");
+        enter_block_view(&mut state);
+
+        // y on a block with no output should never panic.
+        assert!(handle_block_view_byte(b'y', &mut state));
+    }
+
+    #[test]
+    fn block_view_y_does_not_panic_with_no_blocks() {
+        let mut state = runtime_state();
+        enter_block_view(&mut state);
+
+        // y on empty block store should never panic.
+        assert!(handle_block_view_byte(b'y', &mut state));
+    }
+
+    #[test]
+    fn detail_view_y_triggers_copy_output() {
+        let state = Arc::new(Mutex::new(runtime_state()));
+        {
+            let mut s = state.lock().unwrap();
+            add_block(&mut s, "echo hello");
+            enter_block_view(&mut s);
+            s.view.view = ViewKind::Detail;
+            s.view.expanded_block = s.view.selected_block;
+        }
+
+        assert_eq!(handle_view_key_sequence(b"y", &state), Some(1));
+        let s = state.lock().unwrap();
+        assert!(
+            matches!(s.view.view, ViewKind::Detail),
+            "y should not exit Detail"
+        );
+        if write_to_clipboard("test") {
+            assert!(s.render_state.flash_message.is_some());
+        }
+    }
+
+    #[test]
+    fn detail_view_y_upper_triggers_copy_command() {
+        let state = Arc::new(Mutex::new(runtime_state()));
+        {
+            let mut s = state.lock().unwrap();
+            add_block(&mut s, "echo hello");
+            enter_block_view(&mut s);
+            s.view.view = ViewKind::Detail;
+            s.view.expanded_block = s.view.selected_block;
+        }
+
+        assert_eq!(handle_view_key_sequence(b"Y", &state), Some(1));
+        let s = state.lock().unwrap();
+        assert!(
+            matches!(s.view.view, ViewKind::Detail),
+            "Y should not exit Detail"
+        );
     }
 }
 

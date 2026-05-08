@@ -2,6 +2,28 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Working Mode
+
+This project follows a **prompt-driven** workflow. Claude does not execute code changes directly.
+
+```
+理解项目 ──► 生成实现 Prompt ──► 用户执行并 Review ──► 生成下一个 Prompt
+```
+
+**Claude 的职责**：
+- 阅读代码，理解当前状态
+- 生成详细的实现 Prompt（交给另一个 Claude Code 会话执行）
+- 根据 Review 反馈生成下一阶段的 Prompt
+
+**Prompt 质量要求**：
+- 必须包含背景（为什么做、当前代码状态）
+- 必须列出必读文件（按顺序）
+- 必须说明哪些已存在、哪些需要新增
+- 必须给出逐步实现方案，精确到函数名和文件位置
+- 必须包含"不要做的事"避免过度实现
+- 必须包含自动化测试要求和手动测试步骤
+- 必须给出完成标准（可验证）
+
 ## Read First
 
 Before editing code, read these documents (they define the target architecture):

@@ -95,6 +95,7 @@ impl Compositor {
         height: u16,
         _layout: &BlockLayoutConfig,
         block_view: &BlockViewConfig,
+        flash_message: Option<&str>,
     ) -> Vec<VisualLine> {
         match view.view {
             ViewKind::Plain | ViewKind::RawProgram => shell
@@ -105,9 +106,15 @@ impl Compositor {
                     block_id: line.block_id,
                 })
                 .collect(),
-            ViewKind::Blocks | ViewKind::Detail => {
-                Self::build_block_lines(shell, blocks, view, height, _width, block_view)
-            }
+            ViewKind::Blocks | ViewKind::Detail => Self::build_block_lines(
+                shell,
+                blocks,
+                view,
+                height,
+                _width,
+                block_view,
+                flash_message,
+            ),
             ViewKind::Agent => Vec::new(),
         }
     }
@@ -119,6 +126,7 @@ impl Compositor {
         height: u16,
         width: u16,
         block_view: &BlockViewConfig,
+        flash_message: Option<&str>,
     ) -> Vec<VisualLine> {
         let height = height as usize;
         let content_height = height.saturating_sub(usize::from(block_view.show_footer));
@@ -127,7 +135,7 @@ impl Compositor {
 
         if block_view.show_footer {
             visual_lines.push(VisualLine::Footer {
-                text: footer_text(blocks, view),
+                text: footer_text(blocks, view, flash_message),
             });
         }
         visual_lines
@@ -448,10 +456,10 @@ fn detail_lines(block: &CommandBlock, selected: bool) -> Vec<VisualLine> {
         lines.extend([
             "type: interactive program".to_string(),
             "capture: no linear text output was captured for this block.".to_string(),
-            "actions: rerun | copy command".to_string(),
+            "actions:  y copy output   Y copy command".to_string(),
         ]);
     } else {
-        lines.push("actions: explain | fix | rerun | copy".to_string());
+        lines.push("actions:  y copy output   Y copy command".to_string());
     }
 
     lines
@@ -494,7 +502,10 @@ fn bottom_label(block: &CommandBlock) -> String {
     )
 }
 
-fn footer_text(blocks: &BlockStore, view: &ViewState) -> String {
+fn footer_text(blocks: &BlockStore, view: &ViewState, flash_message: Option<&str>) -> String {
+    if let Some(msg) = flash_message {
+        return msg.to_string();
+    }
     let total = blocks.len();
     let current = if total == 0 {
         0
@@ -588,6 +599,7 @@ mod tests {
             height as u16,
             &Default::default(),
             config,
+            None,
         );
 
         assert!(visual.len() <= height);
@@ -612,6 +624,7 @@ mod tests {
             10,
             &Default::default(),
             &config,
+            None,
         );
 
         assert_eq!(range.start, 0);
@@ -692,6 +705,7 @@ mod tests {
             20,
             &Default::default(),
             &config,
+            None,
         );
 
         assert_eq!(range.start, 0);
@@ -726,6 +740,7 @@ mod tests {
             14,
             &Default::default(),
             &config,
+            None,
         );
 
         assert_eq!(range.end, store.len() - 1);
@@ -962,5 +977,95 @@ mod tests {
             line,
             VisualLine::BlockDetailLine { text, .. } if text.contains("truncated")
         )));
+    }
+
+    #[test]
+    fn detail_actions_shows_copy_keys() {
+        let (mut shell, mut store, mut view, config) = fixture();
+        let id = add_block(&mut shell, &mut store, "echo hello", &["hello"]);
+        view.view = ViewKind::Detail;
+        view.expanded_block = Some(id);
+        view.selected_block = Some(id);
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let detail_texts: Vec<&str> = layout
+            .lines
+            .iter()
+            .filter_map(|line| match line {
+                VisualLine::BlockDetailLine { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let actions_line = detail_texts.iter().find(|t| t.contains("actions:"));
+        assert!(actions_line.is_some(), "detail should contain actions line");
+        let actions = actions_line.unwrap();
+        assert!(
+            actions.contains("y copy output"),
+            "actions should show y copy output, got: {actions}"
+        );
+        assert!(
+            actions.contains("Y copy command"),
+            "actions should show Y copy command, got: {actions}"
+        );
+    }
+
+    #[test]
+    fn footer_shows_flash_message() {
+        let (mut shell, mut store, mut view, config) = fixture();
+        add_block(&mut shell, &mut store, "echo one", &["one"]);
+        view.view = ViewKind::Blocks;
+        view.block_viewport.selected_index = 0;
+        view.selected_block = store.block_id_at(0);
+
+        let visible = Compositor::build_visual_lines(
+            &shell,
+            &store,
+            &view,
+            80,
+            10,
+            &Default::default(),
+            &config,
+            Some("copied output"),
+        );
+        let footer = visible.last().unwrap();
+        match footer {
+            VisualLine::Footer { text } => {
+                assert_eq!(text, "copied output");
+            }
+            other => panic!("expected Footer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn footer_reverts_when_no_flash() {
+        let (mut shell, mut store, mut view, config) = fixture();
+        add_block(&mut shell, &mut store, "echo one", &["one"]);
+        view.view = ViewKind::Blocks;
+        view.block_viewport.selected_index = 0;
+        view.selected_block = store.block_id_at(0);
+
+        let visible = Compositor::build_visual_lines(
+            &shell,
+            &store,
+            &view,
+            80,
+            10,
+            &Default::default(),
+            &config,
+            None,
+        );
+        let footer = visible.last().unwrap();
+        match footer {
+            VisualLine::Footer { text } => {
+                assert!(
+                    text.starts_with("Block #"),
+                    "normal footer should show block info, got: {text}"
+                );
+                assert!(
+                    !text.contains("copied"),
+                    "normal footer should not contain flash text"
+                );
+            }
+            other => panic!("expected Footer, got {other:?}"),
+        }
     }
 }

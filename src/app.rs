@@ -123,6 +123,9 @@ pub struct RenderState {
     /// Set true when leaving Block/Detail view so the input thread performs
     /// terminal cleanup (leave alternate screen, reset SGR, show cursor).
     pub needs_cleanup: bool,
+    /// Transient flash message (e.g. "copied output") shown in the footer
+    /// for ~1.5 seconds. Reset to None after the duration expires.
+    pub flash_message: Option<(String, Instant)>,
 }
 
 impl Default for RenderState {
@@ -132,6 +135,7 @@ impl Default for RenderState {
             force_render: false,
             last_render_at: Instant::now(),
             needs_cleanup: false,
+            flash_message: None,
         }
     }
 }
