@@ -126,6 +126,9 @@ pub struct RenderState {
     /// Transient flash message (e.g. "copied output") shown in the footer
     /// for ~1.5 seconds. Reset to None after the duration expires.
     pub flash_message: Option<(String, Instant)>,
+    /// Number of rows rendered in the previous frame, used to clear stale
+    /// tail lines when the new frame is shorter than the previous one.
+    pub last_rendered_rows: usize,
 }
 
 impl Default for RenderState {
@@ -136,6 +139,7 @@ impl Default for RenderState {
             last_render_at: Instant::now(),
             needs_cleanup: false,
             flash_message: None,
+            last_rendered_rows: 0,
         }
     }
 }

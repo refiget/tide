@@ -43,16 +43,22 @@ pub fn render<W: Write>(
     block_view: &BlockViewConfig,
     rows: u16,
     cols: u16,
-) -> io::Result<()> {
+    last_rendered_rows: usize,
+) -> io::Result<usize> {
     let height = rows as usize;
     let start = viewport_start(visual_lines, view, height);
 
-    queue!(w, MoveTo(0, 0), Clear(ClearType::All))?;
+    let rendered = visual_lines.len().saturating_sub(start).min(height);
 
     for (row, line) in visual_lines.iter().skip(start).take(height).enumerate() {
         queue!(w, MoveTo(0, row as u16))?;
         render_line(w, line, cols as usize, layout, block_view)?;
         queue!(w, Clear(ClearType::UntilNewLine))?;
+    }
+
+    // Clear tail lines from previous frame that are no longer covered.
+    for row in rendered..last_rendered_rows {
+        queue!(w, MoveTo(0, row as u16), Clear(ClearType::CurrentLine))?;
     }
 
     if matches!(view.view, ViewKind::Plain) {
@@ -79,7 +85,8 @@ pub fn render<W: Write>(
         queue!(w, Hide)?;
     }
 
-    w.flush()
+    w.flush()?;
+    Ok(rendered)
 }
 
 fn viewport_start(lines: &[VisualLine], view: &crate::app::ViewState, height: usize) -> usize {

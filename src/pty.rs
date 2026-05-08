@@ -414,7 +414,14 @@ fn write_to_clipboard(text: &str) -> bool {
             .stdin(std::process::Stdio::piped())
             .spawn()
             .and_then(|mut child| {
-                child.stdin.take().unwrap().write_all(text.as_bytes())?;
+                let mut stdin = child.stdin.take().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "pbcopy stdin not available",
+                    )
+                })?;
+                stdin.write_all(text.as_bytes())?;
+                drop(stdin);
                 child.wait()?;
                 Ok(())
             })
@@ -460,7 +467,7 @@ fn render_runtime(
     state: &Arc<Mutex<RuntimeState>>,
     stdout: &Arc<Mutex<io::Stdout>>,
 ) -> io::Result<()> {
-    let (visual_lines, view, cursor, layout, block_view, rows, cols) = {
+    let (visual_lines, view, cursor, layout, block_view, rows, cols, last_rendered_rows) = {
         let mut state = state
             .lock()
             .map_err(|_| io::Error::other("runtime state lock poisoned"))?;
@@ -499,13 +506,14 @@ fn render_runtime(
             state.config.block_view.clone(),
             state.rows,
             state.cols,
+            state.render_state.last_rendered_rows,
         )
     };
 
     let mut stdout = stdout
         .lock()
         .map_err(|_| io::Error::other("stdout lock poisoned"))?;
-    renderer::render(
+    let rendered = renderer::render(
         &mut *stdout,
         &visual_lines,
         &view,
@@ -514,7 +522,17 @@ fn render_runtime(
         &block_view,
         rows,
         cols,
-    )
+        last_rendered_rows,
+    )?;
+
+    {
+        let mut state = state
+            .lock()
+            .map_err(|_| io::Error::other("runtime state lock poisoned"))?;
+        state.render_state.last_rendered_rows = rendered;
+    }
+
+    Ok(())
 }
 
 fn maybe_flush_navigation_and_render(
@@ -617,6 +635,22 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
             }
             [b'Y', ..] => {
                 perform_block_action(&mut state, BlockAction::CopyCommand);
+                Some(1)
+            }
+            [b'j', ..] => {
+                state.view.view = ViewKind::Blocks;
+                state.view.expanded_block = None;
+                accumulate_block_delta(&mut state, 1);
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+                Some(1)
+            }
+            [b'k', ..] => {
+                state.view.view = ViewKind::Blocks;
+                state.view.expanded_block = None;
+                accumulate_block_delta(&mut state, -1);
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
                 Some(1)
             }
             [b'q', ..] | [b'\x1b'] => {
@@ -1348,6 +1382,78 @@ mod tests {
         assert!(
             matches!(s.view.view, ViewKind::Detail),
             "Y should not exit Detail"
+        );
+        if write_to_clipboard("test") {
+            assert!(
+                s.render_state.flash_message.is_some(),
+                "flash message should be set after Y"
+            );
+            let (msg, _) = s.render_state.flash_message.as_ref().unwrap();
+            assert!(
+                msg.contains("command"),
+                "flash should mention 'command', got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn detail_j_collapses_then_navigates_down() {
+        let state = Arc::new(Mutex::new(runtime_state()));
+        {
+            let mut s = state.lock().unwrap();
+            add_block(&mut s, "echo one");
+            add_block(&mut s, "echo two");
+            add_block(&mut s, "echo three");
+            enter_block_view(&mut s);
+            // Move to block index 0 first, then enter Detail.
+            s.view.block_viewport.selected_index = 0;
+            s.view.selected_block = s.blocks.block_id_at(0);
+            s.view.block_viewport.anchor = ViewAnchor::Manual;
+            s.view.view = ViewKind::Detail;
+            s.view.expanded_block = s.view.selected_block;
+        }
+
+        assert_eq!(handle_view_key_sequence(b"j", &state), Some(1));
+        // accumulate_block_delta only sets a pending delta; flush to apply it.
+        {
+            let mut s = state.lock().unwrap();
+            flush_render_state(&mut s);
+        }
+        let s = state.lock().unwrap();
+        assert!(
+            matches!(s.view.view, ViewKind::Blocks),
+            "j should collapse to Block View"
+        );
+        assert!(s.view.expanded_block.is_none());
+        assert_eq!(s.view.block_viewport.selected_index, 1);
+    }
+
+    #[test]
+    fn detail_k_collapses_then_navigates_up() {
+        let state = Arc::new(Mutex::new(runtime_state()));
+        {
+            let mut s = state.lock().unwrap();
+            add_block(&mut s, "echo one");
+            add_block(&mut s, "echo two");
+            enter_block_view(&mut s);
+            s.view.view = ViewKind::Detail;
+            s.view.expanded_block = s.view.selected_block;
+        }
+
+        assert_eq!(handle_view_key_sequence(b"k", &state), Some(1));
+        {
+            let mut s = state.lock().unwrap();
+            flush_render_state(&mut s);
+        }
+        let s = state.lock().unwrap();
+        assert!(
+            matches!(s.view.view, ViewKind::Blocks),
+            "k should collapse to Block View"
+        );
+        assert!(s.view.expanded_block.is_none());
+        assert_eq!(
+            s.view.block_viewport.selected_index,
+            s.blocks.len().saturating_sub(2)
         );
     }
 }
