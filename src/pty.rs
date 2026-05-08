@@ -829,6 +829,16 @@ fn handle_search_input(byte: u8, state: &mut RuntimeState) -> bool {
             let query = state.view.search_buffer.take().unwrap_or_default();
             state.view.filter.command_query = query;
             rebuild_visible(state);
+
+            if state.view.visible.len(&state.blocks) == 0
+                && !state.view.filter.command_query.is_empty()
+            {
+                state.view.filter.command_query = String::new();
+                rebuild_visible(state);
+                state.render_state.flash_message =
+                    Some(("no matches".to_string(), std::time::Instant::now()));
+            }
+
             restore_or_clamp_selection(state);
             state.render_state.dirty = true;
             state.render_state.force_render = true;
@@ -951,8 +961,7 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
             true
         }
         b'/' => {
-            let current = state.view.filter.command_query.clone();
-            state.view.search_buffer = Some(current);
+            state.view.search_buffer = Some(String::new());
             state.render_state.dirty = true;
             state.render_state.force_render = true;
             true
