@@ -488,16 +488,58 @@ fn render_runtime(
             state.render_state.flash_message = None;
         }
 
-        let visual_lines = Compositor::build_visual_lines(
-            &state.shell,
-            &state.blocks,
-            &state.view,
-            state.cols,
-            state.rows,
-            &state.config.block_layout,
-            &state.config.block_view,
-            flash_text.as_deref(),
-        );
+        let visual_lines = if matches!(state.view.view, ViewKind::Detail) {
+            if let Some(block_id) = state.view.expanded_block {
+                if let Some(block) = state.blocks.block(block_id) {
+                    let content_height = (state.rows as usize).saturating_sub(1); // minus footer
+                    Compositor::build_detail_layout(
+                        block,
+                        state.view.detail_scroll_offset,
+                        state.cols,
+                        content_height,
+                        flash_text.as_deref(),
+                    )
+                } else {
+                    // Block vanished — fall back to Block View.
+                    state.view.view = ViewKind::Blocks;
+                    state.view.expanded_block = None;
+                    Compositor::build_visual_lines(
+                        &state.shell,
+                        &state.blocks,
+                        &state.view,
+                        state.cols,
+                        state.rows,
+                        &state.config.block_layout,
+                        &state.config.block_view,
+                        flash_text.as_deref(),
+                    )
+                }
+            } else {
+                // No expanded_block — fall back to Block View.
+                state.view.view = ViewKind::Blocks;
+                Compositor::build_visual_lines(
+                    &state.shell,
+                    &state.blocks,
+                    &state.view,
+                    state.cols,
+                    state.rows,
+                    &state.config.block_layout,
+                    &state.config.block_view,
+                    flash_text.as_deref(),
+                )
+            }
+        } else {
+            Compositor::build_visual_lines(
+                &state.shell,
+                &state.blocks,
+                &state.view,
+                state.cols,
+                state.rows,
+                &state.config.block_layout,
+                &state.config.block_view,
+                flash_text.as_deref(),
+            )
+        };
         (
             visual_lines,
             state.view.clone(),
@@ -637,18 +679,34 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                 perform_block_action(&mut state, BlockAction::CopyCommand);
                 Some(1)
             }
-            [b'j', ..] => {
-                state.view.view = ViewKind::Blocks;
-                state.view.expanded_block = None;
-                accumulate_block_delta(&mut state, 1);
+            [b'j', ..] | [b'\x1b', b'[', b'B', ..] => {
+                state.view.detail_scroll_offset = state.view.detail_scroll_offset.saturating_add(1);
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+                if bytes.len() >= 3 && bytes[0] == b'\x1b' {
+                    Some(3)
+                } else {
+                    Some(1)
+                }
+            }
+            [b'k', ..] | [b'\x1b', b'[', b'A', ..] => {
+                state.view.detail_scroll_offset = state.view.detail_scroll_offset.saturating_sub(1);
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+                if bytes.len() >= 3 && bytes[0] == b'\x1b' {
+                    Some(3)
+                } else {
+                    Some(1)
+                }
+            }
+            [b'G', ..] => {
+                state.view.detail_scroll_offset = usize::MAX;
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
                 Some(1)
             }
-            [b'k', ..] => {
-                state.view.view = ViewKind::Blocks;
-                state.view.expanded_block = None;
-                accumulate_block_delta(&mut state, -1);
+            [b'g', ..] => {
+                state.view.detail_scroll_offset = 0;
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
                 Some(1)
@@ -708,6 +766,7 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
             flush_navigation_delta(state);
             state.view.expanded_block = state.view.selected_block;
             state.view.view = ViewKind::Detail;
+            state.view.detail_scroll_offset = 0;
             if matches!(state.view.block_viewport.anchor, ViewAnchor::Tail) {
                 state.view.block_viewport.line_offset = compute_tail_scroll_offset(state);
             } else {
@@ -1397,64 +1456,77 @@ mod tests {
     }
 
     #[test]
-    fn detail_j_collapses_then_navigates_down() {
+    fn detail_j_scrolls_down_in_pager() {
         let state = Arc::new(Mutex::new(runtime_state()));
         {
             let mut s = state.lock().unwrap();
             add_block(&mut s, "echo one");
-            add_block(&mut s, "echo two");
-            add_block(&mut s, "echo three");
             enter_block_view(&mut s);
-            // Move to block index 0 first, then enter Detail.
-            s.view.block_viewport.selected_index = 0;
-            s.view.selected_block = s.blocks.block_id_at(0);
-            s.view.block_viewport.anchor = ViewAnchor::Manual;
             s.view.view = ViewKind::Detail;
             s.view.expanded_block = s.view.selected_block;
         }
 
         assert_eq!(handle_view_key_sequence(b"j", &state), Some(1));
-        // accumulate_block_delta only sets a pending delta; flush to apply it.
-        {
-            let mut s = state.lock().unwrap();
-            flush_render_state(&mut s);
-        }
         let s = state.lock().unwrap();
         assert!(
-            matches!(s.view.view, ViewKind::Blocks),
-            "j should collapse to Block View"
+            matches!(s.view.view, ViewKind::Detail),
+            "j should stay in Detail"
         );
-        assert!(s.view.expanded_block.is_none());
-        assert_eq!(s.view.block_viewport.selected_index, 1);
+        assert_eq!(s.view.detail_scroll_offset, 1);
     }
 
     #[test]
-    fn detail_k_collapses_then_navigates_up() {
+    fn detail_k_scrolls_up_in_pager() {
         let state = Arc::new(Mutex::new(runtime_state()));
         {
             let mut s = state.lock().unwrap();
             add_block(&mut s, "echo one");
-            add_block(&mut s, "echo two");
+            enter_block_view(&mut s);
+            s.view.view = ViewKind::Detail;
+            s.view.expanded_block = s.view.selected_block;
+            s.view.detail_scroll_offset = 1;
+        }
+
+        assert_eq!(handle_view_key_sequence(b"k", &state), Some(1));
+        let s = state.lock().unwrap();
+        assert!(
+            matches!(s.view.view, ViewKind::Detail),
+            "k should stay in Detail"
+        );
+        assert_eq!(s.view.detail_scroll_offset, 0);
+    }
+
+    #[test]
+    fn detail_g_jumps_to_top() {
+        let state = Arc::new(Mutex::new(runtime_state()));
+        {
+            let mut s = state.lock().unwrap();
+            add_block(&mut s, "echo one");
+            enter_block_view(&mut s);
+            s.view.view = ViewKind::Detail;
+            s.view.expanded_block = s.view.selected_block;
+            s.view.detail_scroll_offset = 5;
+        }
+
+        assert_eq!(handle_view_key_sequence(b"g", &state), Some(1));
+        let s = state.lock().unwrap();
+        assert_eq!(s.view.detail_scroll_offset, 0);
+    }
+
+    #[test]
+    fn detail_g_upper_jumps_to_bottom() {
+        let state = Arc::new(Mutex::new(runtime_state()));
+        {
+            let mut s = state.lock().unwrap();
+            add_block(&mut s, "echo one");
             enter_block_view(&mut s);
             s.view.view = ViewKind::Detail;
             s.view.expanded_block = s.view.selected_block;
         }
 
-        assert_eq!(handle_view_key_sequence(b"k", &state), Some(1));
-        {
-            let mut s = state.lock().unwrap();
-            flush_render_state(&mut s);
-        }
+        assert_eq!(handle_view_key_sequence(b"G", &state), Some(1));
         let s = state.lock().unwrap();
-        assert!(
-            matches!(s.view.view, ViewKind::Blocks),
-            "k should collapse to Block View"
-        );
-        assert!(s.view.expanded_block.is_none());
-        assert_eq!(
-            s.view.block_viewport.selected_index,
-            s.blocks.len().saturating_sub(2)
-        );
+        assert_eq!(s.view.detail_scroll_offset, usize::MAX);
     }
 }
 
