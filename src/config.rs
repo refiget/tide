@@ -297,7 +297,7 @@ fn default_preview_lines() -> usize {
 }
 
 fn default_expanded_lines() -> usize {
-    30
+    20
 }
 
 fn default_follow_tail() -> bool {
@@ -359,7 +359,7 @@ mod tests {
         assert_eq!(runtime.block_layout.horizontal_padding, 1);
         assert!(runtime.block_layout.show_padding_in_plain);
         assert_eq!(runtime.block_view.preview_lines, 4);
-        assert_eq!(runtime.block_view.expanded_lines, 30);
+        assert_eq!(runtime.block_view.expanded_lines, 20);
         assert!(runtime.block_view.follow_tail);
         assert_eq!(runtime.block_view.block_gap, 0);
         assert_eq!(runtime.block_view.scroll_margin_blocks, 2);

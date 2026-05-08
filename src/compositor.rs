@@ -32,6 +32,22 @@ pub enum VisualLine {
         text: String,
         selected: bool,
     },
+    DetailTopBorder {
+        #[allow(dead_code)]
+        block_id: BlockId,
+        label: String,
+    },
+    DetailBottomBorder {
+        #[allow(dead_code)]
+        block_id: BlockId,
+        label: String,
+    },
+    DetailBodyLine {
+        #[allow(dead_code)]
+        block_id: BlockId,
+        text: String,
+        is_cursor: bool,
+    },
     Footer {
         text: String,
     },
@@ -279,7 +295,7 @@ impl Compositor {
             let all_body_lines = &shell_lines[body_start..=body_end];
             let expanded = view.expanded_block == Some(block_id);
             let shown = if expanded {
-                all_body_lines.len()
+                block_view.expanded_lines.min(all_body_lines.len())
             } else {
                 block_view.preview_lines.min(all_body_lines.len())
             };
@@ -294,7 +310,11 @@ impl Compositor {
 
             if all_body_lines.len() > shown {
                 let remaining = all_body_lines.len() - shown;
-                let text = format!("... {remaining} more lines, Enter to expand");
+                let text = if expanded {
+                    format!("... {remaining} more lines · i to inspect in Detail")
+                } else {
+                    format!("... {remaining} more lines, Enter to expand")
+                };
                 lines.push(VisualLine::BlockBodyLine {
                     text,
                     block_id,
@@ -437,24 +457,33 @@ impl Compositor {
 
         let mut result: Vec<VisualLine> = Vec::with_capacity(height);
 
-        result.push(VisualLine::Empty); // top margin row
-        result.push(VisualLine::BlockTopBorder {
+        if short_mode {
+            let frame_height = 2 + output_lines.len(); // top_border + body + bottom_border
+            let available = height.saturating_sub(1); // minus footer
+            let top_padding = available.saturating_sub(frame_height) / 2;
+            let top_padding = top_padding.max(1); // always at least 1 row above
+            for _ in 0..top_padding {
+                result.push(VisualLine::Empty);
+            }
+        } else {
+            result.push(VisualLine::Empty); // top margin row
+        }
+
+        result.push(VisualLine::DetailTopBorder {
             block_id,
-            selected: true,
             label: top_label(block),
         });
 
         if short_mode {
             for (i, text) in output_lines.iter().enumerate() {
-                result.push(VisualLine::BlockBodyLine {
+                result.push(VisualLine::DetailBodyLine {
                     text: text.clone(),
                     block_id,
-                    selected: i == cursor,
+                    is_cursor: i == cursor,
                 });
             }
-            result.push(VisualLine::BlockBottomBorder {
+            result.push(VisualLine::DetailBottomBorder {
                 block_id,
-                selected: true,
                 label: bottom_label(block),
             });
             while result.len() < height.saturating_sub(1) {
@@ -466,15 +495,14 @@ impl Compositor {
             let end = (start + inner_height).min(total);
             for (i, text) in output_lines[start..end].iter().enumerate() {
                 let abs = start + i;
-                result.push(VisualLine::BlockBodyLine {
+                result.push(VisualLine::DetailBodyLine {
                     text: text.clone(),
                     block_id,
-                    selected: abs == cursor,
+                    is_cursor: abs == cursor,
                 });
             }
-            result.push(VisualLine::BlockBottomBorder {
+            result.push(VisualLine::DetailBottomBorder {
                 block_id,
-                selected: true,
                 label: bottom_label(block),
             });
         }
@@ -600,17 +628,6 @@ fn detail_lines(block: &CommandBlock, selected: bool) -> Vec<VisualLine> {
             selected,
         })
         .collect()
-}
-
-#[allow(dead_code)]
-fn truncate_command(cmd: &str, max_width: usize) -> String {
-    let chars: Vec<char> = cmd.chars().collect();
-    if chars.len() <= max_width {
-        cmd.to_string()
-    } else {
-        let truncated: String = chars[..max_width].iter().collect();
-        format!("{truncated}…")
-    }
 }
 
 fn bottom_label(block: &CommandBlock) -> String {
@@ -1218,21 +1235,32 @@ mod tests {
         let lines: Vec<String> = (0..50).map(|i| format!("line{i}")).collect();
         let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
         let id = add_block(&mut shell, &mut store, "long", &refs);
-        view.view = ViewKind::Detail;
+        view.view = ViewKind::Blocks;
         view.expanded_block = Some(id);
         view.selected_block = Some(id);
 
         let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
-        let body_count = layout
+        let body_lines: Vec<&VisualLine> = layout
             .lines
             .iter()
             .filter(|l| matches!(l, VisualLine::BlockBodyLine { .. }))
-            .count();
-        // All 50 output lines should be present (not limited by expanded_lines).
+            .collect();
+        // expanded_lines = 20, + 1 truncation hint = 21 body-type lines
         assert_eq!(
-            body_count, 50,
-            "expanded block should show all 50 output lines"
+            body_lines.len(),
+            21,
+            "expanded block should show expanded_lines + 1 truncation hint"
         );
+        if let VisualLine::BlockBodyLine { text, .. } = body_lines.last().unwrap() {
+            assert!(
+                text.contains("more lines"),
+                "last line should be truncation hint"
+            );
+            assert!(
+                text.contains("Detail"),
+                "expanded truncation hint should mention Detail"
+            );
+        }
     }
 
     #[test]

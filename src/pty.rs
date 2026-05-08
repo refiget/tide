@@ -1004,6 +1004,9 @@ fn detail_output_line_count(state: &RuntimeState) -> usize {
     let Some(block) = state.blocks.block(id) else {
         return 0;
     };
+    if block.kind == BlockKind::RawProgram {
+        return 1;
+    }
     let shell_lines = state.shell.snapshot();
     let start = block.start_line.min(shell_lines.len());
     let end = block.end_line.min(shell_lines.len().saturating_sub(1));
@@ -1543,7 +1546,11 @@ mod tests {
         let state = Arc::new(Mutex::new(runtime_state()));
         {
             let mut s = state.lock().unwrap();
-            add_block(&mut s, "echo one");
+            add_block_with_lines(
+                &mut s,
+                "echo",
+                &["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
+            );
             enter_block_view(&mut s);
             s.view.view = ViewKind::Detail;
             s.view.expanded_block = s.view.selected_block;
@@ -1555,6 +1562,10 @@ mod tests {
             matches!(s.view.view, ViewKind::Detail),
             "G should stay in Detail"
         );
+        // 10 lines, inner_height = 24-4 = 20 → short mode.
+        // G sets cursor = total-1 = 9, line_offset = total.saturating_sub(inner_height) = 0.
+        assert_eq!(s.view.detail_line_cursor, 9);
+        assert_eq!(s.view.block_viewport.line_offset, 0);
     }
 
     #[test]

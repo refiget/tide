@@ -162,6 +162,45 @@ fn render_line<W: Write>(
             let _ = block_id;
             render_framed_text(w, text, *selected, width, layout, block_view)?;
         }
+        VisualLine::DetailTopBorder { label, .. } => {
+            queue!(
+                w,
+                Print(with_margin(
+                    &titled_border('╭', '╮', label, block_width(width, block_view)),
+                    block_view,
+                ))
+            )?;
+        }
+        VisualLine::DetailBottomBorder { label, .. } => {
+            queue!(
+                w,
+                Print(with_margin(
+                    &titled_border('╰', '╯', label, block_width(width, block_view)),
+                    block_view,
+                ))
+            )?;
+        }
+        VisualLine::DetailBodyLine {
+            text, is_cursor, ..
+        } => {
+            if *is_cursor {
+                queue!(w, SetAttribute(Attribute::Reverse))?;
+            }
+            queue!(
+                w,
+                Print(with_margin(
+                    &framed_text(
+                        text,
+                        block_width(width, block_view),
+                        block_view.body_padding
+                    ),
+                    block_view,
+                ))
+            )?;
+            if *is_cursor {
+                queue!(w, SetAttribute(Attribute::Reset))?;
+            }
+        }
         VisualLine::Footer { text } => {
             render_footer(w, text, width)?;
         }
