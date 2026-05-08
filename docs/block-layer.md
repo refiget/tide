@@ -121,6 +121,7 @@ Block View overlays block metadata on the same shell history.
 - `BlockViewConfig.preview_lines` controls collapsed output height.
 - `BlockViewConfig.expanded_lines` controls expanded output height.
 - `BlockViewConfig.block_gap` controls blank visual lines between blocks.
+- `BlockViewConfig.scroll_margin_blocks` keeps navigation from pinning the selected block to the edge.
 
 For each block:
 
@@ -310,6 +311,8 @@ Block View:
 - `g` jumps to the oldest block and disables follow-tail
 - `Enter` enters Detail View
 - `q` / `Esc` returns to Plain View
+
+Fast repeated `j` / `k` input should be coalesced before viewport adjustment and render. The viewport should only move when the selected block leaves the visible range or crosses the configured scroll margin.
 
 Detail View:
 

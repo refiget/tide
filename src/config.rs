@@ -188,6 +188,8 @@ pub struct BlockViewConfig {
     pub follow_tail: bool,
     #[serde(default = "default_block_gap")]
     pub block_gap: usize,
+    #[serde(default = "default_scroll_margin_blocks")]
+    pub scroll_margin_blocks: usize,
 }
 
 impl Default for BlockViewConfig {
@@ -197,6 +199,7 @@ impl Default for BlockViewConfig {
             expanded_lines: default_expanded_lines(),
             follow_tail: default_follow_tail(),
             block_gap: default_block_gap(),
+            scroll_margin_blocks: default_scroll_margin_blocks(),
         }
     }
 }
@@ -287,6 +290,10 @@ fn default_block_gap() -> usize {
     0
 }
 
+fn default_scroll_margin_blocks() -> usize {
+    2
+}
+
 fn default_max_output_bytes_per_block() -> usize {
     1_048_576
 }
@@ -321,6 +328,7 @@ mod tests {
         assert_eq!(runtime.block_view.expanded_lines, 30);
         assert!(runtime.block_view.follow_tail);
         assert_eq!(runtime.block_view.block_gap, 0);
+        assert_eq!(runtime.block_view.scroll_margin_blocks, 2);
         assert_eq!(runtime.max_blocks, Some(1000));
     }
 

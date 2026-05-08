@@ -376,6 +376,7 @@ pub struct BlockViewConfig {
     pub expanded_lines: usize,
     pub follow_tail: bool,
     pub block_gap: usize,
+    pub scroll_margin_blocks: usize,
 }
 
 pub struct BlockLayoutConfig {
@@ -401,6 +402,7 @@ Defaults:
 - `block_view.expanded_lines = 30`
 - `block_view.follow_tail = true`
 - `block_view.block_gap = 0`
+- `block_view.scroll_margin_blocks = 2`
 
 ## Input API
 

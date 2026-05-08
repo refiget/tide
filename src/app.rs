@@ -1,6 +1,10 @@
 #![allow(dead_code)]
 
-use std::{fmt, path::PathBuf, time::SystemTime};
+use std::{
+    fmt,
+    path::PathBuf,
+    time::{Instant, SystemTime},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BlockId(pub u64);
@@ -98,6 +102,27 @@ impl Default for BlockViewport {
             selected_index: 0,
             scroll_offset: 0,
             anchor: ViewAnchor::Tail,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InputAccumulator {
+    pub pending_block_delta: isize,
+    pub last_input_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderState {
+    pub dirty: bool,
+    pub last_render_at: Instant,
+}
+
+impl Default for RenderState {
+    fn default() -> Self {
+        Self {
+            dirty: false,
+            last_render_at: Instant::now(),
         }
     }
 }

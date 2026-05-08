@@ -5,6 +5,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -13,7 +14,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use signal_hook::{consts::signal::SIGWINCH, iterator::Signals};
 
 use crate::{
-    app::{BlockKind, ViewAnchor, ViewKind, ViewState},
+    app::{BlockKind, InputAccumulator, RenderState, ViewAnchor, ViewKind, ViewState},
     block::BlockStore,
     buffer::ShellBuffer,
     compositor::Compositor,
@@ -26,11 +27,15 @@ struct RuntimeState {
     shell: ShellBuffer,
     blocks: BlockStore,
     view: ViewState,
+    input_accumulator: InputAccumulator,
+    render_state: RenderState,
     config: RuntimeConfig,
     capture_suspended: bool,
     rows: u16,
     cols: u16,
 }
+
+const FRAME_DURATION: Duration = Duration::from_millis(16);
 
 pub fn run_shell(config: &Config) -> Result<()> {
     let _terminal_guard = TerminalGuard::enter()?;
@@ -83,6 +88,8 @@ pub fn run_shell(config: &Config) -> Result<()> {
             config.blocks.max_output_bytes_per_block,
         ),
         view,
+        input_accumulator: InputAccumulator::default(),
+        render_state: RenderState::default(),
         config: runtime_config,
         capture_suspended: false,
         rows,
@@ -207,7 +214,6 @@ pub fn run_shell(config: &Config) -> Result<()> {
                         if let Some(consumed) =
                             handle_view_key_sequence(&buffer[index..n], &input_state)
                         {
-                            let _ = render_runtime(&input_state, &input_stdout);
                             index += consumed;
                             continue;
                         }
@@ -235,6 +241,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
                     }
 
                     let _ = writer.flush();
+                    let _ = maybe_flush_navigation_and_render(&input_state, &input_stdout, true);
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
@@ -375,6 +382,45 @@ fn render_runtime(
     )
 }
 
+fn maybe_flush_navigation_and_render(
+    state: &Arc<Mutex<RuntimeState>>,
+    stdout: &Arc<Mutex<io::Stdout>>,
+    wait_for_frame: bool,
+) -> io::Result<()> {
+    let sleep_for = {
+        let state = state
+            .lock()
+            .map_err(|_| io::Error::other("runtime state lock poisoned"))?;
+        if !state.render_state.dirty {
+            return Ok(());
+        }
+
+        let elapsed = state.render_state.last_render_at.elapsed();
+        if elapsed < FRAME_DURATION {
+            FRAME_DURATION - elapsed
+        } else {
+            Duration::ZERO
+        }
+    };
+
+    if wait_for_frame && !sleep_for.is_zero() {
+        thread::sleep(sleep_for);
+    } else if !sleep_for.is_zero() {
+        return Ok(());
+    }
+
+    {
+        let mut state = state
+            .lock()
+            .map_err(|_| io::Error::other("runtime state lock poisoned"))?;
+        flush_navigation_delta(&mut state);
+        state.render_state.dirty = false;
+        state.render_state.last_render_at = Instant::now();
+    }
+
+    render_runtime(state, stdout)
+}
+
 fn enter_block_view(state: &mut RuntimeState) {
     state.view.view = ViewKind::Blocks;
     state.view.expanded_block = None;
@@ -392,11 +438,11 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
         ViewKind::Agent => Some(1),
         ViewKind::Blocks => match bytes {
             [b'\x1b', b'[', b'B', ..] => {
-                select_relative_block(&mut state, 1);
+                accumulate_block_delta(&mut state, 1);
                 Some(3)
             }
             [b'\x1b', b'[', b'A', ..] => {
-                select_relative_block(&mut state, -1);
+                accumulate_block_delta(&mut state, -1);
                 Some(3)
             }
             [b'\x1b', ..] if bytes.len() >= 3 => Some(3),
@@ -407,6 +453,7 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
             [b'q', ..] | [b'\x1b', ..] => {
                 state.view.view = ViewKind::Blocks;
                 state.view.expanded_block = None;
+                state.render_state.dirty = true;
                 Some(1)
             }
             [_byte, ..] => Some(1),
@@ -419,31 +466,57 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
     match byte {
         b'q' | b'\x1b' => {
             state.view = ViewState::default();
+            state.input_accumulator.pending_block_delta = 0;
+            state.render_state.dirty = true;
             true
         }
         b'j' => {
-            select_relative_block(state, 1);
+            accumulate_block_delta(state, 1);
             true
         }
         b'k' => {
-            select_relative_block(state, -1);
+            accumulate_block_delta(state, -1);
             true
         }
         b'G' => {
+            state.input_accumulator.pending_block_delta = 0;
             select_tail_block(state);
+            state.render_state.dirty = true;
             true
         }
         b'g' => {
+            state.input_accumulator.pending_block_delta = 0;
             select_block_index(state, 0, ViewAnchor::Top);
+            state.render_state.dirty = true;
             true
         }
         b'\r' | b'\n' => {
+            flush_navigation_delta(state);
             state.view.expanded_block = state.view.selected_block;
             state.view.view = ViewKind::Detail;
+            state.render_state.dirty = true;
             true
         }
         _ => true,
     }
+}
+
+fn accumulate_block_delta(state: &mut RuntimeState, delta: isize) {
+    state.input_accumulator.pending_block_delta = state
+        .input_accumulator
+        .pending_block_delta
+        .saturating_add(delta);
+    state.input_accumulator.last_input_at = Some(Instant::now());
+    state.render_state.dirty = true;
+}
+
+fn flush_navigation_delta(state: &mut RuntimeState) {
+    let delta = state.input_accumulator.pending_block_delta;
+    if delta == 0 {
+        return;
+    }
+    state.input_accumulator.pending_block_delta = 0;
+    select_relative_block(state, delta);
 }
 
 fn select_relative_block(state: &mut RuntimeState, delta: isize) {
@@ -596,17 +669,8 @@ fn compute_visible_range_from_offset(state: &RuntimeState) -> VisibleRange {
     VisibleRange { start, end }
 }
 
-fn is_selected_visible(state: &RuntimeState) -> bool {
-    if state.blocks.is_empty() {
-        return false;
-    }
-    let range = compute_visible_range_from_offset(state);
-    let selected = state.view.block_viewport.selected_index;
-    selected >= range.start && selected <= range.end
-}
-
 fn ensure_selected_visible(state: &mut RuntimeState) {
-    if state.blocks.is_empty() || is_selected_visible(state) {
+    if state.blocks.is_empty() {
         return;
     }
 
@@ -616,6 +680,19 @@ fn ensure_selected_visible(state: &mut RuntimeState) {
         state.view.block_viewport.scroll_offset = selected;
     } else if selected > range.end {
         state.view.block_viewport.scroll_offset = compute_scroll_offset_ending_at(state, selected);
+    } else {
+        let margin = state.config.block_view.scroll_margin_blocks;
+        if range.start > 0 && selected <= range.start.saturating_add(margin) {
+            state.view.block_viewport.scroll_offset = selected.saturating_sub(margin);
+        } else if range.end < state.blocks.len().saturating_sub(1)
+            && selected.saturating_add(margin) >= range.end
+        {
+            let target = selected
+                .saturating_add(margin)
+                .min(state.blocks.len().saturating_sub(1));
+            state.view.block_viewport.scroll_offset =
+                compute_scroll_offset_ending_at(state, target);
+        }
     }
     state.view.block_viewport.anchor = ViewAnchor::Manual;
 }

@@ -119,6 +119,8 @@ Key implication: Normal mode is transparent, but Block View must not read real t
 
 `BlockStore.max_blocks` is retention. `BlockViewport` is view position and anchor (`Top`, `Tail`, `Manual`). `BlockViewConfig.preview_lines` and `expanded_lines` control output truncation.
 
+Repeated Block View navigation input should be batched. Accumulate j/k deltas and flush at frame cadence instead of recomputing viewport and rendering for every key event.
+
 ## Full-Screen Program Compatibility
 
 Do not add a first-phase RawProgram whitelist. Normal mode is passthrough, so full-screen and interactive commands naturally receive terminal input and output without Tide-specific detection.

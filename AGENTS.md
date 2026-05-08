@@ -152,6 +152,7 @@ Block View overlays Block Metadata Layer on the same shell history.
 - `G` jumps to the newest block and resumes follow-tail
 - `Enter` opens Detail View
 - `q` / `Esc` returns to Plain View
+- repeated `j` / `k` input should be coalesced and rendered at frame cadence
 
 Block View is not a list page and not a popup. It is a new rendering layer over the same shell history.
 
