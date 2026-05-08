@@ -68,6 +68,25 @@ cargo fmt --check && cargo check && cargo test
 | `renderer.rs` | 2 | Framed text width with wide/unicode chars |
 | `config.rs` | 2 | Runtime config defaults, legacy field handling |
 
+## Key Terminology (Critical — Do Not Confuse)
+
+### Block Expansion (Enter in Block View)
+- **What it is**: A per-block in-place toggle within Block View. Pressing Enter on a selected block shows/hides full output lines + metadata (command, cwd, exit, duration, actions).
+- **View**: Stays in `ViewKind::Blocks`. No view switch.
+- **State**: `ViewState.expanded_block: Option<BlockId>` — the block currently expanded, or `None`.
+- **Rendering**: `build_one_block_lines()` checks `expanded_block == Some(block_id)` to decide whether to show all output lines and append `detail_lines()`.
+- **Footer**: Shows Block View footer (`Block #N/total  j/k ...`).
+- **Navigation**: `j`/`k` navigate between blocks normally; expanded state follows selection (Enter, `j`/`k`, `g`, `G`).
+
+### Detail View (future action key)
+- **What it is**: A full-screen pager mode for deep inspection of one block. Entry via a dedicated action key (not Enter).
+- **View**: `ViewKind::Detail` — separate view, leaves Block View.
+- **Rendering**: `build_detail_layout()` generates single-block full-screen layout.
+- **Footer**: Shows pager-style footer (`Output · #N cmd  j/k scroll ...`).
+- **Navigation**: `j`/`k` scroll within the block's output.
+
+> **Rule**: Enter NEVER enters Detail View. Enter toggles block expansion in Block View only.
+
 ## Notable Code Conventions
 
 - `src/app.rs` and `src/config.rs` open with `#![allow(dead_code)]` — many types are forward-looking / not fully wired yet
@@ -122,7 +141,8 @@ All state: `Arc<Mutex<RuntimeState>>`. Lock ordering: output thread locks `(stat
 - `Blocks` → `j`/`k`/Up/Down → accumulated delta, rendered at frame cadence
 - `Blocks` → `g` → `Top` anchor (force render)
 - `Blocks` → `G` → `Tail` anchor (force render)
-- `Blocks` → `Enter` → `Detail` (force render)
+- `Blocks` → `Enter` → toggle `expanded_block` (inline expand/collapse, stays in Blocks, force render)
+- `Blocks` → future action key → `Detail` (full-screen pager, not yet implemented)
 - `Detail` → bare `\x1b` or `q` → `Blocks` (force render); multi-byte escape sequences (arrow keys etc.) are consumed without triggering exit
 - `Blocks` → `q`/`Esc` → `Plain` (reset to default ViewState, force render)
 

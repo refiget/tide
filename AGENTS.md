@@ -18,6 +18,8 @@ Block View  -> overlays structured block metadata on the same shell history
 Detail View -> expands the selected block inline
 ```
 
+**Key distinction**: "Block expansion" (Enter in Block View) is a per-block inline toggle that stays in Block View. "Detail View" (`ViewKind::Detail`) is a separate full-screen pager mode, not entered by Enter.
+
 Chinese positioning:
 
 Tide 是一个运行在 zsh 之上的多模式 shell wrapper / terminal application。它不是 terminal emulator，也不是替代系统终端，而是在现有终端中启动并包裹 zsh，为 zsh 增加一层可控输入层和渲染层。
@@ -42,6 +44,8 @@ ShellBuffer + BlockStore + ViewState
 ```
 
 Do not start with OpenCode, AI, persistence, a full natural-language mode, or a complete multi-mode product. The first goal is to make Plain / Blocks / Detail work from the same captured shell history while keeping Normal mode indistinguishable from ordinary zsh.
+
+**Important**: Enter toggles block expansion (stays in `ViewKind::Blocks`). It does NOT enter Detail View. Detail View is a separate full-screen pager mode entered via a future action key.
 
 ## Product Boundaries
 
@@ -144,14 +148,15 @@ Block View overlays Block Metadata Layer on the same shell history.
 - `BlockStore` history retention is separate from viewport visibility
 - Block View viewport scrolls by visual line (`BlockViewport.line_offset`); selection still moves by block
 - `BlockViewport` controls the visual-line viewport and whether the view is anchored to Top, Tail, or Manual
-- Collapsed blocks show only a configured output preview
+- **Default (preview)**: each block shows `preview_lines` of output, no metadata
+- **Expanded** (`expanded_block == Some(id)`): block shows all output lines + detail lines (command, cwd, exit, duration, actions)
+- `Enter` toggles the selected block between default and expanded — stays in Block View, does NOT enter Detail View
 - Top and bottom metadata lines are inserted around that block's output range
 - Metadata shows block id, command, status, exit code, and duration
 - The selected block is highlighted
 - `j` / `k` or Up / Down moves selection
 - `g` jumps to the oldest block
 - `G` jumps to the newest block and resumes follow-tail
-- `Enter` opens Detail View
 - `q` / `Esc` returns to Plain View
 - repeated `j` / `k` input should be coalesced and rendered at frame cadence
 - `auto_follow_on_reach_bottom` config controls whether `j` reaching the last block re-enters Tail anchor (default false)
@@ -159,14 +164,21 @@ Block View overlays Block Metadata Layer on the same shell history.
 
 Block View is not a list page and not a popup. It is a new rendering layer over the same shell history.
 
-### Detail View
+### Detail View (future — not entered by Enter)
 
-Detail View expands the selected block inline.
+Detail View is a full-screen pager mode for deep inspection of a single block. It is NOT entered by the Enter key (Enter does inline block expansion in Block View). Entry will be via a dedicated action key in a future implementation.
 
-- The selected block remains in shell history context
-- Detail lines are inserted inside that block before the bottom border
-- Detail shows command, cwd, exit code, duration, stdout, stderr, and actions
+- Full screen, only one block visible at a time
+- Output scrollable via `j`/`k` (pager-style, not block navigation)
+- Shows command, cwd, exit code, duration, and actions
 - `q` / `Esc` returns to Block View
+
+### Terminology Distinction
+
+| Concept | Trigger | View | Navigation | Scope |
+|---------|---------|------|------------|-------|
+| **Block expansion** | `Enter` | `ViewKind::Blocks` (inline) | `j`/`k` navigate blocks | Per-block toggle |
+| **Detail View** | Future action key | `ViewKind::Detail` (full-screen pager) | `j`/`k` scroll output | Single block, immersive |
 
 ### Full-Screen Programs
 

@@ -926,6 +926,10 @@ fn select_block_index(state: &mut RuntimeState, index: usize, anchor: ViewAnchor
     let index = index.min(state.blocks.len().saturating_sub(1));
     state.view.block_viewport.selected_index = index;
     state.view.selected_block = state.blocks.block_id_at(index);
+    // When in expanded mode, the expanded block follows the selection.
+    if state.view.expanded_block.is_some() {
+        state.view.expanded_block = state.view.selected_block;
+    }
     state.view.block_viewport.anchor = anchor;
     match anchor {
         ViewAnchor::Tail => {
@@ -956,6 +960,9 @@ fn select_tail_block(state: &mut RuntimeState) {
     state.view.selected_block = state.blocks.block_id_at(last);
     state.view.block_viewport.anchor = ViewAnchor::Tail;
     state.view.block_viewport.line_offset = compute_tail_scroll_offset(state);
+    if state.view.expanded_block.is_some() {
+        state.view.expanded_block = state.view.selected_block;
+    }
 }
 
 fn compute_tail_scroll_offset(state: &RuntimeState) -> usize {
