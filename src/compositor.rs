@@ -270,12 +270,11 @@ impl Compositor {
             let all_body_lines = &shell_lines[body_start..=body_end];
             let expanded =
                 matches!(view.view, ViewKind::Detail) && view.expanded_block == Some(block_id);
-            let limit = if expanded {
-                block_view.expanded_lines
+            let shown = if expanded {
+                all_body_lines.len()
             } else {
-                block_view.preview_lines
+                block_view.preview_lines.min(all_body_lines.len())
             };
-            let shown = limit.min(all_body_lines.len());
 
             for line in all_body_lines.iter().take(shown) {
                 lines.push(VisualLine::BlockBodyLine {
@@ -287,11 +286,7 @@ impl Compositor {
 
             if all_body_lines.len() > shown {
                 let remaining = all_body_lines.len() - shown;
-                let text = if expanded {
-                    format!("... {remaining} more lines")
-                } else {
-                    format!("... {remaining} more lines, Enter to expand")
-                };
+                let text = format!("... {remaining} more lines, Enter to expand");
                 lines.push(VisualLine::BlockBodyLine {
                     text,
                     block_id,
@@ -396,94 +391,6 @@ impl Compositor {
         desired_bottom
             .saturating_sub(content_height)
             .min(max_offset)
-    }
-
-    /// Build a full-screen pager layout for a single expanded block
-    /// (Detail View). Shows only this block's output, metadata, and
-    /// a pager-style footer with scroll position.
-    pub fn build_detail_layout(
-        block: &CommandBlock,
-        detail_scroll_offset: usize,
-        _width: u16,
-        content_height: usize,
-        flash_message: Option<&str>,
-    ) -> Vec<VisualLine> {
-        let block_id = block.id;
-        let mut lines = Vec::new();
-
-        // Top border.
-        lines.push(VisualLine::BlockTopBorder {
-            block_id,
-            selected: true,
-            label: top_label(block),
-        });
-
-        // Build metadata lines (reuse detail_lines).
-        let metadata = detail_lines(block, true);
-        let metadata_count = metadata.len();
-
-        // Available lines for body output.
-        let available = content_height.saturating_sub(2 + metadata_count);
-
-        // Determine output lines (strip trailing empty line from final \n).
-        let output_lines: Vec<&str> = if block.kind == BlockKind::RawProgram {
-            vec!["interactive program; screen output was not captured"]
-        } else if block.output_text.is_empty() {
-            vec!["no captured text output"]
-        } else {
-            let mut parts: Vec<&str> = block.output_text.split('\n').collect();
-            if parts.last() == Some(&"") {
-                parts.pop();
-            }
-            parts
-        };
-        let total = output_lines.len();
-
-        // Clamp scroll offset.
-        let max_offset = total.saturating_sub(available);
-        let offset = detail_scroll_offset.min(max_offset);
-
-        // Render body lines.
-        let shown = available.min(total.saturating_sub(offset));
-        for line in output_lines.iter().skip(offset).take(shown) {
-            lines.push(VisualLine::BlockBodyLine {
-                text: line.to_string(),
-                block_id,
-                selected: true,
-            });
-        }
-
-        // Metadata block (directly after output — no padding).
-        lines.extend(metadata);
-
-        // Bottom border.
-        lines.push(VisualLine::BlockBottomBorder {
-            block_id,
-            selected: true,
-            label: bottom_label(block),
-        });
-
-        // Footer.
-        let footer = if let Some(msg) = flash_message {
-            msg.to_string()
-        } else {
-            let cmd_preview = truncate_command(&block.command, 40);
-            if total == 0 {
-                format!(
-                    "Output · #{block} {cmd_preview}  ↑↓ scroll  g/G top/btm  y copy  q back",
-                    block = block.id,
-                )
-            } else {
-                let pos = offset.saturating_add(1).min(total);
-                format!(
-                    "Output · #{block} {cmd_preview}  ↑↓ scroll  g/G top/btm  y copy  q back  line {pos}/{total}",
-                    block = block.id,
-                )
-            }
-        };
-        lines.push(VisualLine::Footer { text: footer });
-
-        lines
     }
 
     #[allow(dead_code)]
@@ -604,6 +511,17 @@ fn footer_text(blocks: &BlockStore, view: &ViewState, flash_message: Option<&str
     if let Some(msg) = flash_message {
         return msg.to_string();
     }
+    if matches!(view.view, ViewKind::Detail) {
+        if let Some(block_id) = view.expanded_block {
+            if let Some(block) = blocks.block(block_id) {
+                let cmd = truncate_command(&block.command, 40);
+                return format!(
+                    "#{block} {cmd}  j/k scroll  g/G top/btm  y copy  r rerun  q collapse",
+                    block = block_id,
+                );
+            }
+        }
+    }
     let total = blocks.len();
     let current = if total == 0 {
         0
@@ -613,7 +531,7 @@ fn footer_text(blocks: &BlockStore, view: &ViewState, flash_message: Option<&str
             .min(total.saturating_sub(1))
             + 1
     };
-    format!("Block #{current}/{total}  j/k move  Enter detail  g/G top/bottom  q quit")
+    format!("Block #{current}/{total}  j/k move  Enter expand  g/G top/btm  q quit")
 }
 
 #[cfg(test)]
@@ -1169,197 +1087,48 @@ mod tests {
 
     // --- build_detail_layout tests ---
 
-    fn detail_block_fixture(output_lines: &[&str]) -> CommandBlock {
-        let mut store = BlockStore::new(PathBuf::from("/tmp"), None, 1024 * 1024);
-        let id = store.start_command("echo hello".to_string(), 0, BlockKind::NormalCommand);
-        for line in output_lines {
-            store.append_output(format!("{line}\n").as_bytes());
-        }
-        store.finish_command(0, output_lines.len().saturating_sub(1));
-        store.block(id).unwrap().clone()
-    }
-
     #[test]
-    fn detail_layout_shows_only_one_block() {
-        let block = detail_block_fixture(&["a"]);
-        let lines = Compositor::build_detail_layout(&block, 0, 80, 20, None);
+    fn expanded_block_shows_all_output_lines() {
+        let (mut shell, mut store, mut view, config) = fixture();
+        let lines: Vec<String> = (0..50).map(|i| format!("line{i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let id = add_block(&mut shell, &mut store, "long", &refs);
+        view.view = ViewKind::Detail;
+        view.expanded_block = Some(id);
+        view.selected_block = Some(id);
 
-        let top_count = lines
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let body_count = layout
+            .lines
             .iter()
-            .filter(|l| matches!(l, VisualLine::BlockTopBorder { .. }))
+            .filter(|l| matches!(l, VisualLine::BlockBodyLine { .. }))
             .count();
-        assert_eq!(top_count, 1, "should have one top border");
-        let bottom_count = lines
-            .iter()
-            .filter(|l| matches!(l, VisualLine::BlockBottomBorder { .. }))
-            .count();
-        assert_eq!(bottom_count, 1);
-        let footer = lines.last().unwrap();
-        assert!(
-            matches!(footer, VisualLine::Footer { text } if text.contains("Output")),
-            "footer should start with Output"
+        // All 50 output lines should be present (not limited by expanded_lines).
+        assert_eq!(
+            body_count, 50,
+            "expanded block should show all 50 output lines"
         );
     }
 
     #[test]
-    fn detail_layout_scroll_offset_clamps_to_max() {
-        let block = detail_block_fixture(&["1", "2", "3", "4", "5"]);
-        // content_height=15 should leave ~3 body lines after metadata
-        let lines = Compositor::build_detail_layout(&block, usize::MAX, 80, 15, None);
-        let body_lines: Vec<&str> = lines
-            .iter()
-            .filter_map(|l| {
-                if let VisualLine::BlockBodyLine { text, .. } = l {
-                    Some(text.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert!(
-            !body_lines.is_empty(),
-            "should show some body lines, got empty"
-        );
-        // With usize::MAX offset, should see the tail of the output
-        assert!(
-            body_lines.contains(&"5"),
-            "clamped offset should show last line, got: {body_lines:?}"
-        );
-    }
+    fn collapsed_block_respects_preview_lines() {
+        let (mut shell, mut store, mut view, config) = fixture();
+        let lines: Vec<String> = (0..50).map(|i| format!("line{i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        add_block(&mut shell, &mut store, "long", &refs);
+        view.view = ViewKind::Blocks;
 
-    #[test]
-    fn detail_layout_footer_contains_position() {
-        let block = detail_block_fixture(&["1", "2", "3"]);
-        let lines = Compositor::build_detail_layout(&block, 1, 80, 20, None);
-        let footer = lines.last().unwrap();
-        match footer {
-            VisualLine::Footer { text } => {
-                assert!(
-                    text.contains("line"),
-                    "footer should contain line position: {text}"
-                );
-            }
-            other => panic!("expected Footer, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn detail_layout_empty_block_placeholder() {
-        let mut store = BlockStore::new(PathBuf::from("/tmp"), None, 1024 * 1024);
-        let id = store.start_command("true".to_string(), 0, BlockKind::NormalCommand);
-        store.finish_command(0, 0);
-        let block = store.block(id).unwrap().clone();
-
-        let lines = Compositor::build_detail_layout(&block, 0, 80, 20, None);
-        let body: Vec<&str> = lines
-            .iter()
-            .filter_map(|l| {
-                if let VisualLine::BlockBodyLine { text, .. } = l {
-                    Some(text.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert!(
-            body.iter().any(|t| *t == "no captured text output"),
-            "empty block should show placeholder, got: {body:?}"
-        );
-    }
-
-    #[test]
-    fn detail_layout_raw_block_placeholder() {
-        let mut store = BlockStore::new(PathBuf::from("/tmp"), None, 1024 * 1024);
-        let id = store.start_command("vim".to_string(), 0, BlockKind::RawProgram);
-        store.finish_command(0, 0);
-        if let Some(block) = store.block_mut(id) {
-            block.kind = BlockKind::RawProgram;
-        }
-        let block = store.block(id).unwrap().clone();
-
-        let lines = Compositor::build_detail_layout(&block, 0, 80, 20, None);
-        let body: Vec<&str> = lines
-            .iter()
-            .filter_map(|l| {
-                if let VisualLine::BlockBodyLine { text, .. } = l {
-                    Some(text.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert!(
-            body.iter().any(|t| t.contains("interactive program")),
-            "raw block should show interactive placeholder, got: {body:?}"
-        );
-    }
-
-    #[test]
-    fn detail_layout_short_block_has_no_padding() {
-        // A 2-line block should have metadata directly after output (no Empty lines in between).
-        let mut store = BlockStore::new(PathBuf::from("/tmp"), None, 1024 * 1024);
-        let id = store.start_command("echo hi".to_string(), 0, BlockKind::NormalCommand);
-        store.append_output(b"line1\n");
-        store.append_output(b"line2\n");
-        store.finish_command(0, 1);
-        let block = store.block(id).unwrap().clone();
-
-        let lines = Compositor::build_detail_layout(&block, 0, 80, 20, None);
-        // Find positions: last body line index, first detail line index.
-        let last_body = lines
-            .iter()
-            .rposition(|l| matches!(l, VisualLine::BlockBodyLine { .. }));
-        let first_detail = lines
-            .iter()
-            .position(|l| matches!(l, VisualLine::BlockDetailLine { .. }));
-        if let (Some(body_idx), Some(detail_idx)) = (last_body, first_detail) {
-            // Detail (metadata) should start exactly after the last body line.
-            assert!(
-                detail_idx <= body_idx + 2,
-                "metadata should start right after output body (detail_idx={detail_idx}, body_idx={body_idx})"
-            );
-            // There should be NO empty lines between body end and first detail line.
-            for i in body_idx + 1..detail_idx {
-                assert!(
-                    !matches!(lines[i], VisualLine::Empty),
-                    "no empty line should exist between body and metadata, found at index {i}"
-                );
-            }
-        } else {
-            panic!("should have both body and detail lines");
-        }
-    }
-
-    #[test]
-    fn detail_layout_long_block_fills_screen() {
-        // A 50-line block with content_height=20 should fill exactly content_height+1 rows.
-        let mut store = BlockStore::new(PathBuf::from("/tmp"), None, 1024 * 1024);
-        let id = store.start_command("long".to_string(), 0, BlockKind::NormalCommand);
-        for i in 0..50 {
-            store.append_output(format!("line{i}\n").as_bytes());
-        }
-        store.finish_command(0, 49);
-        let block = store.block(id).unwrap().clone();
-
-        let content_height = 20;
-        let lines = Compositor::build_detail_layout(&block, 0, 80, content_height, None);
-        // Total lines = exactly content_height + 1 (footer)
-        assert_eq!(lines.len(), content_height + 1);
-        // Available body lines = content_height - 2(borders) - metadata_count
-        let metadata_count = detail_lines(&block, true).len();
-        let available = content_height.saturating_sub(2 + metadata_count);
-        let body_count = lines
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        // Body lines = preview_lines actual lines + 1 truncation hint line
+        let body_count = layout
+            .lines
             .iter()
             .filter(|l| matches!(l, VisualLine::BlockBodyLine { .. }))
             .count();
         assert_eq!(
-            body_count, available,
-            "long block should fill all available body lines"
+            body_count,
+            config.preview_lines + 1,
+            "collapsed block should show preview_lines plus one truncation hint"
         );
-        let detail_count = lines
-            .iter()
-            .filter(|l| matches!(l, VisualLine::BlockDetailLine { .. }))
-            .count();
-        assert_eq!(detail_count, metadata_count, "all metadata lines present");
     }
 }

@@ -68,9 +68,6 @@ pub struct ViewState {
     pub expanded_block: Option<BlockId>,
     pub scroll_offset: usize,
     pub block_viewport: BlockViewport,
-    /// Scroll offset for the full-screen Detail View pager (number of
-    /// output lines scrolled past the top). Reset to 0 on each Enter.
-    pub detail_scroll_offset: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -97,7 +94,6 @@ impl Default for ViewState {
             expanded_block: None,
             scroll_offset: 0,
             block_viewport: BlockViewport::default(),
-            detail_scroll_offset: 0,
         }
     }
 }
