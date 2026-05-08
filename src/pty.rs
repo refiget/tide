@@ -382,9 +382,11 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
         ShellHookEvent::Preexec { command } => {
             let start_line = state.shell.line_count();
             state.capture_suspended = false;
-            state
-                .blocks
-                .start_command(command, start_line, BlockKind::NormalCommand);
+            let block_id =
+                state
+                    .blocks
+                    .start_command(command.clone(), start_line, BlockKind::NormalCommand);
+            state.index.index_command(block_id, &command);
             sync_block_viewport_after_history_change(state);
         }
         ShellHookEvent::Precmd { exit_code, cwd } => {
@@ -401,12 +403,9 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
                 if let Some(block) = state.blocks.block(block_id) {
                     if block.status == BlockStatus::Failed {
                         state.index.on_block_failed(block_id);
-                        if state.view.filter.failed_only {
-                            if let crate::app::VisibleSource::Filtered(ref mut v) =
-                                state.view.visible
-                            {
-                                v.push(block_id);
-                            }
+                        if state.view.filter.is_active() {
+                            rebuild_visible(state);
+                            restore_or_clamp_selection(state);
                         }
                     }
                 }
@@ -774,11 +773,35 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
 }
 
 fn rebuild_visible(state: &mut RuntimeState) {
-    if state.view.filter.is_active() {
-        let ids = state.index.query_failed(&state.blocks.executions);
-        state.view.visible = crate::app::VisibleSource::Filtered(ids);
-    } else {
-        state.view.visible = crate::app::VisibleSource::AllTimeline;
+    let has_failed = state.view.filter.failed_only;
+    let has_query = !state.view.filter.command_query.is_empty();
+
+    match (has_failed, has_query) {
+        (false, false) => {
+            state.view.visible = crate::app::VisibleSource::AllTimeline;
+        }
+        (true, false) => {
+            let ids = state.index.query_failed(&state.blocks.executions);
+            state.view.visible = crate::app::VisibleSource::Filtered(ids);
+        }
+        (false, true) => {
+            let ids = state
+                .index
+                .query_command(&state.view.filter.command_query, &state.blocks.executions);
+            state.view.visible = crate::app::VisibleSource::Filtered(ids);
+        }
+        (true, true) => {
+            let failed = state.index.query_failed(&state.blocks.executions);
+            let cmd = state
+                .index
+                .query_command(&state.view.filter.command_query, &state.blocks.executions);
+            let cmd_set: std::collections::HashSet<_> = cmd.into_iter().collect();
+            let ids: Vec<_> = failed
+                .into_iter()
+                .filter(|id| cmd_set.contains(id))
+                .collect();
+            state.view.visible = crate::app::VisibleSource::Filtered(ids);
+        }
     }
 }
 
@@ -800,7 +823,44 @@ fn restore_or_clamp_selection(state: &mut RuntimeState) {
     state.view.selected_block = state.view.visible.block_at(&state.blocks, tail_idx);
 }
 
+fn handle_search_input(byte: u8, state: &mut RuntimeState) -> bool {
+    match byte {
+        b'\r' | b'\n' => {
+            let query = state.view.search_buffer.take().unwrap_or_default();
+            state.view.filter.command_query = query;
+            rebuild_visible(state);
+            restore_or_clamp_selection(state);
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+        }
+        b'\x1b' => {
+            state.view.search_buffer = None;
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+        }
+        b'\x7f' | b'\x08' => {
+            if let Some(buf) = &mut state.view.search_buffer {
+                buf.pop();
+            }
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+        }
+        0x20..=0x7e => {
+            if let Some(buf) = &mut state.view.search_buffer {
+                buf.push(byte as char);
+            }
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+        }
+        _ => {}
+    }
+    true
+}
+
 fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
+    if state.view.search_buffer.is_some() {
+        return handle_search_input(byte, state);
+    }
     match byte {
         b'q' | b'\x1b' => {
             state.view = ViewState::default();
@@ -886,6 +946,13 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
             state.view.filter.failed_only = !state.view.filter.failed_only;
             rebuild_visible(state);
             restore_or_clamp_selection(state);
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+            true
+        }
+        b'/' => {
+            let current = state.view.filter.command_query.clone();
+            state.view.search_buffer = Some(current);
             state.render_state.dirty = true;
             state.render_state.force_render = true;
             true

@@ -675,6 +675,10 @@ fn bottom_label(block: &CommandBlock) -> String {
 }
 
 fn footer_text(blocks: &BlockStore, view: &ViewState, flash_message: Option<&str>) -> String {
+    if let Some(buf) = &view.search_buffer {
+        return format!("/{buf}\u{258c}  Enter apply \u{b7} Esc cancel");
+    }
+
     if let Some(msg) = flash_message {
         return msg.to_string();
     }
@@ -690,19 +694,28 @@ fn footer_text(blocks: &BlockStore, view: &ViewState, flash_message: Option<&str
             + 1
     };
 
-    let filter_tag = if view.filter.failed_only {
-        " \u{b7} failed"
-    } else {
-        ""
-    };
+    let mut tags = Vec::new();
+    if !view.filter.command_query.is_empty() {
+        tags.push(format!("\"{}\"", view.filter.command_query));
+    }
+    if view.filter.failed_only {
+        tags.push("failed".to_string());
+    }
 
     let count = if view.filter.is_active() {
-        format!("#{current}/{visible_count} of {total_count}{filter_tag}")
+        let tag_str = tags.join(" \u{b7} ");
+        format!("#{current}/{visible_count} of {total_count} \u{b7} {tag_str}")
     } else {
         format!("#{current}/{total_count}")
     };
 
-    format!("Block {count}  j/k move  Enter expand  i detail  f filter  g/G top/btm  q quit")
+    let search_hint = if view.filter.is_active() {
+        " / new search"
+    } else {
+        " / search"
+    };
+
+    format!("Block {count}{search_hint} f filter  j/k move  Enter expand  i detail  g/G  q quit")
 }
 
 #[cfg(test)]

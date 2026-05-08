@@ -106,11 +106,12 @@ impl Default for VisibleSource {
 #[derive(Debug, Clone, Default)]
 pub struct BlockFilter {
     pub failed_only: bool,
+    pub command_query: String,
 }
 
 impl BlockFilter {
     pub fn is_active(&self) -> bool {
-        self.failed_only
+        self.failed_only || !self.command_query.is_empty()
     }
 }
 
@@ -125,6 +126,7 @@ pub struct ViewState {
     pub detail_line_cursor: usize,
     pub filter: BlockFilter,
     pub visible: VisibleSource,
+    pub search_buffer: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +156,7 @@ impl Default for ViewState {
             detail_line_cursor: 0,
             filter: BlockFilter::default(),
             visible: VisibleSource::default(),
+            search_buffer: None,
         }
     }
 }
