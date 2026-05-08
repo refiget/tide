@@ -182,6 +182,25 @@ impl Compositor {
             return Vec::new();
         }
 
+        // When all content fits in one screen, no scrolling is needed.
+        // Anchor controls vertical placement: Top → top-aligned, everything
+        // else (Tail, Manual) → bottom-aligned.  j/k only change the
+        // selected block, never the visual offset.
+        if layout.total_height <= content_height {
+            let top_padding = if matches!(view.block_viewport.anchor, ViewAnchor::Top) {
+                0
+            } else {
+                content_height.saturating_sub(layout.total_height)
+            };
+            let mut out: Vec<VisualLine> =
+                std::iter::repeat_n(VisualLine::Empty, top_padding).collect();
+            out.extend(layout.lines.iter().cloned());
+            while out.len() < content_height {
+                out.push(VisualLine::Empty);
+            }
+            return out;
+        }
+
         let max_offset = layout.total_height.saturating_sub(content_height);
         let start = view.block_viewport.line_offset.min(max_offset);
         let end = start
@@ -324,7 +343,7 @@ impl Compositor {
             .total_height
             .saturating_sub(line_offset)
             .min(content_height);
-        let top_padding_lines = if matches!(view.block_viewport.anchor, ViewAnchor::Tail)
+        let top_padding_lines = if !matches!(view.block_viewport.anchor, ViewAnchor::Top)
             && visible_len < content_height
         {
             content_height.saturating_sub(visible_len)
@@ -792,5 +811,121 @@ mod tests {
             layout.block_index_at_line(layout.total_height + 10),
             Some(1)
         );
+    }
+
+    // --- Short-content alignment tests ---
+
+    fn short_fixture() -> (ShellBuffer, BlockStore, ViewState, BlockViewConfig) {
+        let (mut shell, mut store, mut view, config) = fixture();
+        // Two single-line blocks — total visual height is well under 20.
+        add_block(&mut shell, &mut store, "echo one", &["one"]);
+        add_block(&mut shell, &mut store, "echo two", &["two"]);
+        view.view = ViewKind::Blocks;
+        (shell, store, view, config)
+    }
+
+    /// Count leading Empty lines in the visual output (top padding).
+    fn count_top_padding(visible: &[VisualLine]) -> usize {
+        visible
+            .iter()
+            .take_while(|l| matches!(l, VisualLine::Empty))
+            .count()
+    }
+
+    #[test]
+    fn short_content_tail_bottom_aligned() {
+        let (shell, store, mut view, config) = short_fixture();
+        tail_view(&mut view, &store);
+        view.block_viewport.line_offset = 0;
+
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let visible = Compositor::slice_visible_lines(&layout, &view, 20);
+
+        assert_eq!(visible.len(), 20);
+        let padding = count_top_padding(&visible);
+        assert!(padding > 0, "Tail should bottom-align short content");
+        assert_eq!(padding, 20 - layout.total_height);
+    }
+
+    #[test]
+    fn short_content_manual_stays_bottom_aligned() {
+        let (shell, store, mut view, config) = short_fixture();
+        // Simulate pressing k: selected_index moves to 0, anchor becomes Manual.
+        view.block_viewport.selected_index = 0;
+        view.block_viewport.anchor = ViewAnchor::Manual;
+        view.block_viewport.line_offset = 0;
+        view.selected_block = store.block_id_at(0);
+
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let visible = Compositor::slice_visible_lines(&layout, &view, 20);
+
+        assert_eq!(visible.len(), 20);
+        let padding = count_top_padding(&visible);
+        assert!(
+            padding > 0,
+            "Manual anchor should still bottom-align when content fits"
+        );
+        assert_eq!(padding, 20 - layout.total_height);
+    }
+
+    #[test]
+    fn short_content_manual_after_k_stays_bottom_aligned() {
+        let (shell, store, mut view, config) = short_fixture();
+        // Start from Tail, move up to first block, simulate k behavior.
+        tail_view(&mut view, &store);
+        view.block_viewport.selected_index = 0;
+        view.block_viewport.anchor = ViewAnchor::Manual;
+        view.block_viewport.line_offset = 0;
+        view.selected_block = store.block_id_at(0);
+
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let visible = Compositor::slice_visible_lines(&layout, &view, 20);
+
+        assert_eq!(visible.len(), 20);
+        let padding = count_top_padding(&visible);
+        assert!(
+            padding > 0,
+            "k should not jump content to top when content fits"
+        );
+        assert_eq!(padding, 20 - layout.total_height);
+    }
+
+    #[test]
+    fn short_content_top_aligned() {
+        let (shell, store, mut view, config) = short_fixture();
+        view.block_viewport.anchor = ViewAnchor::Top;
+        view.block_viewport.line_offset = 0;
+
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let visible = Compositor::slice_visible_lines(&layout, &view, 20);
+
+        assert_eq!(visible.len(), 20);
+        let padding = count_top_padding(&visible);
+        assert_eq!(padding, 0, "Top anchor should not pad short content");
+        // Content starts at line 0.
+        assert!(matches!(visible[0], VisualLine::BlockTopBorder { .. }));
+    }
+
+    #[test]
+    fn short_content_g_goes_top_g_returns_tail_bottom() {
+        let (shell, store, mut view, config) = short_fixture();
+
+        // Simulate g: Top anchor, selected_index = 0
+        view.block_viewport.anchor = ViewAnchor::Top;
+        view.block_viewport.selected_index = 0;
+        view.block_viewport.line_offset = 0;
+
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config);
+        let top_visible = Compositor::slice_visible_lines(&layout, &view, 20);
+        assert_eq!(count_top_padding(&top_visible), 0);
+
+        // Simulate G: Tail anchor, selected_index = last
+        view.block_viewport.anchor = ViewAnchor::Tail;
+        view.block_viewport.selected_index = store.len() - 1;
+
+        let tail_visible = Compositor::slice_visible_lines(&layout, &view, 20);
+        let padding = count_top_padding(&tail_visible);
+        assert!(padding > 0);
+        assert_eq!(padding, 20 - layout.total_height);
     }
 }

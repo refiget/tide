@@ -779,6 +779,12 @@ fn ensure_selected_block_fully_visible(
     content_height: usize,
     margin_lines: usize,
 ) {
+    // All content already fits — no scrolling adjustments needed.
+    if layout.total_height <= content_height {
+        viewport.line_offset = 0;
+        return;
+    }
+
     let Some(span) = layout.span_for_block_index(viewport.selected_index) else {
         return;
     };
