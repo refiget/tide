@@ -3,7 +3,9 @@ use std::io::{self, Write};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     execute, queue,
-    style::{Attribute, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor},
+    style::{
+        Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+    },
     terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use unicode_width::UnicodeWidthStr;
@@ -11,7 +13,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     ansi::{StyledText, TextStyle, styled_width, truncate_styled_to_width},
     app::{BlockStatus, ViewKind},
-    compositor::VisualLine,
+    compositor::{FooterSegment, VisualLine},
     config::{BlockLayoutConfig, BlockViewConfig},
     theme::{CatppuccinFrappe, Theme},
 };
@@ -227,8 +229,8 @@ fn render_line<W: Write>(
                 block_view,
             )?;
         }
-        VisualLine::Footer { text } => {
-            render_footer(w, text, width)?;
+        VisualLine::Footer { segments } => {
+            render_footer(w, segments, width)?;
         }
     }
 
@@ -699,10 +701,64 @@ fn framed_text(text: &str, width: usize, body_padding: usize) -> String {
     format!("│{text}{}│", " ".repeat(fill))
 }
 
-fn render_footer<W: Write>(w: &mut W, text: &str, width: usize) -> io::Result<()> {
-    queue!(w, SetForegroundColor(Theme::FOOTER_FG))?;
-    queue!(w, SetBackgroundColor(Theme::FOOTER_BG))?;
-    queue!(w, Print(pad_to_width(text, width)))?;
+fn render_footer<W: Write>(w: &mut W, segments: &[FooterSegment], width: usize) -> io::Result<()> {
+    queue!(w, SetBackgroundColor(Color::Reset))?;
+
+    let mut used = 0usize;
+    for seg in segments {
+        match seg {
+            FooterSegment::Plain(t) | FooterSegment::Label(t) => {
+                let seg_w = UnicodeWidthStr::width(t.as_str());
+                if used >= width {
+                    break;
+                }
+                let room = width.saturating_sub(used);
+                if seg_w > room {
+                    queue!(w, SetForegroundColor(Theme::FOOTER_FG))?;
+                    queue!(w, Print(truncate_to_width(t, room)))?;
+                    used += room;
+                    break;
+                }
+                queue!(w, SetForegroundColor(Theme::FOOTER_FG))?;
+                queue!(w, Print(t))?;
+                used += seg_w;
+            }
+            FooterSegment::Key(t) => {
+                let seg_w = UnicodeWidthStr::width(t.as_str());
+                if used >= width {
+                    break;
+                }
+                let room = width.saturating_sub(used);
+                if seg_w > room {
+                    queue!(w, SetForegroundColor(Theme::FOOTER_KEY_FG))?;
+                    queue!(w, Print(truncate_to_width(t, room)))?;
+                    used += room;
+                    break;
+                }
+                queue!(w, SetForegroundColor(Theme::FOOTER_KEY_FG))?;
+                queue!(w, Print(t))?;
+                used += seg_w;
+            }
+            FooterSegment::Sep => {
+                if used >= width {
+                    break;
+                }
+                let room = width.saturating_sub(used);
+                if room < 3 {
+                    break;
+                }
+                queue!(w, SetForegroundColor(Theme::FOOTER_SEP_FG))?;
+                queue!(w, Print(" | "))?;
+                used += 3;
+            }
+        }
+    }
+
+    let fill = width.saturating_sub(used.min(width));
+    if fill > 0 {
+        queue!(w, SetForegroundColor(Color::Reset))?;
+        queue!(w, Print(" ".repeat(fill)))?;
+    }
     queue!(w, ResetColor)?;
     Ok(())
 }

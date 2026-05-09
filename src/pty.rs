@@ -650,6 +650,13 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
         ViewKind::RawProgram => None,
         ViewKind::Agent => Some(1),
         ViewKind::Blocks => match bytes {
+            [b'?', ..] => {
+                state.view.help_return_view = Some(state.view.view.clone());
+                state.view.view = ViewKind::Help;
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+                Some(1)
+            }
             [b'\x1b', b'[', b'B', ..] => {
                 accumulate_block_delta(&mut state, 1);
                 Some(3)
@@ -663,6 +670,13 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
             [] => None,
         },
         ViewKind::Detail => match bytes {
+            [b'?', ..] => {
+                state.view.help_return_view = Some(state.view.view.clone());
+                state.view.view = ViewKind::Help;
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+                Some(1)
+            }
             // Two-key copy sequences
             [b'y', b'c', ..] => {
                 perform_block_action(&mut state, BlockAction::CopyCommand);
@@ -767,6 +781,21 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
             }
             [b'\x1b', ..] => Some(bytes.len().min(3)),
             [_byte, ..] => Some(1),
+            [] => None,
+        },
+        ViewKind::Help => match bytes {
+            [b'\x1b', b'[', _, ..] => Some(3),
+            [b'\x1b', ..] if bytes.len() >= 2 => Some(bytes.len().min(3)),
+            [_, ..] => {
+                state.view.view = state
+                    .view
+                    .help_return_view
+                    .take()
+                    .unwrap_or(ViewKind::Blocks);
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+                Some(1)
+            }
             [] => None,
         },
     }

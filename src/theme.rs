@@ -81,6 +81,8 @@ impl Theme {
     pub const CURSOR_FG: Color = CatppuccinFrappe::TEXT;
     pub const FOOTER_BG: Color = CatppuccinFrappe::MANTLE;
     pub const FOOTER_FG: Color = CatppuccinFrappe::SUBTEXT1;
+    pub const FOOTER_KEY_FG: Color = CatppuccinFrappe::LAVENDER;
+    pub const FOOTER_SEP_FG: Color = CatppuccinFrappe::SURFACE2;
     pub const DETAIL_BORDER_FG: Color = CatppuccinFrappe::LAVENDER;
     pub const STATUS_OK_FG: Color = CatppuccinFrappe::GREEN;
     pub const STATUS_FAILED_FG: Color = CatppuccinFrappe::RED;

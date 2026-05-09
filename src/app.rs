@@ -47,6 +47,7 @@ pub enum ViewKind {
     Plain,
     Blocks,
     Detail,
+    Help,
     Agent,
     RawProgram,
 }
@@ -127,6 +128,7 @@ pub struct ViewState {
     pub filter: BlockFilter,
     pub visible: VisibleSource,
     pub search_buffer: Option<String>,
+    pub help_return_view: Option<ViewKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +159,7 @@ impl Default for ViewState {
             filter: BlockFilter::default(),
             visible: VisibleSource::default(),
             search_buffer: None,
+            help_return_view: None,
         }
     }
 }

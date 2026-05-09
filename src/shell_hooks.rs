@@ -25,11 +25,17 @@ impl Osc777Parser {
             let Some(start) = find_subsequence(&self.pending, marker()) else {
                 let keep = marker_prefix_tail_len(&self.pending);
                 let drain_until = self.pending.len().saturating_sub(keep);
-                push_visible_part(&mut parts, self.pending.drain(..drain_until));
+                let visible: Vec<u8> = self.pending.drain(..drain_until).collect();
+                if !visible.is_empty() {
+                    parts.push(ParsedPtyPart::Visible(visible));
+                }
                 break;
             };
 
-            push_visible_part(&mut parts, self.pending.drain(..start));
+            let visible: Vec<u8> = self.pending.drain(..start).collect();
+            if !visible.is_empty() {
+                parts.push(ParsedPtyPart::Visible(visible));
+            }
 
             let Some(end) = self.pending.iter().position(|byte| *byte == b'\x07') else {
                 break;
@@ -189,7 +195,7 @@ mod tests {
             vec![
                 ParsedPtyPart::Visible(b"hello".to_vec()),
                 ParsedPtyPart::Event(ShellHookEvent::Preexec {
-                    command: "echo hi".to_string()
+                    command: "echo hi".to_string(),
                 }),
                 ParsedPtyPart::Visible(b"world".to_vec()),
             ]
@@ -222,7 +228,7 @@ mod tests {
             second,
             vec![
                 ParsedPtyPart::Event(ShellHookEvent::Preexec {
-                    command: "echo hi".to_string()
+                    command: "echo hi".to_string(),
                 }),
                 ParsedPtyPart::Visible(b"def".to_vec()),
             ]
@@ -245,7 +251,7 @@ mod tests {
         assert_eq!(
             parsed,
             vec![ParsedPtyPart::Event(ShellHookEvent::Preexec {
-                command: "echo hi;\npwd".to_string()
+                command: "echo hi;\npwd".to_string(),
             })]
         );
     }
@@ -261,7 +267,7 @@ mod tests {
             parsed,
             vec![
                 ParsedPtyPart::Event(ShellHookEvent::Preexec {
-                    command: "false".to_string()
+                    command: "false".to_string(),
                 }),
                 ParsedPtyPart::Visible(b"out".to_vec()),
                 ParsedPtyPart::Event(ShellHookEvent::Precmd {

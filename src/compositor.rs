@@ -9,6 +9,28 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
+pub enum FooterSegment {
+    Label(String),
+    Key(String),
+    Sep,
+    Plain(String),
+}
+
+impl FooterSegment {
+    pub fn flatten(segments: &[FooterSegment]) -> String {
+        segments
+            .iter()
+            .map(|s| match s {
+                FooterSegment::Label(t) | FooterSegment::Key(t) | FooterSegment::Plain(t) => {
+                    t.as_str()
+                }
+                FooterSegment::Sep => " | ",
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum VisualLine {
     Empty,
     ShellText {
@@ -61,7 +83,7 @@ pub enum VisualLine {
         border_selected: bool, // border │ color tracks block selection regardless of ANSI mode
     },
     Footer {
-        text: String,
+        segments: Vec<FooterSegment>,
     },
 }
 
@@ -155,6 +177,7 @@ impl Compositor {
                 flash_message,
                 home,
             ),
+            ViewKind::Help => Self::build_help_lines(_width, height, block_view),
             ViewKind::Agent => Vec::new(),
         }
     }
@@ -176,7 +199,7 @@ impl Compositor {
 
         if block_view.show_footer {
             visual_lines.push(VisualLine::Footer {
-                text: footer_text(blocks, view, flash_message),
+                segments: footer_segments(blocks, view, flash_message),
             });
         }
         visual_lines
@@ -479,13 +502,13 @@ impl Compositor {
 
         let Some(block_id) = view.expanded_block else {
             return vec![VisualLine::Footer {
-                text: "Detail: no block selected   q back".into(),
+                segments: vec![FooterSegment::Plain("Detail: no block selected".into())],
             }];
         };
 
         let Some(block) = blocks.block(block_id) else {
             return vec![VisualLine::Footer {
-                text: "Detail: block not found   q back".into(),
+                segments: vec![FooterSegment::Plain("Detail: block not found".into())],
             }];
         };
 
@@ -565,7 +588,7 @@ impl Compositor {
         }
 
         result.push(VisualLine::Footer {
-            text: detail_footer_text(block, view, total, inner_height, flash_message),
+            segments: detail_footer_segments(block, view, total, inner_height, flash_message),
         });
 
         result
@@ -583,6 +606,168 @@ impl Compositor {
         // If scrolling performance becomes an issue, cache visual heights keyed
         // by block_id, width, view mode, expanded state, and config.
         Self::build_one_block_lines(shell_lines, block, view, block_view, selected, 0, None).len()
+    }
+
+    fn build_help_lines(
+        _width: u16,
+        height: u16,
+        _block_view: &BlockViewConfig,
+    ) -> Vec<VisualLine> {
+        use FooterSegment::*;
+        let height = height as usize;
+
+        let mut lines: Vec<VisualLine> = vec![
+            VisualLine::DetailTopBorder {
+                block_id: BlockId(0),
+                label: "Keybindings".into(),
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: String::new(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  Block View".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  j / k       navigate blocks".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  Enter       expand / collapse".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  i           detail view".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  g / G       jump to top / bottom".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  /           search commands".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  f           toggle failed filter".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  y / Y       copy output / command".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  r           rerun command".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  q / Esc     return to shell".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: String::new(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  Detail View".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  j / k       scroll output".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  g / G       jump to top / bottom".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  yc          copy command".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  yo          copy output".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  yb          copy block".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  r           rerun command".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: "  q / Esc     back to blocks".into(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: String::new(),
+                selected: false,
+                use_detail_border: true,
+            },
+            VisualLine::DetailBottomBorder {
+                block_id: BlockId(0),
+                label: String::new(),
+            },
+            VisualLine::Footer {
+                segments: vec![Plain("press any key to close".into())],
+            },
+        ];
+
+        let total_content = lines.len();
+        if total_content < height {
+            let top_padding = (height.saturating_sub(total_content)) / 2;
+            let mut padded: Vec<VisualLine> =
+                std::iter::repeat_n(VisualLine::Empty, top_padding).collect();
+            padded.extend(lines);
+            while padded.len() < height {
+                padded.push(VisualLine::Empty);
+            }
+            lines = padded;
+        }
+        lines
     }
 }
 
@@ -604,27 +789,37 @@ fn get_block_styled_output_lines(block: &CommandBlock) -> Vec<crate::ansi::Style
     }
 }
 
-fn detail_footer_text(
+fn detail_footer_segments(
     block: &CommandBlock,
     view: &ViewState,
     total_lines: usize,
     inner_height: usize,
     flash_message: Option<&str>,
-) -> String {
+) -> Vec<FooterSegment> {
+    use FooterSegment::*;
+
     if let Some(msg) = flash_message {
-        return msg.to_string();
+        return vec![Plain(msg.to_string())];
     }
     let id = block.id;
     if total_lines <= inner_height {
-        format!("Detail #{id}   q back   yc cmd   yo output   yb block")
+        vec![
+            Plain(format!("Detail #{id}")),
+            Sep,
+            Label("Keybindings: ".into()),
+            Key("?".into()),
+        ]
     } else {
         let cursor_display = view
             .detail_line_cursor
             .saturating_add(1)
             .min(total_lines.max(1));
-        format!(
-            "Detail #{id}   ↑↓ scroll   g/G top/bottom   q back   line {cursor_display}/{total_lines}"
-        )
+        vec![
+            Plain(format!("Detail #{id}  line {cursor_display}/{total_lines}")),
+            Sep,
+            Label("Keybindings: ".into()),
+            Key("?".into()),
+        ]
     }
 }
 
@@ -709,13 +904,27 @@ fn bottom_label(block: &CommandBlock) -> String {
     )
 }
 
-fn footer_text(blocks: &BlockStore, view: &ViewState, flash_message: Option<&str>) -> String {
+fn footer_segments(
+    blocks: &BlockStore,
+    view: &ViewState,
+    flash_message: Option<&str>,
+) -> Vec<FooterSegment> {
+    use FooterSegment::*;
+
     if let Some(buf) = &view.search_buffer {
-        return format!("/{buf}\u{258c}  Enter apply \u{b7} Esc cancel");
+        return vec![
+            Plain(format!("/{buf}\u{258c}")),
+            Sep,
+            Label("Apply: ".into()),
+            Key("Enter".into()),
+            Sep,
+            Label("Cancel: ".into()),
+            Key("Esc".into()),
+        ];
     }
 
     if let Some(msg) = flash_message {
-        return msg.to_string();
+        return vec![Plain(msg.to_string())];
     }
 
     let visible_count = view.visible.len(blocks);
@@ -739,11 +948,21 @@ fn footer_text(blocks: &BlockStore, view: &ViewState, flash_message: Option<&str
         }
         let tag_str = tags.join(" \u{b7} ");
 
-        format!(
-            "Block #{current}/{visible_count} of {total_count} \u{b7} {tag_str}  / edit  f off  j/k  i  q"
-        )
+        vec![
+            Plain(format!(
+                "Block #{current}/{visible_count} of {total_count} \u{b7} {tag_str}"
+            )),
+            Sep,
+            Label("Keybindings: ".into()),
+            Key("?".into()),
+        ]
     } else {
-        format!("Block #{current}/{total_count}  / search  f failed  j/k  Enter  i  g/G  q")
+        vec![
+            Plain(format!("Block #{current}/{total_count}")),
+            Sep,
+            Label("Keybindings: ".into()),
+            Key("?".into()),
+        ]
     }
 }
 
@@ -1266,8 +1485,9 @@ mod tests {
         );
         let footer = visible.last().unwrap();
         match footer {
-            VisualLine::Footer { text } => {
-                assert_eq!(text, "copied output");
+            VisualLine::Footer { segments } => {
+                let flat = FooterSegment::flatten(segments);
+                assert_eq!(flat, "copied output");
             }
             other => panic!("expected Footer, got {other:?}"),
         }
@@ -1294,13 +1514,14 @@ mod tests {
         );
         let footer = visible.last().unwrap();
         match footer {
-            VisualLine::Footer { text } => {
+            VisualLine::Footer { segments } => {
+                let flat = FooterSegment::flatten(segments);
                 assert!(
-                    text.starts_with("Block #"),
-                    "normal footer should show block info, got: {text}"
+                    flat.starts_with("Block #"),
+                    "normal footer should show block info, got: {flat}"
                 );
                 assert!(
-                    !text.contains("copied"),
+                    !flat.contains("copied"),
                     "normal footer should not contain flash text"
                 );
             }
