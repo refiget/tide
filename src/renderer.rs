@@ -259,6 +259,18 @@ fn render_border<W: Write>(
     Ok(())
 }
 
+fn parse_actions(value: &str) -> Vec<(String, String)> {
+    value
+        .split("   ")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|seg| {
+            let (key, text) = seg.split_once(' ')?;
+            Some((key.to_string(), text.to_string()))
+        })
+        .collect()
+}
+
 fn render_block_detail_line<W: Write>(
     w: &mut W,
     text: &str,
@@ -299,8 +311,10 @@ fn render_block_detail_line<W: Write>(
         queue!(w, SetForegroundColor(border_fg))?;
         queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
         queue!(w, Print(&pad_str))?;
+        queue!(w, SetAttribute(Attribute::Bold))?;
         queue!(w, SetForegroundColor(Theme::META_HEADER_FG))?;
         queue!(w, Print(&label))?;
+        queue!(w, SetAttribute(Attribute::Reset))?;
         queue!(w, Print(" ".repeat(fill)))?;
         queue!(w, SetForegroundColor(border_fg))?;
         queue!(w, Print("│"))?;
@@ -318,9 +332,62 @@ fn render_block_detail_line<W: Write>(
         let value_w = content_w.saturating_sub(label_w);
         let label_display = truncate_to_width(&label_colon, label_w);
         let value_display = truncate_to_width(value, value_w);
-        let fill = content_w
+        let fill_base = content_w
             .saturating_sub(UnicodeWidthStr::width(label_display.as_str()))
             .saturating_sub(UnicodeWidthStr::width(value_display.as_str()));
+
+        if label == "actions" {
+            let border_fg = if selected {
+                Theme::BORDER_SELECTED_FG
+            } else {
+                Theme::BORDER_NORMAL_FG
+            };
+            let bg = selected.then_some(Theme::BODY_SELECTED_BG);
+
+            if let Some(bg) = bg {
+                queue!(w, SetBackgroundColor(bg))?;
+            }
+            queue!(w, SetForegroundColor(border_fg))?;
+            queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
+            queue!(w, Print(&pad_str))?;
+            queue!(w, SetForegroundColor(Theme::META_LABEL_FG))?;
+            queue!(w, Print(&label_display))?;
+
+            let mut used_w = UnicodeWidthStr::width(label_display.as_str());
+            let actions = parse_actions(value);
+            for (key, action_text) in &actions {
+                let seg = format!("{key} {action_text}");
+                let seg_w = UnicodeWidthStr::width(seg.as_str());
+                let remaining = content_w.saturating_sub(used_w);
+                if seg_w > remaining {
+                    break;
+                }
+                if used_w > 0 {
+                    queue!(w, Print("   "))?;
+                }
+                queue!(w, SetAttribute(Attribute::Bold))?;
+                queue!(w, SetForegroundColor(Theme::META_ACTION_KEY_FG))?;
+                queue!(w, Print(key))?;
+                queue!(w, SetAttribute(Attribute::Reset))?;
+                if let Some(bg) = bg {
+                    queue!(w, SetBackgroundColor(bg))?;
+                }
+                queue!(w, SetForegroundColor(Theme::META_ACTION_TEXT_FG))?;
+                queue!(w, Print(" "))?;
+                queue!(w, Print(action_text))?;
+                used_w += seg_w + 3;
+            }
+
+            let remaining = content_w.saturating_sub(used_w);
+            queue!(w, Print(" ".repeat(remaining)))?;
+            queue!(w, SetForegroundColor(border_fg))?;
+            queue!(w, Print("│"))?;
+            if selected {
+                queue!(w, Print(" ".repeat(width.saturating_sub(bw + margin))))?;
+            }
+            queue!(w, ResetColor)?;
+            return Ok(());
+        }
 
         let value_fg = match label {
             "status" => match value {
@@ -329,10 +396,22 @@ fn render_block_detail_line<W: Write>(
                 "running" => Some(Theme::STATUS_RUNNING_FG),
                 _ => None,
             },
+            "cwd" => Some(Theme::META_PATH_FG),
+            "exit code" => {
+                if value == "0" {
+                    Some(Theme::STATUS_OK_FG)
+                } else if value == "-" {
+                    None
+                } else {
+                    Some(Theme::STATUS_FAILED_FG)
+                }
+            }
+            "duration" => Some(Theme::STATUS_RUNNING_FG),
             "capture" | "type" => Some(Theme::STATUS_RUNNING_FG),
-            "actions" => Some(Theme::META_LABEL_FG),
             _ => None,
         };
+
+        let fill = fill_base;
 
         let border_fg = if selected {
             Theme::BORDER_SELECTED_FG

@@ -53,6 +53,21 @@ impl CatppuccinFrappe {
         g: 200,
         b: 144,
     };
+    pub const SUBTEXT0: Color = Color::Rgb {
+        r: 165,
+        g: 173,
+        b: 206,
+    };
+    pub const MAUVE: Color = Color::Rgb {
+        r: 202,
+        g: 158,
+        b: 230,
+    };
+    pub const BLUE: Color = Color::Rgb {
+        r: 140,
+        g: 170,
+        b: 238,
+    };
 }
 
 pub struct Theme;
@@ -70,6 +85,9 @@ impl Theme {
     pub const STATUS_OK_FG: Color = CatppuccinFrappe::GREEN;
     pub const STATUS_FAILED_FG: Color = CatppuccinFrappe::RED;
     pub const STATUS_RUNNING_FG: Color = CatppuccinFrappe::YELLOW;
-    pub const META_LABEL_FG: Color = CatppuccinFrappe::SUBTEXT1;
-    pub const META_HEADER_FG: Color = CatppuccinFrappe::LAVENDER;
+    pub const META_LABEL_FG: Color = CatppuccinFrappe::SUBTEXT0;
+    pub const META_HEADER_FG: Color = CatppuccinFrappe::MAUVE;
+    pub const META_PATH_FG: Color = CatppuccinFrappe::BLUE;
+    pub const META_ACTION_KEY_FG: Color = CatppuccinFrappe::MAUVE;
+    pub const META_ACTION_TEXT_FG: Color = CatppuccinFrappe::BLUE;
 }
