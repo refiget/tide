@@ -308,8 +308,7 @@ impl Compositor {
         } else if block.output_raw.is_empty() {
             // No raw output yet — render shell_lines as plain text
             let body_start = block.start_line.min(shell_lines.len());
-            let body_empty =
-                body_start >= shell_lines.len() || block.start_line > block.end_line;
+            let body_empty = body_start >= shell_lines.len() || block.start_line > block.end_line;
             if body_empty {
                 lines.push(VisualLine::BlockBodyLine {
                     text: "no captured text output".to_string(),
@@ -585,7 +584,9 @@ impl Compositor {
 fn get_block_styled_output_lines(block: &CommandBlock) -> Vec<crate::ansi::StyledText> {
     use crate::ansi::StyledText;
     if block.kind == BlockKind::RawProgram {
-        return vec![StyledText::plain("interactive program; screen output was not captured")];
+        return vec![StyledText::plain(
+            "interactive program; screen output was not captured",
+        )];
     }
     if block.output_raw.is_empty() {
         return vec![StyledText::plain("no captured text output")];

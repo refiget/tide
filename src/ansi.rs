@@ -309,7 +309,11 @@ mod tests {
         let lines = parse_ansi_lines(input);
         assert_eq!(
             lines[0].spans[0].style.fg,
-            Some(Color::Rgb { r: 255, g: 128, b: 0 })
+            Some(Color::Rgb {
+                r: 255,
+                g: 128,
+                b: 0
+            })
         );
     }
 
