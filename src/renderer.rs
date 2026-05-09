@@ -3,20 +3,20 @@ use std::io::{self, Write};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     execute, queue,
-    style::{Attribute, Print, ResetColor, SetAttribute},
+    style::{
+        Attribute, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+    },
     terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
+    ansi::{StyledText, TextStyle, styled_width, truncate_styled_to_width},
     app::ViewKind,
     compositor::VisualLine,
     config::{BlockLayoutConfig, BlockViewConfig},
+    theme::Theme,
 };
-
-#[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
-pub struct Theme;
 
 /// Enter alternate screen and hide cursor for Block/Detail view rendering.
 pub fn enter_block_render<W: Write>(w: &mut W) -> io::Result<()> {
@@ -163,6 +163,7 @@ fn render_line<W: Write>(
             render_framed_text(w, text, *selected, width, layout, block_view)?;
         }
         VisualLine::DetailTopBorder { label, .. } => {
+            queue!(w, SetForegroundColor(Theme::DETAIL_BORDER_FG))?;
             queue!(
                 w,
                 Print(with_margin(
@@ -170,8 +171,10 @@ fn render_line<W: Write>(
                     block_view,
                 ))
             )?;
+            queue!(w, ResetColor)?;
         }
         VisualLine::DetailBottomBorder { label, .. } => {
+            queue!(w, SetForegroundColor(Theme::DETAIL_BORDER_FG))?;
             queue!(
                 w,
                 Print(with_margin(
@@ -179,24 +182,34 @@ fn render_line<W: Write>(
                     block_view,
                 ))
             )?;
+            queue!(w, ResetColor)?;
         }
-        VisualLine::DetailBodyLine {
-            text, is_cursor, ..
+
+        VisualLine::StyledBlockBodyLine {
+            styled,
+            plain_text,
+            selected,
+            ..
         } => {
-            let content = with_margin(
-                &framed_text(
-                    text,
-                    block_width(width, block_view),
-                    block_view.body_padding,
-                ),
-                block_view,
-            );
+            render_styled_framed_text(w, styled, plain_text, *selected, width, layout, block_view)?;
+        }
+        VisualLine::StyledDetailBodyLine {
+            styled,
+            plain_text,
+            is_cursor,
+            ..
+        } => {
             if *is_cursor {
-                queue!(w, SetAttribute(Attribute::Reverse))?;
+                let content = with_margin(
+                    &framed_text(plain_text, block_width(width, block_view), block_view.body_padding),
+                    block_view,
+                );
+                queue!(w, SetForegroundColor(Theme::CURSOR_FG))?;
+                queue!(w, SetBackgroundColor(Theme::CURSOR_BG))?;
                 queue!(w, Print(pad_to_width(&content, width)))?;
-                queue!(w, SetAttribute(Attribute::Reset))?;
+                queue!(w, ResetColor)?;
             } else {
-                queue!(w, Print(content))?;
+                render_styled_framed_text(w, styled, plain_text, false, width, layout, block_view)?;
             }
         }
         VisualLine::Footer { text } => {
@@ -226,13 +239,14 @@ fn render_border<W: Write>(
         &titled_border(left, right, label, block_width(width, block_view)),
         block_view,
     );
-    if selected {
-        queue!(w, SetAttribute(Attribute::Reverse))?;
-        queue!(w, Print(pad_to_width(&content, width)))?;
-        queue!(w, SetAttribute(Attribute::Reset))?;
+    let fg = if selected {
+        Theme::BORDER_SELECTED_FG
     } else {
-        queue!(w, Print(content))?;
-    }
+        Theme::BORDER_NORMAL_FG
+    };
+    queue!(w, SetForegroundColor(fg))?;
+    queue!(w, Print(content))?;
+    queue!(w, ResetColor)?;
 
     Ok(())
 }
@@ -245,23 +259,108 @@ fn render_framed_text<W: Write>(
     _layout: &BlockLayoutConfig,
     block_view: &BlockViewConfig,
 ) -> io::Result<()> {
-    let content = with_margin(
-        &framed_text(
-            text,
-            block_width(width, block_view),
-            block_view.body_padding,
-        ),
-        block_view,
-    );
+    let bw = block_width(width, block_view);
+    let margin = block_view.horizontal_margin;
+
     if selected {
-        queue!(w, SetAttribute(Attribute::Reverse))?;
+        let content = with_margin(&framed_text(text, bw, block_view.body_padding), block_view);
+        queue!(w, SetForegroundColor(Theme::BODY_SELECTED_FG))?;
+        queue!(w, SetBackgroundColor(Theme::BODY_SELECTED_BG))?;
         queue!(w, Print(pad_to_width(&content, width)))?;
-        queue!(w, SetAttribute(Attribute::Reset))?;
+        queue!(w, ResetColor)?;
+    } else if bw < 4 {
+        queue!(w, Print(truncate_to_width(text, bw)))?;
     } else {
-        queue!(w, Print(content))?;
+        let inner_w = bw - 2;
+        let padding = " ".repeat(block_view.body_padding);
+        let body = truncate_to_width(&format!("{padding}{text}"), inner_w);
+        let fill = inner_w.saturating_sub(UnicodeWidthStr::width(body.as_str()));
+        queue!(w, SetForegroundColor(Theme::BORDER_NORMAL_FG))?;
+        queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
+        queue!(w, ResetColor)?;
+        queue!(w, Print(format!("{body}{}", " ".repeat(fill))))?;
+        queue!(w, SetForegroundColor(Theme::BORDER_NORMAL_FG))?;
+        queue!(w, Print("│"))?;
+        queue!(w, ResetColor)?;
     }
 
     Ok(())
+}
+
+fn render_styled_framed_text<W: Write>(
+    w: &mut W,
+    styled: &StyledText,
+    plain_text: &str,
+    selected: bool,
+    width: usize,
+    layout: &BlockLayoutConfig,
+    block_view: &BlockViewConfig,
+) -> io::Result<()> {
+    if selected {
+        // selected overrides ANSI — full row theme highlight using plain text
+        return render_framed_text(w, plain_text, true, width, layout, block_view);
+    }
+
+    let block_w = block_width(width, block_view);
+    if block_w < 2 {
+        return Ok(());
+    }
+    let margin = block_view.horizontal_margin;
+    let padding = block_view.body_padding;
+    let inner_w = block_w - 2; // subtract two │ chars
+    let content_w = inner_w.saturating_sub(padding);
+
+    let clipped = truncate_styled_to_width(styled, content_w);
+    let used = styled_width(&clipped);
+    let fill = content_w.saturating_sub(used);
+    let pad_str = " ".repeat(padding);
+
+    // Left margin + border (explicit BORDER_NORMAL_FG so body │ matches top/bottom borders)
+    queue!(w, SetForegroundColor(Theme::BORDER_NORMAL_FG))?;
+    queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
+    queue!(w, ResetColor)?;
+    queue!(w, Print(&pad_str))?;
+
+    // Styled spans
+    for span in &clipped.spans {
+        apply_span_style(w, &span.style)?;
+        queue!(w, Print(&span.text))?;
+        reset_span_style(w)?;
+    }
+
+    // Fill + right border
+    queue!(w, Print(" ".repeat(fill)))?;
+    queue!(w, SetForegroundColor(Theme::BORDER_NORMAL_FG))?;
+    queue!(w, Print("│"))?;
+    queue!(w, ResetColor)?;
+
+    Ok(())
+}
+
+fn apply_span_style<W: Write>(w: &mut W, style: &TextStyle) -> io::Result<()> {
+    if let Some(fg) = style.fg {
+        queue!(w, SetForegroundColor(fg))?;
+    }
+    if let Some(bg) = style.bg {
+        queue!(w, SetBackgroundColor(bg))?;
+    }
+    if style.bold {
+        queue!(w, SetAttribute(Attribute::Bold))?;
+    }
+    if style.italic {
+        queue!(w, SetAttribute(Attribute::Italic))?;
+    }
+    if style.underline {
+        queue!(w, SetAttribute(Attribute::Underlined))?;
+    }
+    if style.reverse {
+        queue!(w, SetAttribute(Attribute::Reverse))?;
+    }
+    Ok(())
+}
+
+fn reset_span_style<W: Write>(w: &mut W) -> io::Result<()> {
+    queue!(w, SetAttribute(Attribute::Reset))
 }
 
 fn framed_text(text: &str, width: usize, body_padding: usize) -> String {
@@ -277,9 +376,10 @@ fn framed_text(text: &str, width: usize, body_padding: usize) -> String {
 }
 
 fn render_footer<W: Write>(w: &mut W, text: &str, width: usize) -> io::Result<()> {
-    queue!(w, SetAttribute(Attribute::Reverse))?;
+    queue!(w, SetForegroundColor(Theme::FOOTER_FG))?;
+    queue!(w, SetBackgroundColor(Theme::FOOTER_BG))?;
     queue!(w, Print(pad_to_width(text, width)))?;
-    queue!(w, SetAttribute(Attribute::Reset))?;
+    queue!(w, ResetColor)?;
     Ok(())
 }
 

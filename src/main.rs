@@ -1,3 +1,4 @@
+mod ansi;
 mod app;
 mod block;
 mod buffer;
@@ -8,6 +9,7 @@ mod index;
 mod pty;
 mod renderer;
 mod shell_hooks;
+mod theme;
 
 use anyhow::Result;
 use tracing::debug;

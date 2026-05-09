@@ -45,11 +45,18 @@ pub enum VisualLine {
         block_id: BlockId,
         label: String,
     },
-    DetailBodyLine {
+    StyledDetailBodyLine {
         #[allow(dead_code)]
         block_id: BlockId,
-        text: String,
+        styled: crate::ansi::StyledText,
+        plain_text: String,
         is_cursor: bool,
+    },
+    StyledBlockBodyLine {
+        block_id: BlockId,
+        styled: crate::ansi::StyledText,
+        plain_text: String,
+        selected: bool,
     },
     Footer {
         text: String,
@@ -292,41 +299,61 @@ impl Compositor {
             label: format::build_top_label(block, home, available_label_width),
         });
 
-        let body_start = block.start_line.min(shell_lines.len());
-        let body_end = block.end_line.min(shell_lines.len().saturating_sub(1));
-        let body_empty = body_start >= shell_lines.len() || block.start_line > block.end_line;
-
         if block.kind == BlockKind::RawProgram {
             lines.push(VisualLine::BlockBodyLine {
                 text: "interactive program; screen output was not captured".to_string(),
                 block_id,
                 selected,
             });
-        } else if body_empty {
-            lines.push(VisualLine::BlockBodyLine {
-                text: "no captured text output".to_string(),
-                block_id,
-                selected,
-            });
-        } else {
-            let all_body_lines = &shell_lines[body_start..=body_end];
-            let expanded = view.expanded_block == Some(block_id);
-            let shown = if expanded {
-                block_view.expanded_lines.min(all_body_lines.len())
-            } else {
-                block_view.preview_lines.min(all_body_lines.len())
-            };
-
-            for line in all_body_lines.iter().take(shown) {
+        } else if block.output_raw.is_empty() {
+            // No raw output yet — render shell_lines as plain text
+            let body_start = block.start_line.min(shell_lines.len());
+            let body_empty =
+                body_start >= shell_lines.len() || block.start_line > block.end_line;
+            if body_empty {
                 lines.push(VisualLine::BlockBodyLine {
-                    text: line.text.clone(),
+                    text: "no captured text output".to_string(),
                     block_id,
                     selected,
                 });
+            } else {
+                let body_end = block.end_line.min(shell_lines.len().saturating_sub(1));
+                let all_body_lines = &shell_lines[body_start..=body_end];
+                for line in all_body_lines {
+                    lines.push(VisualLine::BlockBodyLine {
+                        text: line.text.clone(),
+                        block_id,
+                        selected,
+                    });
+                }
+            }
+        } else {
+            // Parse output_raw for styled content
+            let styled_lines = crate::ansi::parse_ansi_lines(&block.output_raw);
+            let total = styled_lines.len();
+            let expanded = view.expanded_block == Some(block_id);
+            let shown = if expanded {
+                block_view.expanded_lines.min(total)
+            } else {
+                block_view.preview_lines.min(total)
+            };
+
+            // Expanded blocks show ANSI colors; only compact preview lines get the
+            // selection theme highlight. The selected border (LAVENDER) already
+            // identifies the active block.
+            let body_selected = selected && !expanded;
+            for styled in styled_lines.into_iter().take(shown) {
+                let plain_text = crate::ansi::styled_to_plain(&styled);
+                lines.push(VisualLine::StyledBlockBodyLine {
+                    block_id,
+                    styled,
+                    plain_text,
+                    selected: body_selected,
+                });
             }
 
-            if all_body_lines.len() > shown {
-                let remaining = all_body_lines.len() - shown;
+            if total > shown {
+                let remaining = total - shown;
                 let text = if expanded {
                     format!("... {remaining} more lines · i to inspect in Detail")
                 } else {
@@ -440,7 +467,7 @@ impl Compositor {
 
     /// Full-screen Detail View: single block with line cursor.
     fn build_detail_lines(
-        shell: &ShellBuffer,
+        _shell: &ShellBuffer,
         blocks: &BlockStore,
         view: &ViewState,
         width: u16,
@@ -467,9 +494,8 @@ impl Compositor {
             (width as usize).saturating_sub(block_view.horizontal_margin.saturating_mul(2));
         let available_label_width = block_frame_width.saturating_sub(5);
 
-        let shell_lines = shell.snapshot();
-        let output_lines = get_block_output_lines(block, &shell_lines);
-        let total = output_lines.len();
+        let styled_output_lines = get_block_styled_output_lines(block);
+        let total = styled_output_lines.len();
 
         // inner_height = rows - top_margin(1) - top_border(1) - bottom_border(1) - footer(1)
         let inner_height = height.saturating_sub(4);
@@ -481,7 +507,7 @@ impl Compositor {
         let mut result: Vec<VisualLine> = Vec::with_capacity(height);
 
         if short_mode {
-            let frame_height = 2 + output_lines.len(); // top_border + body + bottom_border
+            let frame_height = 2 + styled_output_lines.len(); // top_border + body + bottom_border
             let available = height.saturating_sub(1); // minus footer
             let top_padding = available.saturating_sub(frame_height) / 2;
             let top_padding = top_padding.max(1); // always at least 1 row above
@@ -498,9 +524,11 @@ impl Compositor {
         });
 
         if short_mode {
-            for (i, text) in output_lines.iter().enumerate() {
-                result.push(VisualLine::DetailBodyLine {
-                    text: text.clone(),
+            for (i, styled) in styled_output_lines.iter().enumerate() {
+                let plain_text = crate::ansi::styled_to_plain(styled);
+                result.push(VisualLine::StyledDetailBodyLine {
+                    styled: styled.clone(),
+                    plain_text,
                     block_id,
                     is_cursor: i == cursor,
                 });
@@ -516,10 +544,12 @@ impl Compositor {
             let max_offset = total.saturating_sub(inner_height);
             let start = line_offset.min(max_offset);
             let end = (start + inner_height).min(total);
-            for (i, text) in output_lines[start..end].iter().enumerate() {
+            for (i, styled) in styled_output_lines[start..end].iter().enumerate() {
                 let abs = start + i;
-                result.push(VisualLine::DetailBodyLine {
-                    text: text.clone(),
+                let plain_text = crate::ansi::styled_to_plain(styled);
+                result.push(VisualLine::StyledDetailBodyLine {
+                    styled: styled.clone(),
+                    plain_text,
                     block_id,
                     is_cursor: abs == cursor,
                 });
@@ -552,22 +582,20 @@ impl Compositor {
     }
 }
 
-fn get_block_output_lines(
-    block: &CommandBlock,
-    shell_lines: &[crate::buffer::ShellLine],
-) -> Vec<String> {
+fn get_block_styled_output_lines(block: &CommandBlock) -> Vec<crate::ansi::StyledText> {
+    use crate::ansi::StyledText;
     if block.kind == BlockKind::RawProgram {
-        return vec!["interactive program; screen output was not captured".into()];
+        return vec![StyledText::plain("interactive program; screen output was not captured")];
     }
-    let start = block.start_line.min(shell_lines.len());
-    let end = block.end_line.min(shell_lines.len().saturating_sub(1));
-    if start >= shell_lines.len() || block.start_line > block.end_line {
-        return vec!["no captured text output".into()];
+    if block.output_raw.is_empty() {
+        return vec![StyledText::plain("no captured text output")];
     }
-    shell_lines[start..=end]
-        .iter()
-        .map(|l| l.text.clone())
-        .collect()
+    let lines = crate::ansi::parse_ansi_lines(&block.output_raw);
+    if lines.is_empty() {
+        vec![StyledText::plain("no captured text output")]
+    } else {
+        lines
+    }
 }
 
 fn detail_footer_text(
@@ -1017,7 +1045,11 @@ mod tests {
         assert_eq!(visible.len(), 5);
         assert!(matches!(
             visible.first(),
-            Some(VisualLine::BlockBodyLine { .. } | VisualLine::BlockBottomBorder { .. })
+            Some(
+                VisualLine::BlockBodyLine { .. }
+                    | VisualLine::StyledBlockBodyLine { .. }
+                    | VisualLine::BlockBottomBorder { .. }
+            )
         ));
     }
 
@@ -1285,7 +1317,12 @@ mod tests {
         let body_lines: Vec<&VisualLine> = layout
             .lines
             .iter()
-            .filter(|l| matches!(l, VisualLine::BlockBodyLine { .. }))
+            .filter(|l| {
+                matches!(
+                    l,
+                    VisualLine::BlockBodyLine { .. } | VisualLine::StyledBlockBodyLine { .. }
+                )
+            })
             .collect();
         // expanded_lines = 15, + 1 truncation hint = 16 body-type lines
         assert_eq!(
@@ -1293,6 +1330,7 @@ mod tests {
             16,
             "expanded block should show expanded_lines + 1 truncation hint"
         );
+        // Truncation hint is always emitted as plain BlockBodyLine
         if let VisualLine::BlockBodyLine { text, .. } = body_lines.last().unwrap() {
             assert!(
                 text.contains("more lines"),
@@ -1318,7 +1356,12 @@ mod tests {
         let body_count = layout
             .lines
             .iter()
-            .filter(|l| matches!(l, VisualLine::BlockBodyLine { .. }))
+            .filter(|l| {
+                matches!(
+                    l,
+                    VisualLine::BlockBodyLine { .. } | VisualLine::StyledBlockBodyLine { .. }
+                )
+            })
             .count();
         assert_eq!(
             body_count,
