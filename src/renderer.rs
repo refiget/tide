@@ -10,10 +10,10 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     ansi::{StyledText, TextStyle, styled_width, truncate_styled_to_width},
-    app::ViewKind,
+    app::{BlockStatus, ViewKind},
     compositor::VisualLine,
     config::{BlockLayoutConfig, BlockViewConfig},
-    theme::Theme,
+    theme::{CatppuccinFrappe, Theme},
 };
 
 /// Enter alternate screen and hide cursor for Block/Detail view rendering.
@@ -142,7 +142,7 @@ fn render_line<W: Write>(
             label,
         } => {
             let _ = block_id;
-            render_border(w, label, *selected, true, width, block_view)?;
+            render_top_border(w, label, *selected, width, block_view)?;
         }
         VisualLine::BlockBottomBorder {
             block_id,
@@ -156,9 +156,18 @@ fn render_line<W: Write>(
             block_id,
             text,
             selected,
+            use_detail_border,
         } => {
             let _ = block_id;
-            render_block_detail_line(w, text, *selected, width, layout, block_view)?;
+            render_block_detail_line(
+                w,
+                text,
+                *selected,
+                *use_detail_border,
+                width,
+                layout,
+                block_view,
+            )?;
         }
         VisualLine::DetailTopBorder { label, .. } => {
             queue!(w, SetForegroundColor(Theme::DETAIL_BORDER_FG))?;
@@ -195,7 +204,10 @@ fn render_line<W: Write>(
             } else {
                 Theme::BORDER_NORMAL_FG
             };
-            render_styled_framed_text(w, styled, plain_text, *selected, border_fg, width, layout, block_view)?;
+            let bg = selected.then_some(Theme::BODY_SELECTED_BG);
+            render_styled_framed_text(
+                w, styled, plain_text, bg, border_fg, width, layout, block_view,
+            )?;
         }
         VisualLine::StyledDetailBodyLine {
             styled,
@@ -203,28 +215,99 @@ fn render_line<W: Write>(
             is_cursor,
             ..
         } => {
-            if *is_cursor {
-                let content = with_margin(
-                    &framed_text(
-                        plain_text,
-                        block_width(width, block_view),
-                        block_view.body_padding,
-                    ),
-                    block_view,
-                );
-                queue!(w, SetForegroundColor(Theme::CURSOR_FG))?;
-                queue!(w, SetBackgroundColor(Theme::CURSOR_BG))?;
-                queue!(w, Print(pad_to_width(&content, width)))?;
-                queue!(w, ResetColor)?;
-            } else {
-                render_styled_framed_text(w, styled, plain_text, false, Theme::DETAIL_BORDER_FG, width, layout, block_view)?;
-            }
+            let bg = is_cursor.then_some(Theme::CURSOR_BG);
+            render_styled_framed_text(
+                w,
+                styled,
+                plain_text,
+                bg,
+                Theme::DETAIL_BORDER_FG,
+                width,
+                layout,
+                block_view,
+            )?;
         }
         VisualLine::Footer { text } => {
             render_footer(w, text, width)?;
         }
     }
 
+    Ok(())
+}
+
+fn render_top_border<W: Write>(
+    w: &mut W,
+    label: &crate::format::TopLabel,
+    selected: bool,
+    width: usize,
+    block_view: &BlockViewConfig,
+) -> io::Result<()> {
+    let bw = block_width(width, block_view);
+    if bw < 2 {
+        return Ok(());
+    }
+    let inner_w = bw.saturating_sub(2);
+    let margin = block_view.horizontal_margin;
+
+    let left = if selected { '╭' } else { '┌' };
+    let right = if selected { '╮' } else { '┐' };
+    let border_fg = if selected {
+        Theme::BORDER_SELECTED_FG
+    } else {
+        Theme::BORDER_NORMAL_FG
+    };
+    let command_fg = match label.status {
+        BlockStatus::Success => Theme::STATUS_OK_FG,
+        BlockStatus::Failed => Theme::STATUS_FAILED_FG,
+        _ => {
+            if selected {
+                CatppuccinFrappe::TEXT
+            } else {
+                CatppuccinFrappe::SUBTEXT1
+            }
+        }
+    };
+    let bg = selected.then_some(Theme::BODY_SELECTED_BG);
+
+    // Build content segments
+    let mut segments: Vec<(crossterm::style::Color, String)> = Vec::new();
+    segments.push((border_fg, format!("{left}─ ")));
+    segments.push((border_fg, label.id_marker.clone()));
+
+    if !label.command.is_empty() {
+        segments.push((border_fg, "  ".to_string()));
+        segments.push((command_fg, label.command.clone()));
+    }
+
+    if let Some(ref cwd) = label.cwd {
+        segments.push((border_fg, "  ".to_string()));
+        segments.push((Theme::META_PATH_FG, cwd.clone()));
+    }
+
+    // Calculate total used width (excluding fill and right corner)
+    let mut used = 0usize;
+    for (_, text) in &segments {
+        used += UnicodeWidthStr::width(text.as_str());
+    }
+    let fill = inner_w.saturating_sub(used); // used includes left corner; " " + fill + "╮" must fit in inner_w
+
+    // Render
+    if let Some(bg) = bg {
+        queue!(w, SetBackgroundColor(bg))?;
+    }
+    queue!(w, Print(" ".repeat(margin)))?;
+    for (fg, text) in &segments {
+        queue!(w, SetForegroundColor(*fg))?;
+        queue!(w, Print(text))?;
+    }
+    queue!(w, SetForegroundColor(border_fg))?;
+    queue!(w, Print(" "))?;
+    queue!(w, Print("─".repeat(fill)))?;
+    queue!(w, Print(right.to_string()))?;
+    if selected {
+        queue!(w, Print(" ".repeat(width.saturating_sub(bw + margin))))?;
+    }
+    queue!(w, ResetColor)?;
     Ok(())
 }
 
@@ -281,12 +364,51 @@ fn render_block_detail_line<W: Write>(
     w: &mut W,
     text: &str,
     selected: bool,
+    use_detail_border: bool,
     width: usize,
     layout: &BlockLayoutConfig,
     block_view: &BlockViewConfig,
 ) -> io::Result<()> {
+    // Border color: Detail View uses DETAIL_BORDER_FG; Block View tracks selection
+    let border_fg = if use_detail_border {
+        Theme::DETAIL_BORDER_FG
+    } else if selected {
+        Theme::BORDER_SELECTED_FG
+    } else {
+        Theme::BORDER_NORMAL_FG
+    };
+    // Background: only Block View selected rows get BODY_SELECTED_BG
+    let bg = if selected && !use_detail_border {
+        Some(Theme::BODY_SELECTED_BG)
+    } else {
+        None
+    };
+
     if text.is_empty() {
-        return render_framed_text(w, text, selected, width, layout, block_view);
+        // Empty separator: render a plain framed empty line with correct border/bg
+        if let Some(bg) = bg {
+            queue!(w, SetBackgroundColor(bg))?;
+        }
+        let bw = block_width(width, block_view);
+        if bw >= 4 {
+            let inner_w = bw - 2;
+            let margin = block_view.horizontal_margin;
+            let body = " ".repeat(inner_w);
+            queue!(w, SetForegroundColor(border_fg))?;
+            queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
+            queue!(w, ResetColor)?;
+            if let Some(bg) = bg {
+                queue!(w, SetBackgroundColor(bg))?;
+            }
+            queue!(w, Print(&body))?;
+            queue!(w, SetForegroundColor(border_fg))?;
+            queue!(w, Print("│"))?;
+            if bg.is_some() {
+                queue!(w, Print(" ".repeat(width.saturating_sub(bw + margin))))?;
+            }
+            queue!(w, ResetColor)?;
+        }
+        return Ok(());
     }
 
     let bw = block_width(width, block_view);
@@ -304,13 +426,6 @@ fn render_block_detail_line<W: Write>(
         let label = truncate_to_width(text, content_w);
         let fill = content_w.saturating_sub(UnicodeWidthStr::width(label.as_str()));
 
-        let border_fg = if selected {
-            Theme::BORDER_SELECTED_FG
-        } else {
-            Theme::BORDER_NORMAL_FG
-        };
-        let bg = selected.then_some(Theme::BODY_SELECTED_BG);
-
         if let Some(bg) = bg {
             queue!(w, SetBackgroundColor(bg))?;
         }
@@ -321,10 +436,13 @@ fn render_block_detail_line<W: Write>(
         queue!(w, SetForegroundColor(Theme::META_HEADER_FG))?;
         queue!(w, Print(&label))?;
         queue!(w, SetAttribute(Attribute::Reset))?;
+        if let Some(bg) = bg {
+            queue!(w, SetBackgroundColor(bg))?;
+        }
         queue!(w, Print(" ".repeat(fill)))?;
         queue!(w, SetForegroundColor(border_fg))?;
         queue!(w, Print("│"))?;
-        if selected {
+        if bg.is_some() {
             queue!(w, Print(" ".repeat(width.saturating_sub(bw + margin))))?;
         }
         queue!(w, ResetColor)?;
@@ -343,13 +461,6 @@ fn render_block_detail_line<W: Write>(
             .saturating_sub(UnicodeWidthStr::width(value_display.as_str()));
 
         if label == "actions" {
-            let border_fg = if selected {
-                Theme::BORDER_SELECTED_FG
-            } else {
-                Theme::BORDER_NORMAL_FG
-            };
-            let bg = selected.then_some(Theme::BODY_SELECTED_BG);
-
             if let Some(bg) = bg {
                 queue!(w, SetBackgroundColor(bg))?;
             }
@@ -388,7 +499,7 @@ fn render_block_detail_line<W: Write>(
             queue!(w, Print(" ".repeat(remaining)))?;
             queue!(w, SetForegroundColor(border_fg))?;
             queue!(w, Print("│"))?;
-            if selected {
+            if bg.is_some() {
                 queue!(w, Print(" ".repeat(width.saturating_sub(bw + margin))))?;
             }
             queue!(w, ResetColor)?;
@@ -417,15 +528,6 @@ fn render_block_detail_line<W: Write>(
             _ => None,
         };
 
-        let fill = fill_base;
-
-        let border_fg = if selected {
-            Theme::BORDER_SELECTED_FG
-        } else {
-            Theme::BORDER_NORMAL_FG
-        };
-        let bg = selected.then_some(Theme::BODY_SELECTED_BG);
-
         if let Some(bg) = bg {
             queue!(w, SetBackgroundColor(bg))?;
         }
@@ -443,10 +545,10 @@ fn render_block_detail_line<W: Write>(
             }
         }
         queue!(w, Print(&value_display))?;
-        queue!(w, Print(" ".repeat(fill)))?;
+        queue!(w, Print(" ".repeat(fill_base)))?;
         queue!(w, SetForegroundColor(border_fg))?;
         queue!(w, Print("│"))?;
-        if selected {
+        if bg.is_some() {
             queue!(w, Print(" ".repeat(width.saturating_sub(bw + margin))))?;
         }
         queue!(w, ResetColor)?;
@@ -496,17 +598,12 @@ fn render_styled_framed_text<W: Write>(
     w: &mut W,
     styled: &StyledText,
     plain_text: &str,
-    selected: bool,
+    bg: Option<crossterm::style::Color>,
     border_fg: crossterm::style::Color,
     width: usize,
     layout: &BlockLayoutConfig,
     block_view: &BlockViewConfig,
 ) -> io::Result<()> {
-    if selected {
-        // selected overrides ANSI — full row theme highlight using plain text
-        return render_framed_text(w, plain_text, true, width, layout, block_view);
-    }
-
     let block_w = block_width(width, block_view);
     if block_w < 2 {
         return Ok(());
@@ -520,6 +617,27 @@ fn render_styled_framed_text<W: Write>(
     let used = styled_width(&clipped);
     let fill = content_w.saturating_sub(used);
     let pad_str = " ".repeat(padding);
+
+    if let Some(bg) = bg {
+        // ANSI fg colors preserved; bg applied to whole line.
+        // After each span, reset attrs but restore bg so it persists across spans.
+        queue!(w, SetBackgroundColor(bg))?;
+        queue!(w, SetForegroundColor(border_fg))?;
+        queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
+        queue!(w, Print(&pad_str))?;
+        for span in &clipped.spans {
+            apply_span_style(w, &span.style)?;
+            queue!(w, Print(&span.text))?;
+            queue!(w, SetAttribute(Attribute::Reset))?;
+            queue!(w, SetBackgroundColor(bg))?;
+        }
+        queue!(w, Print(" ".repeat(fill)))?;
+        queue!(w, SetForegroundColor(border_fg))?;
+        queue!(w, Print("│"))?;
+        queue!(w, Print(" ".repeat(width.saturating_sub(block_w + margin))))?;
+        queue!(w, ResetColor)?;
+        return Ok(());
+    }
 
     // Left margin + border
     queue!(w, SetForegroundColor(border_fg))?;

@@ -118,7 +118,117 @@ fn cwd_right_truncate(s: &str, max_width: usize) -> String {
     result
 }
 
-// ─── build_top_label ─────────────────────────────────────────────────────────
+// ─── TopLabel ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct TopLabel {
+    pub id_marker: String,
+    pub command: String,
+    pub cwd: Option<String>,
+    pub status: BlockStatus,
+}
+
+/// Build structured top border label parts for a CommandBlock.
+pub fn build_top_label_parts(
+    block: &CommandBlock,
+    home: Option<&Path>,
+    available_width: usize,
+) -> TopLabel {
+    let id_str = format!("#{}", block.id);
+    let id_w = UnicodeWidthStr::width(id_str.as_str());
+
+    let marker = match block.status {
+        BlockStatus::Failed => "✗",
+        BlockStatus::Running => "…",
+        _ => "",
+    };
+
+    let status = block.status.clone();
+
+    if available_width <= id_w {
+        return TopLabel {
+            id_marker: truncate_label(&id_str, available_width),
+            command: String::new(),
+            cwd: None,
+            status,
+        };
+    }
+
+    let marker_w = UnicodeWidthStr::width(marker);
+    let base_cost = id_w + 2;
+    let mut remaining = available_width.saturating_sub(base_cost);
+    let include_marker = marker_w > 0 && remaining >= marker_w + 1;
+
+    if !include_marker && remaining == 0 {
+        return TopLabel {
+            id_marker: id_str,
+            command: String::new(),
+            cwd: None,
+            status,
+        };
+    }
+
+    if include_marker {
+        remaining = remaining.saturating_sub(marker_w + 1);
+    }
+
+    // Attempt 1: id marker + cmd + cwd
+    let cwd_budget = (remaining / 3).min(32);
+    let cmd_budget_with_cwd = remaining.saturating_sub(2).saturating_sub(cwd_budget);
+
+    if cwd_budget >= 4 && cmd_budget_with_cwd >= 1 {
+        let cwd_str = compact_cwd(&block.cwd, home, cwd_budget);
+        if !cwd_str.is_empty() {
+            let cmd_str = compact_command(&block.command, cmd_budget_with_cwd);
+            let id_marker = if include_marker {
+                format!("{id_str} {marker}")
+            } else {
+                id_str.clone()
+            };
+            let candidate = format!("{id_marker}  {cmd_str}  {cwd_str}");
+            if UnicodeWidthStr::width(candidate.as_str()) <= available_width {
+                return TopLabel {
+                    id_marker,
+                    command: cmd_str,
+                    cwd: Some(cwd_str),
+                    status,
+                };
+            }
+        }
+    }
+
+    // Attempt 2: id marker + cmd (no cwd)
+    if remaining >= 1 {
+        let cmd_str = compact_command(&block.command, remaining);
+        let id_marker = if include_marker {
+            format!("{id_str} {marker}")
+        } else {
+            id_str.clone()
+        };
+        let candidate = format!("{id_marker}  {cmd_str}");
+        if UnicodeWidthStr::width(candidate.as_str()) <= available_width {
+            return TopLabel {
+                id_marker,
+                command: cmd_str,
+                cwd: None,
+                status,
+            };
+        }
+    }
+
+    TopLabel {
+        id_marker: if include_marker {
+            format!("{id_str} {marker}")
+        } else {
+            id_str
+        },
+        command: String::new(),
+        cwd: None,
+        status,
+    }
+}
+
+// ─── build_top_label (flat string, kept for tests and Detail View) ───────────
 
 /// Build the top border label string for a CommandBlock.
 pub fn build_top_label(
@@ -126,56 +236,14 @@ pub fn build_top_label(
     home: Option<&Path>,
     available_width: usize,
 ) -> String {
-    let id_str = format!("#{}", block.id);
-    let id_w = UnicodeWidthStr::width(id_str.as_str());
-
-    let marker = match block.status {
-        BlockStatus::Failed => " ✗",
-        BlockStatus::Running => " …",
-        _ => "",
-    };
-    let marker_w = UnicodeWidthStr::width(marker);
-
-    if available_width <= id_w {
-        return truncate_label(&id_str, available_width);
+    let p = build_top_label_parts(block, home, available_width);
+    if p.command.is_empty() {
+        return p.id_marker;
     }
-
-    let base_cost = id_w + 2;
-    let remaining = available_width.saturating_sub(base_cost);
-
-    if remaining == 0 {
-        return id_str;
+    match p.cwd {
+        Some(ref c) => format!("{}  {}  {}", p.id_marker, p.command, c),
+        None => format!("{}  {}", p.id_marker, p.command),
     }
-
-    // Attempt 1: id + cmd + marker + "  " + cwd
-    let cwd_budget = (remaining / 3).min(32);
-    let cmd_budget_with_cwd = remaining
-        .saturating_sub(marker_w)
-        .saturating_sub(2)
-        .saturating_sub(cwd_budget);
-
-    if cwd_budget >= 4 && cmd_budget_with_cwd >= 1 {
-        let cwd_str = compact_cwd(&block.cwd, home, cwd_budget);
-        if !cwd_str.is_empty() {
-            let cmd_str = compact_command(&block.command, cmd_budget_with_cwd);
-            let candidate = format!("{id_str}  {cmd_str}{marker}  {cwd_str}");
-            if UnicodeWidthStr::width(candidate.as_str()) <= available_width {
-                return candidate;
-            }
-        }
-    }
-
-    // Attempt 2: id + cmd + marker (no cwd)
-    let cmd_budget_no_cwd = remaining.saturating_sub(marker_w);
-    if cmd_budget_no_cwd >= 1 {
-        let cmd_str = compact_command(&block.command, cmd_budget_no_cwd);
-        let candidate = format!("{id_str}  {cmd_str}{marker}");
-        if UnicodeWidthStr::width(candidate.as_str()) <= available_width {
-            return candidate;
-        }
-    }
-
-    id_str
 }
 
 fn truncate_label(s: &str, max_width: usize) -> String {

@@ -23,7 +23,7 @@ pub enum VisualLine {
     BlockTopBorder {
         block_id: BlockId,
         selected: bool,
-        label: String,
+        label: crate::format::TopLabel,
     },
     BlockBottomBorder {
         block_id: BlockId,
@@ -34,6 +34,7 @@ pub enum VisualLine {
         block_id: BlockId,
         text: String,
         selected: bool,
+        use_detail_border: bool, // true in Detail View: LAVENDER │, no bg highlight
     },
     DetailTopBorder {
         #[allow(dead_code)]
@@ -56,7 +57,7 @@ pub enum VisualLine {
         block_id: BlockId,
         styled: crate::ansi::StyledText,
         plain_text: String,
-        selected: bool,       // body bg highlight (false when expanded to show ANSI colors)
+        selected: bool, // body bg highlight (false when expanded to show ANSI colors)
         border_selected: bool, // border │ color tracks block selection regardless of ANSI mode
     },
     Footer {
@@ -297,7 +298,7 @@ impl Compositor {
         lines.push(VisualLine::BlockTopBorder {
             block_id,
             selected,
-            label: format::build_top_label(block, home, available_label_width),
+            label: format::build_top_label_parts(block, home, available_label_width),
         });
 
         if block.kind == BlockKind::RawProgram {
@@ -338,10 +339,7 @@ impl Compositor {
                 block_view.preview_lines.min(total)
             };
 
-            // Expanded blocks show ANSI colors; only compact preview lines get the
-            // selection theme highlight. The selected border (LAVENDER) already
-            // identifies the active block.
-            let body_selected = selected && !expanded;
+            let body_selected = selected;
             for styled in styled_lines.into_iter().take(shown) {
                 let plain_text = crate::ansi::styled_to_plain(&styled);
                 lines.push(VisualLine::StyledBlockBodyLine {
@@ -369,7 +367,7 @@ impl Compositor {
         }
 
         if view.expanded_block == Some(block_id) {
-            lines.extend(detail_lines(block, selected));
+            lines.extend(detail_lines(block, selected, false));
         }
 
         lines.push(VisualLine::BlockBottomBorder {
@@ -498,7 +496,7 @@ impl Compositor {
         let styled_output_lines = get_block_styled_output_lines(block);
         let total = styled_output_lines.len();
 
-        let meta_lines = detail_lines(block, true);
+        let meta_lines = detail_lines(block, false, true);
         let meta_count = meta_lines.len();
 
         // inner_height = rows - top_margin(1) - top_border(1) - meta_lines - bottom_border(1) - footer(1)
@@ -630,7 +628,7 @@ fn detail_footer_text(
     }
 }
 
-fn detail_lines(block: &CommandBlock, selected: bool) -> Vec<VisualLine> {
+fn detail_lines(block: &CommandBlock, selected: bool, use_detail_border: bool) -> Vec<VisualLine> {
     let block_id = block.id;
     let exit = block
         .exit_code
@@ -676,6 +674,7 @@ fn detail_lines(block: &CommandBlock, selected: bool) -> Vec<VisualLine> {
             block_id,
             text,
             selected,
+            use_detail_border,
         })
         .collect()
 }
