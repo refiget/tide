@@ -557,7 +557,33 @@ fn render_block_detail_line<W: Write>(
         return Ok(());
     }
 
-    render_framed_text(w, text, selected, width, layout, block_view)
+    let body = truncate_to_width(&format!("{pad_str}{text}"), inner_w);
+    let fill = inner_w.saturating_sub(UnicodeWidthStr::width(body.as_str()));
+    let text_fg = if use_detail_border {
+        Theme::FOOTER_FG
+    } else if selected {
+        Theme::BODY_SELECTED_FG
+    } else {
+        Color::Reset
+    };
+
+    if let Some(bg) = bg {
+        queue!(w, SetBackgroundColor(bg))?;
+    }
+    queue!(w, SetForegroundColor(border_fg))?;
+    queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
+    if let Some(bg) = bg {
+        queue!(w, SetBackgroundColor(bg))?;
+    }
+    queue!(w, SetForegroundColor(text_fg))?;
+    queue!(w, Print(format!("{body}{}", " ".repeat(fill))))?;
+    queue!(w, SetForegroundColor(border_fg))?;
+    queue!(w, Print("│"))?;
+    if bg.is_some() {
+        queue!(w, Print(" ".repeat(width.saturating_sub(bw + margin))))?;
+    }
+    queue!(w, ResetColor)?;
+    Ok(())
 }
 
 fn render_framed_text<W: Write>(
@@ -705,8 +731,26 @@ fn render_footer<W: Write>(w: &mut W, segments: &[FooterSegment], width: usize) 
     queue!(w, SetBackgroundColor(Color::Reset))?;
 
     let mut used = 0usize;
-    for seg in segments {
+    for (idx, seg) in segments.iter().enumerate() {
         match seg {
+            FooterSegment::Spacer => {
+                let tail_width: usize = segments[idx + 1..]
+                    .iter()
+                    .map(|s| match s {
+                        FooterSegment::Plain(t)
+                        | FooterSegment::Label(t)
+                        | FooterSegment::Key(t) => UnicodeWidthStr::width(t.as_str()),
+                        FooterSegment::Sep => 3,
+                        FooterSegment::Spacer => 0,
+                    })
+                    .sum();
+                let fill = width.saturating_sub((used + tail_width).min(width));
+                if fill > 0 {
+                    queue!(w, SetForegroundColor(Color::Reset))?;
+                    queue!(w, Print(" ".repeat(fill)))?;
+                    used += fill;
+                }
+            }
             FooterSegment::Plain(t) | FooterSegment::Label(t) => {
                 let seg_w = UnicodeWidthStr::width(t.as_str());
                 if used >= width {

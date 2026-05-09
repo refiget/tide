@@ -14,6 +14,7 @@ pub enum FooterSegment {
     Key(String),
     Sep,
     Plain(String),
+    Spacer,
 }
 
 impl FooterSegment {
@@ -25,6 +26,7 @@ impl FooterSegment {
                     t.as_str()
                 }
                 FooterSegment::Sep => " | ",
+                FooterSegment::Spacer => " ",
             })
             .collect()
     }
@@ -608,153 +610,63 @@ impl Compositor {
         Self::build_one_block_lines(shell_lines, block, view, block_view, selected, 0, None).len()
     }
 
-    fn build_help_lines(
-        _width: u16,
-        height: u16,
-        _block_view: &BlockViewConfig,
-    ) -> Vec<VisualLine> {
+    fn build_help_lines(width: u16, height: u16, block_view: &BlockViewConfig) -> Vec<VisualLine> {
         use FooterSegment::*;
         let height = height as usize;
+        let width = width as usize;
+        let bw = width.saturating_sub(block_view.horizontal_margin.saturating_mul(2));
+        let inner_w = if bw >= 2 { bw - 2 } else { 0 };
+        let content_w = inner_w.saturating_sub(block_view.body_padding);
 
-        let mut lines: Vec<VisualLine> = vec![
-            VisualLine::DetailTopBorder {
-                block_id: BlockId(0),
-                label: "Keybindings".into(),
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: String::new(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  Block View".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  j / k       navigate blocks".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  Enter       expand / collapse".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  i           detail view".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  g / G       jump to top / bottom".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  /           search commands".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  f           toggle failed filter".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  y / Y       copy output / command".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  r           rerun command".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  q / Esc     return to shell".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: String::new(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  Detail View".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  j / k       scroll output".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  g / G       jump to top / bottom".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  yc          copy command".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  yo          copy output".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  yb          copy block".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  r           rerun command".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: "  q / Esc     back to blocks".into(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: String::new(),
-                selected: false,
-                use_detail_border: true,
-            },
-            VisualLine::DetailBottomBorder {
-                block_id: BlockId(0),
-                label: String::new(),
-            },
-            VisualLine::Footer {
-                segments: vec![Plain("press any key to close".into())],
-            },
+        let help_texts: Vec<&str> = vec![
+            "",
+            "  Block View",
+            "  j / k       navigate blocks",
+            "  Enter       expand / collapse",
+            "  i           detail view",
+            "  g / G       jump to top / bottom",
+            "  /           search commands",
+            "  f           toggle failed filter",
+            "  y / Y       copy output / command",
+            "  r           rerun command",
+            "  q / Esc     return to shell",
+            "",
+            "  Detail View",
+            "  j / k       scroll output",
+            "  g / G       jump to top / bottom",
+            "  yc          copy command",
+            "  yo          copy output",
+            "  yb          copy block",
+            "  r           rerun command",
+            "  q / Esc     back to blocks",
+            "",
         ];
+
+        let mut lines: Vec<VisualLine> = Vec::with_capacity(help_texts.len() + 3);
+        lines.push(VisualLine::DetailTopBorder {
+            block_id: BlockId(0),
+            label: "Keybindings".into(),
+        });
+        for text in help_texts {
+            let t = if text.is_empty() {
+                String::new()
+            } else {
+                format::truncate_str(text, content_w)
+            };
+            lines.push(VisualLine::BlockDetailLine {
+                block_id: BlockId(0),
+                text: t,
+                selected: false,
+                use_detail_border: true,
+            });
+        }
+        lines.push(VisualLine::DetailBottomBorder {
+            block_id: BlockId(0),
+            label: String::new(),
+        });
+        lines.push(VisualLine::Footer {
+            segments: vec![Plain("press any key to close".into())],
+        });
 
         let total_content = lines.len();
         if total_content < height {
@@ -801,26 +713,19 @@ fn detail_footer_segments(
     if let Some(msg) = flash_message {
         return vec![Plain(msg.to_string())];
     }
+
     let id = block.id;
-    if total_lines <= inner_height {
-        vec![
-            Plain(format!("Detail #{id}")),
-            Sep,
-            Label("Keybindings: ".into()),
-            Key("?".into()),
-        ]
-    } else {
+    let left = if total_lines > inner_height {
         let cursor_display = view
             .detail_line_cursor
             .saturating_add(1)
             .min(total_lines.max(1));
-        vec![
-            Plain(format!("Detail #{id}  line {cursor_display}/{total_lines}")),
-            Sep,
-            Label("Keybindings: ".into()),
-            Key("?".into()),
-        ]
-    }
+        Plain(format!("#{id}  {cursor_display}/{total_lines}"))
+    } else {
+        Plain(format!("#{id}"))
+    };
+
+    vec![left, Spacer, Label("Keybindings: ".into()), Key("?".into())]
 }
 
 fn detail_lines(block: &CommandBlock, selected: bool, use_detail_border: bool) -> Vec<VisualLine> {
@@ -909,6 +814,7 @@ fn footer_segments(
     view: &ViewState,
     flash_message: Option<&str>,
 ) -> Vec<FooterSegment> {
+    let _ = blocks;
     use FooterSegment::*;
 
     if let Some(buf) = &view.search_buffer {
@@ -927,17 +833,6 @@ fn footer_segments(
         return vec![Plain(msg.to_string())];
     }
 
-    let visible_count = view.visible.len(blocks);
-    let total_count = blocks.len();
-    let current = if visible_count == 0 {
-        0
-    } else {
-        view.block_viewport
-            .selected_index
-            .min(visible_count.saturating_sub(1))
-            + 1
-    };
-
     if view.filter.is_active() {
         let mut tags: Vec<String> = Vec::new();
         if !view.filter.command_query.is_empty() {
@@ -947,23 +842,15 @@ fn footer_segments(
             tags.push("failed".to_string());
         }
         let tag_str = tags.join(" \u{b7} ");
-
-        vec![
-            Plain(format!(
-                "Block #{current}/{visible_count} of {total_count} \u{b7} {tag_str}"
-            )),
-            Sep,
+        return vec![
+            Plain(tag_str),
+            Spacer,
             Label("Keybindings: ".into()),
             Key("?".into()),
-        ]
-    } else {
-        vec![
-            Plain(format!("Block #{current}/{total_count}")),
-            Sep,
-            Label("Keybindings: ".into()),
-            Key("?".into()),
-        ]
+        ];
     }
+
+    vec![Spacer, Label("Keybindings: ".into()), Key("?".into())]
 }
 
 #[cfg(test)]
@@ -1517,8 +1404,8 @@ mod tests {
             VisualLine::Footer { segments } => {
                 let flat = FooterSegment::flatten(segments);
                 assert!(
-                    flat.starts_with("Block #"),
-                    "normal footer should show block info, got: {flat}"
+                    flat.contains("Keybindings: ?"),
+                    "normal footer should show keybindings hint, got: {flat}"
                 );
                 assert!(
                     !flat.contains("copied"),

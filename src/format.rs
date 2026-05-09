@@ -246,6 +246,25 @@ pub fn build_top_label(
     }
 }
 
+/// Truncate a string to a given display width (no ellipsis).
+pub fn truncate_str(s: &str, max_width: usize) -> String {
+    let w = UnicodeWidthStr::width(s);
+    if w <= max_width {
+        return s.to_string();
+    }
+    let mut result = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cw > max_width {
+            break;
+        }
+        result.push(ch);
+        used += cw;
+    }
+    result
+}
+
 fn truncate_label(s: &str, max_width: usize) -> String {
     let w = UnicodeWidthStr::width(s);
     if w <= max_width {
