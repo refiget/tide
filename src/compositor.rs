@@ -496,8 +496,11 @@ impl Compositor {
         let styled_output_lines = get_block_styled_output_lines(block);
         let total = styled_output_lines.len();
 
-        // inner_height = rows - top_margin(1) - top_border(1) - bottom_border(1) - footer(1)
-        let inner_height = height.saturating_sub(4);
+        let meta_lines = detail_lines(block, false);
+        let meta_count = meta_lines.len();
+
+        // inner_height = rows - top_margin(1) - top_border(1) - meta_lines - bottom_border(1) - footer(1)
+        let inner_height = height.saturating_sub(4).saturating_sub(meta_count);
         let short_mode = inner_height == 0 || total <= inner_height;
 
         let cursor = view.detail_line_cursor.min(total.saturating_sub(1));
@@ -506,7 +509,7 @@ impl Compositor {
         let mut result: Vec<VisualLine> = Vec::with_capacity(height);
 
         if short_mode {
-            let frame_height = 2 + styled_output_lines.len(); // top_border + body + bottom_border
+            let frame_height = 2 + styled_output_lines.len() + meta_count; // top_border + body + meta + bottom_border
             let available = height.saturating_sub(1); // minus footer
             let top_padding = available.saturating_sub(frame_height) / 2;
             let top_padding = top_padding.max(1); // always at least 1 row above
@@ -532,6 +535,7 @@ impl Compositor {
                     is_cursor: i == cursor,
                 });
             }
+            result.extend(meta_lines);
             result.push(VisualLine::DetailBottomBorder {
                 block_id,
                 label: bottom_label(block),
@@ -553,6 +557,7 @@ impl Compositor {
                     is_cursor: abs == cursor,
                 });
             }
+            result.extend(meta_lines);
             result.push(VisualLine::DetailBottomBorder {
                 block_id,
                 label: bottom_label(block),

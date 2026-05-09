@@ -1146,18 +1146,33 @@ fn detail_output_line_count(state: &RuntimeState) -> usize {
     if block.kind == BlockKind::RawProgram {
         return 1;
     }
-    let shell_lines = state.shell.snapshot();
-    let start = block.start_line.min(shell_lines.len());
-    let end = block.end_line.min(shell_lines.len().saturating_sub(1));
-    if start >= shell_lines.len() || block.start_line > block.end_line {
-        1
-    } else {
-        end - start + 1
+    if block.output_raw.is_empty() {
+        return 1;
     }
+    let lines = crate::ansi::parse_ansi_lines(&block.output_raw);
+    if lines.is_empty() { 1 } else { lines.len() }
+}
+
+fn detail_meta_line_count(state: &RuntimeState) -> usize {
+    let Some(id) = state.view.expanded_block else {
+        return 0;
+    };
+    let Some(block) = state.blocks.block(id) else {
+        return 0;
+    };
+    let mut count: usize = 9;
+    if block.output_truncated {
+        count += 2;
+    }
+    if block.kind == BlockKind::RawProgram {
+        count += 2;
+    }
+    count
 }
 
 fn detail_inner_height(state: &RuntimeState) -> usize {
-    (state.rows as usize).saturating_sub(4)
+    let meta = detail_meta_line_count(state);
+    (state.rows as usize).saturating_sub(4).saturating_sub(meta)
 }
 
 fn ensure_selected_visible(state: &mut RuntimeState) {
