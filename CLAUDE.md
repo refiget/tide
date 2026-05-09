@@ -57,16 +57,19 @@ Before committing terminal behavior changes:
 cargo fmt --check && cargo check && cargo test
 ```
 
-## Test Locations (~30 tests)
+## Test Locations (~99 tests)
 
 | Module | Count | What's tested |
 |--------|-------|---------------|
-| `pty.rs` | 8 | View transitions, force-render flags, viewport clamping, boundary navigation |
-| `compositor.rs` | 16 | Visual layout, viewport math, anchors (Top/Tail/Manual), span invariants, edge cases |
+| `ansi.rs` | 14 | SGR parsing, 256-color, truecolor, OSC/CSI ignoring, multiline, \r/\r\n, truncation |
+| `pty.rs` | 21 | View transitions, force-render flags, viewport clamping, boundary navigation, Detail scroll, clipboard copy |
+| `compositor.rs` | 20 | Visual layout, viewport math, anchors (Top/Tail/Manual), span invariants, footer, Detail layout, flash messages |
 | `block.rs` | 4 | Retention cap, prev/next navigation, unbounded history, output truncation flag |
 | `shell_hooks.rs` | 7 | OSC 777 marker stripping, split-event handling, normal output passthrough, hex decoding |
-| `renderer.rs` | 2 | Framed text width with wide/unicode chars |
+| `renderer.rs` | 2 | Framed text width with wide/unicode chars, titled border width |
 | `config.rs` | 2 | Runtime config defaults, legacy field handling |
+| `format.rs` | 24 | compact_command, compact_cwd, build_top_label (ANSI strip, unicode, compression) |
+| `index.rs` | 1 | Token inverted index query (substring + AND semantics) |
 
 ## Key Terminology (Critical — Do Not Confuse)
 
@@ -74,16 +77,16 @@ cargo fmt --check && cargo check && cargo test
 - **What it is**: A per-block in-place toggle within Block View. Pressing Enter on a selected block shows/hides full output lines + metadata (command, cwd, exit, duration, actions).
 - **View**: Stays in `ViewKind::Blocks`. No view switch.
 - **State**: `ViewState.expanded_block: Option<BlockId>` — the block currently expanded, or `None`.
-- **Rendering**: `build_one_block_lines()` checks `expanded_block == Some(block_id)` to decide whether to show all output lines and append `detail_lines()`.
+- **Rendering**: `build_one_block_lines()` checks `expanded_block == Some(block_id)` to decide whether to show all output lines (capped at `expanded_lines`, default 15) and append `detail_lines()`.
 - **Footer**: Shows Block View footer (`Block #N/total  j/k ...`).
 - **Navigation**: `j`/`k` navigate between blocks normally; expanded state follows selection (Enter, `j`/`k`, `g`, `G`).
 
 ### Detail View (i from Block View)
 - **What it is**: A full-screen pager mode for deep inspection of one block. Entry via `i` from Block View.
 - **View**: `ViewKind::Detail` — separate view, leaves Block View.
-- **Rendering**: `build_detail_layout()` generates single-block full-screen layout.
-- **Footer**: Shows pager-style footer (`Output · #N cmd  j/k scroll ...`).
-- **Navigation**: `j`/`k` scroll within the block's output.
+- **Rendering**: `build_detail_lines()` generates single-block full-screen layout with ANSI-styled output and metadata (command, cwd, exit, duration, actions).
+- **Footer**: Shows pager-style footer (`Detail #N  ↑↓ scroll ...`).
+- **Navigation**: `j`/`k` scroll within the block's output with a highlighted cursor line; auto-scrolls when cursor leaves visible area.
 
 > **Rule**: Enter NEVER enters Detail View. Enter toggles block expansion in Block View only.
 
@@ -94,32 +97,41 @@ cargo fmt --check && cargo check && cargo test
 - `FRAME_DURATION` (16ms) in `pty.rs` controls render cadence
 - `CommandBlock.output_truncated` is set when `max_output_bytes_per_block` is hit; surfaces as `"· truncated"` in the bottom border label and as a detail line
 - Prefer `enum + match` for state machines; avoid premature traits or generic abstractions
+- ANSI output is parsed by `ansi::parse_ansi_lines()` into `StyledText` spans; rendered by `render_styled_framed_text()`
+- Navigation functions use `view.visible.ids(blocks)` instead of `blocks.timeline` directly (supports filters)
+- `build_detail_lines` in compositor renders Detail View (not `build_detail_layout`)
 
 ## Architecture (flat `src/` modules)
 
 | Module | Responsibility |
 |--------|---------------|
 | `main.rs` | Entry point — loads config, starts PTY session |
-| `app.rs` | Types: `BlockId`, `ViewKind`, `InputMode`, `ViewState`, `BlockViewport`, `ViewAnchor`, `CommandBlock/ExecutionBlock`, `InputAccumulator`, `RenderState`, `BlockKind`, `BlockStatus`, `AppEvent` |
+| `app.rs` | Types: `BlockId`, `ViewKind`, `InputMode`, `ViewState`, `BlockViewport`, `ViewAnchor`, `VisibleSource`, `BlockFilter`, `CommandBlock/ExecutionBlock`, `InputAccumulator`, `RenderState`, `BlockKind`, `BlockStatus`, `BlockAction`, `AppEvent` |
 | `pty.rs` | PTY session, 3-thread runtime (output reader, input reader, resize handler), `Osc777Parser` integration, frame-limited render loop, keyboard dispatch, navigation, `TerminalGuard` |
 | `block.rs` | `BlockStore` — `Vec<BlockId>` timeline + `HashMap<BlockId, CommandBlock>` lookup, retention cap, output byte cap |
 | `buffer.rs` | `ShellBuffer` — text storage with ANSI escape handling (CSI cursor/erase, OSC strings, CR, backspace, tab) |
-| `shell_hooks.rs` | `Osc777Parser` — strips invisible OSC 777 markers from PTY output, emits `ShellHookEvent::Preexec`/`Precmd`; zsh `preexec`/`precmd` hook install script |
-| `compositor.rs` | `Compositor` + `VisualLine` enum (ShellText, BlockBodyLine, BlockTopBorder, BlockBottomBorder, BlockDetailLine, Footer) — builds `VisualLayout` from `ShellBuffer + BlockStore + ViewState`; viewport math |
-| `renderer.rs` | Terminal drawing via crossterm — border chars, framed text, truncation, footer, cursor, `truncate_to_width` |
+| `compositor.rs` | `Compositor` + `VisualLine` enum (Empty, ShellText, BlockBodyLine, StyledBlockBodyLine, BlockTopBorder, BlockBottomBorder, BlockDetailLine, DetailTopBorder, DetailBottomBorder, StyledDetailBodyLine, Footer) — builds `VisualLayout` from `ShellBuffer + BlockStore + ViewState`; viewport math; Detail View pager |
+| `renderer.rs` | Terminal drawing via crossterm — border chars, framed text, styled span rendering, theme-aware colors, footer, cursor, `truncate_to_width` |
 | `config.rs` | TOML config loading (local > XDG > legacy > defaults), `BlockViewConfig`, `BlockLayoutConfig`, `RuntimeConfig`; `.default()` for all configs |
+| `format.rs` | `compact_command()`, `compact_cwd()`, `build_top_label()` — ANSI stripping, whitespace normalization, unicode-aware truncation, top border label formatting |
+| `index.rs` | `BlockIndex` — `failed: Vec<BlockId>` index + `tokens: HashMap<String, Vec<BlockId>>` inverted index for command search |
+| `ansi.rs` | `parse_ansi_lines()` — parses raw PTY bytes into `Vec<StyledText>` with per-span `TextStyle` (fg/bg/bold/italic/underline/reverse), handles SGR/OSC/CSI |
+| `theme.rs` | Catppuccin Frappe color constants for borders, selection, cursor, footer, metadata labels |
+| `shell_hooks.rs` | `Osc777Parser` — strips invisible OSC 777 markers from PTY output, emits `ShellHookEvent::Preexec`/`Precmd`; zsh `preexec`/`precmd` hook install script |
 
 ## Key Design Rules
 
 - **ShellBuffer stores only shell text** — no block borders, metadata, detail lines, or selection state
 - **BlockStore stores only structured block data** — no view state
-- **ViewState owns display state** — selected block, expanded block, viewport, anchor
+- **ViewState owns display state** — selected block, expanded block, viewport, anchor, filter, visible, detail_line_cursor, search_buffer
 - **Compositor is the single source of truth** for viewport math; visual layout drives height calculations
 - **Normal mode is transparent passthrough** — full-screen programs (vim, fzf, less, ssh, etc.) work without a whitelist
 - **Command boundaries from zsh hooks** (`preexec`/`precmd`), not prompt regexes
 - **Frame-rate-limited rendering** — 16ms FRAME_DURATION, force render on view switches
 - **Input batching** — `j`/`k` deltas accumulated via `InputAccumulator`, flushed at frame cadence
 - **Block store retention** (`max_blocks`) is separate from viewport visibility
+- **Filter/navigation via VisibleSource** — all navigation functions iterate `view.visible.ids(blocks)` instead of `blocks.timeline` directly
+- **ANSI rendering from output_raw** — body lines are parsed from `block.output_raw` via `parse_ansi_lines` for color/style preservation
 
 ## Three-Thread Runtime (pty.rs)
 
@@ -143,8 +155,16 @@ All state: `Arc<Mutex<RuntimeState>>`. Lock ordering: output thread locks `(stat
 - `Blocks` → `G` → `Tail` anchor (force render)
 - `Blocks` → `Enter` → toggle `expanded_block` (inline expand/collapse, stays in Blocks, force render)
 - `Blocks` → `i` → `Detail` (full-screen pager, force render)
-- `Detail` → bare `\x1b` or `q` → `Blocks` (force render); multi-byte escape sequences (arrow keys etc.) are consumed without triggering exit
+- `Blocks` → `f` → toggle failed-only filter (rebuild visible, force render)
+- `Blocks` → `/` → open search bar → type query → `Enter` apply, `Esc` cancel
+- `Blocks` → `y`/`Y` → copy output/command to clipboard (with flash message)
+- `Blocks` → `r` → rerun (exit to Plain, paste command to PTY)
 - `Blocks` → `q`/`Esc` → `Plain` (reset to default ViewState, force render)
+- `Detail` → `j`/`k` → move cursor line (auto-scrolls)
+- `Detail` → `g`/`G` → jump to top/bottom
+- `Detail` → `yc`/`yo`/`yb` → copy command/output/block
+- `Detail` → `r` → rerun (exit to Plain, paste command to PTY)
+- `Detail` → bare `\x1b` or `q` → `Blocks` (force render); multi-byte escape sequences (arrow keys etc.) are consumed without triggering exit
 
 ## Config Search Order
 
@@ -155,11 +175,29 @@ All state: `Arc<Mutex<RuntimeState>>`. Lock ordering: output thread locks `(stat
 
 See `config/tide.toml.example` for all available options.
 
+## Config Defaults
+
+- `history.max_blocks = 1000`
+- `block_view.preview_lines = 4`
+- `block_view.expanded_lines = 15`
+- `block_view.follow_tail = true`
+- `block_view.block_gap = 0`
+- `block_view.scroll_margin_lines = 2`
+- `block_view.auto_follow_on_reach_bottom = false`
+- `block_view.horizontal_margin = 1`
+- `block_view.body_padding = 1`
+- `block_view.show_footer = true`
+- `block_layout.horizontal_padding = 1`
+- `block_layout.show_padding_in_plain = true`
+
 ## What Not To Build Now
 
 - OpenCode, AI explanations/fix generation, natural-language command mode
 - ReturnPanel, TUI handoff-return
 - Database/JSONL persistence
-- Complex styling/theme systems
-- Complete ANSI/VT terminal emulation
+- Regex or glob search (current: substring token match only)
+- Search history / up-arrow recall in search bar
+- Case-sensitive search mode
+- Indexing of block output text (command text only)
+- / key in Detail View
 - Capturing full-screen program internals as ShellLine data

@@ -15,10 +15,10 @@ Tide gives zsh a layer system.
 
 Plain View  -> looks like ordinary zsh
 Block View  -> overlays structured block metadata on the same shell history
-Detail View -> expands the selected block inline
+Detail View -> full-screen pager for a single block
 ```
 
-**Key distinction**: "Block expansion" (Enter in Block View) is a per-block inline toggle that stays in Block View. "Detail View" (`ViewKind::Detail`) is a separate full-screen pager mode, not entered by Enter.
+**Key distinction**: "Block expansion" (Enter in Block View) is a per-block inline toggle that stays in Block View. "Detail View" (`ViewKind::Detail`) is a separate full-screen pager mode entered via `i`.
 
 Chinese positioning:
 
@@ -45,7 +45,7 @@ ShellBuffer + BlockStore + ViewState
 
 Do not start with OpenCode, AI, persistence, a full natural-language mode, or a complete multi-mode product. The first goal is to make Plain / Blocks / Detail work from the same captured shell history while keeping Normal mode indistinguishable from ordinary zsh.
 
-**Important**: Enter toggles block expansion (stays in `ViewKind::Blocks`). It does NOT enter Detail View. Detail View is a separate full-screen pager mode entered via a future action key.
+**Important**: Enter toggles block expansion (stays in `ViewKind::Blocks`). It does NOT enter Detail View. Detail View is a separate full-screen pager mode entered via `i`.
 
 ## Product Boundaries
 
@@ -109,6 +109,10 @@ Tide is not:
 - expanded block
 - scroll offset
 - block viewport state, including selected index, visual line offset, and anchor
+- `detail_line_cursor` — cursor position in Detail View pager
+- `filter` — `BlockFilter` (failed_only, command_query)
+- `visible` — `VisibleSource` (AllTimeline or Filtered ids)
+- `search_buffer` — active search input string
 
 `Compositor` owns visual composition:
 
@@ -118,11 +122,14 @@ Tide is not:
 - emits `VisualLine`
 - inserts block top/bottom metadata lines
 - inserts detail lines for the expanded block
+- generates styled (ANSI-colored) body lines from `output_raw`
 
 `Renderer` owns terminal drawing:
 
 - takes `VisualLine`
-- writes to the real terminal
+- writes to the real terminal via crossterm
+- applies theme colors (Catppuccin Frappe) for borders, selection, cursor, footer, metadata
+- renders ANSI-styled spans via `StyledBlockBodyLine` / `StyledDetailBodyLine`
 - does not mutate block data
 - does not parse command lifecycle
 
@@ -149,14 +156,18 @@ Block View overlays Block Metadata Layer on the same shell history.
 - Block View viewport scrolls by visual line (`BlockViewport.line_offset`); selection still moves by block
 - `BlockViewport` controls the visual-line viewport and whether the view is anchored to Top, Tail, or Manual
 - **Default (preview)**: each block shows `preview_lines` of output, no metadata
-- **Expanded** (`expanded_block == Some(id)`): block shows all output lines + detail lines (command, cwd, exit, duration, actions)
+- **Expanded** (`expanded_block == Some(id)`): block shows all output lines (capped at `expanded_lines`) + detail lines (command, cwd, exit, duration, actions)
 - `Enter` toggles the selected block between default and expanded — stays in Block View, does NOT enter Detail View
 - Top and bottom metadata lines are inserted around that block's output range
 - Metadata shows block id, command, status, exit code, and duration
-- The selected block is highlighted
+- The selected block is highlighted with full-row background color (SURFACE0) and LAVENDER borders
+- Body lines are rendered from `output_raw` with ANSI color/style preservation (via `parse_ansi_lines`)
 - `j` / `k` or Up / Down moves selection
 - `g` jumps to the oldest block
 - `G` jumps to the newest block and resumes follow-tail
+- `f` toggles failed-only filter
+- `/` opens command search bar (substring token match, AND semantics)
+- `y` copies output, `Y` copies command, `r` reruns the command
 - `q` / `Esc` returns to Plain View
 - repeated `j` / `k` input should be coalesced and rendered at frame cadence
 - `auto_follow_on_reach_bottom` config controls whether `j` reaching the last block re-enters Tail anchor (default false)
@@ -170,8 +181,11 @@ Detail View is a full-screen pager mode for deep inspection of a single block. I
 
 - Full screen, only one block visible at a time
 - Output scrollable via `j`/`k` with a highlighted line cursor; auto-scrolls when cursor leaves visible area
-- Shows command, cwd, exit code, duration, and actions
-- Copy keys: `yc` copy command, `yo` copy output, `yb` copy block
+- Shows styled (ANSI-colored) output with metadata (command, cwd, exit code, duration, actions, capture status, block kind)
+- Metadata has semantic coloring: status ok=green, failed=red, running=yellow; cwd=blue; actions keys in bold mauve
+- `yc` copy command, `yo` copy output, `yb` copy block
+- `g` jumps to output top, `G` jumps to output bottom
+- `r` reruns the command
 - `q` / `Esc` returns to Block View
 
 ### Terminology Distinction
@@ -209,44 +223,23 @@ Markers should be invisible to the user and stripped from visible shell output b
 
 `preexec` starts the block and `precmd` ends the block. Do not rely on prompt regexes, alternate-screen detection, or command-name whitelists as the primary lifecycle boundary.
 
-## Recommended Module Boundaries
-
-The current repository may not yet match this layout. Move toward it gradually when code changes are needed.
+## Module Layout
 
 ```text
 src/
-  app/
-    state.rs
-    runtime.rs
-    command.rs
-
-  pty/
-    session.rs
-
-  shell_integration/
-    zsh.rs
-    marker.rs
-
-  capture/
-    parser.rs
-    command_capture.rs
-
-  buffer/
-    shell_buffer.rs
-
-  block/
-    block.rs
-    store.rs
-    layout.rs
-
-  render/
-    compositor.rs
-    visual_line.rs
-    renderer.rs
-    styles.rs
-
-  input/
-    keymap.rs
+  main.rs       Entry point
+  app.rs        Core types (BlockId, ViewKind, ViewState, CommandBlock, etc.)
+  pty.rs        PTY session, 3-thread runtime, input dispatch, navigation
+  block.rs      BlockStore — timeline + HashMap lookup, retention, output cap
+  buffer.rs     ShellBuffer — text storage with ANSI escape handling
+  compositor.rs Compositor + VisualLine enum — layout, viewport math, detail pager
+  renderer.rs   Terminal drawing via crossterm — borders, framed text, styled spans
+  config.rs     TOML config loading, BlockViewConfig, BlockLayoutConfig
+  format.rs     Label formatting (compact_command, compact_cwd, build_top_label)
+  index.rs      BlockIndex — token inverted index for search, failed block index
+  ansi.rs       ANSI parser — parse_ansi_lines, StyledText, TextStyle
+  theme.rs      Catppuccin Frappe color constants
+  shell_hooks.rs Osc777Parser — shell marker stripping, lifecycle events
 ```
 
 ## Engineering Rules

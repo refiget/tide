@@ -8,8 +8,10 @@ The exact implementation can evolve, but code should preserve these ownership bo
 - `BlockStore` stores structured execution data.
 - `ViewState` stores selected / expanded / current view state.
 - `Compositor` builds visual lines and computes visible ranges.
-- `Renderer` draws visual lines.
+- `Renderer` draws visual lines using theme colors (Catppuccin Frappe).
 - `Osc777Parser` strips shell markers and emits lifecycle events.
+- `ansi::parse_ansi_lines` parses raw PTY bytes into per-line styled spans.
+- `BlockIndex` provides incremental indexes (failed blocks, token inverted) for filtering/search.
 
 ## RuntimeState
 
@@ -24,6 +26,7 @@ struct RuntimeState {
     capture_suspended: bool,
     rows: u16,
     cols: u16,
+    index: BlockIndex,
 }
 ```
 
@@ -283,6 +286,9 @@ pub struct ViewState {
     pub scroll_offset: usize,
     pub block_viewport: BlockViewport,
     pub detail_line_cursor: usize,
+    pub filter: BlockFilter,
+    pub visible: VisibleSource,
+    pub search_buffer: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -300,11 +306,37 @@ pub enum ViewAnchor {
     Tail,
     Manual,
 }
+
+#[derive(Debug, Clone)]
+pub struct BlockFilter {
+    pub failed_only: bool,
+    pub command_query: String,  // empty = inactive
+}
+
+impl BlockFilter {
+    pub fn is_active(&self) -> bool {
+        self.failed_only || !self.command_query.is_empty()
+    }
+}
+
+/// The set of BlockIds currently visible in Block View.
+/// Navigation always uses this; never indexes into BlockStore.timeline directly.
+#[derive(Debug, Clone)]
+pub enum VisibleSource {
+    AllTimeline,
+    Filtered(Vec<BlockId>),
+}
 ```
 
 `selected_block` and `expanded_block` belong to `ViewState`.
 
 `detail_line_cursor` is a 0-indexed cursor line within Detail View output, used by the full-screen pager when `ViewKind::Detail` is active.
+
+`filter` controls which blocks are visible (failed-only toggle, command query string).
+
+`visible` is the current visible set — either `AllTimeline` (no filter) or `Filtered(Vec<BlockId>)` (pre-computed intersection of active filters). All navigation functions use `view.visible.ids(blocks)` instead of `blocks.timeline` directly.
+
+`search_buffer` is `Some(String)` while the user is typing a search query in the inline search bar; `None` otherwise.
 
 `BlockViewport` controls which portion of block history is visible. It does not store block content.
 
@@ -364,18 +396,19 @@ pub enum VisualLine {
     BlockTopBorder { block_id: BlockId, selected: bool, label: String },
     BlockBottomBorder { block_id: BlockId, selected: bool, label: String },
     BlockDetailLine { block_id: BlockId, text: String, selected: bool },
+    StyledBlockBodyLine { block_id: BlockId, styled: StyledText, plain_text: String, selected: bool },
     DetailTopBorder { block_id: BlockId, label: String },
     DetailBottomBorder { block_id: BlockId, label: String },
-    DetailBodyLine { block_id: BlockId, text: String, is_cursor: bool },
+    StyledDetailBodyLine { block_id: BlockId, styled: StyledText, plain_text: String, is_cursor: bool },
     Footer { text: String },
 }
 ```
 
 Block borders and details are visual lines. They are not stored in `ShellBuffer`.
 
-Block View uses the `Block*` variants: `selected: true` on borders and body lines highlights the entire selected block.
+Block View uses the `Block*` variants: `selected: true` on borders, detail lines, and styled body lines highlights the entire selected block with themed colors (LAVENDER border, SURFACE0 background).
 
-Detail View uses the `Detail*` variants: borders are never highlighted, and body lines carry `is_cursor: bool` to highlight only the active cursor line. The semantics are completely separated from Block View.
+Detail View uses the `Detail*` variants: borders use `DETAIL_BORDER_FG` (LAVENDER) without background highlight. `StyledDetailBodyLine` carries ANSI-colored content (`StyledText` spans) with `is_cursor: bool` for the active cursor line. The semantics are completely separated from Block View.
 
 ## VisibleBlockRange
 
@@ -430,6 +463,7 @@ impl Compositor {
         layout: &BlockLayoutConfig,
         block_view: &BlockViewConfig,
         flash_message: Option<&str>,
+        home: Option<&Path>,
     ) -> Vec<VisualLine>;
 
     pub fn build_visual_layout(
@@ -438,6 +472,7 @@ impl Compositor {
         view: &ViewState,
         width: u16,
         block_view: &BlockViewConfig,
+        home: Option<&Path>,
     ) -> VisualLayout;
 
     pub fn compute_visible_range(
@@ -472,30 +507,32 @@ The compositor is responsible for turning `ShellBuffer + BlockStore + ViewState`
 ```rust
 // Private, called from build_visual_lines when ViewKind::Detail:
 fn build_detail_lines(
-    shell: &ShellBuffer,
+    _shell: &ShellBuffer,
     blocks: &BlockStore,
     view: &ViewState,
     width: u16,
     height: u16,
     block_view: &BlockViewConfig,
     flash_message: Option<&str>,
+    home: Option<&Path>,
 ) -> Vec<VisualLine>;
 ```
 
 `build_detail_lines` constructs a full-screen single-block pager with:
-- `DetailTopBorder` / `DetailBottomBorder` (no Reverse highlighting)
-- `DetailBodyLine` (with `is_cursor` for line cursor highlighting)
+- `DetailTopBorder` / `DetailBottomBorder` (LAVENDER foreground, no background highlight)
+- `StyledDetailBodyLine` (ANSI-colored output from `parse_ansi_lines`, with `is_cursor: bool` for line cursor highlighting using CURSOR_BG/CURSOR_FG theme colors)
+- Metadata lines (`BlockDetailLine`) rendered with semantic coloring (status: green/red/yellow, cwd: blue, actions: bold mauve keys)
 - Vertical centering of short output
 - Auto-scroll support via `block_viewport.line_offset`
 
 Helper functions in `compositor.rs`:
 
 ```rust
-fn get_block_output_lines(block: &CommandBlock, shell_lines: &[ShellLine]) -> Vec<String>;
+fn get_block_styled_output_lines(block: &CommandBlock) -> Vec<StyledText>;
 fn detail_footer_text(block: &CommandBlock, view: &ViewState, total_lines: usize, inner_height: usize, flash_message: Option<&str>) -> String;
 ```
 
-`get_block_output_lines` extracts the block's visible output from shell lines (or returns `"interactive program; screen output was not captured"` for `RawProgram` blocks). `detail_footer_text` builds the pager footer with scroll position and available keybindings.
+`get_block_styled_output_lines` extracts the block's output as ANSI-parsed `StyledText` lines from `block.output_raw` via `parse_ansi_lines()`. Returns the appropriate placeholder for `RawProgram` or empty-output blocks. `detail_footer_text` builds the pager footer with scroll position and available keybindings.
 
 ### Block View composition
 
@@ -508,31 +545,46 @@ ShellBuffer.lines -> VisualLine::ShellText
 Block View generation (`ViewKind::Blocks`):
 
 ```text
-for each block in the full VisualLayout:
+for each block (iterating view.visible.ids(blocks)):
   BlockTopBorder (selected: true for selected block)
-  BlockBodyLine values for shell lines in the block's range
+  Body lines:
+    - RawProgram → placeholder text
+    - output_raw empty + shell_lines exist → plain BlockBodyLine from shell_lines
+    - output_raw non-empty → StyledBlockBodyLine from parse_ansi_lines(&block.output_raw)
   (if expanded_block == Some(id): BlockDetailLine values)
   BlockBottomBorder (selected: true for selected block)
 
 then slice by BlockViewport.line_offset and content height
 ```
 
-`expanded_block` is a per-block inline toggle that stays in `ViewKind::Blocks`. When set, the block shows all output lines (capped at `expanded_lines`) plus detail metadata (command, cwd, exit code, duration, actions). When set, the selected block is expanded; navigation via `j`/`k`/`g`/`G`/Enter automatically moves the expanded state to the newly selected block.
+`expanded_block` is a per-block inline toggle that stays in `ViewKind::Blocks`. When set, the block shows all output lines (capped at `expanded_lines`, default 15) plus detail metadata (command, cwd, exit code, duration, actions). When set, the selected block is expanded; navigation via `j`/`k`/`g`/`G`/Enter automatically moves the expanded state to the newly selected block.
+
+When a filter is active (`BlockFilter.failed_only` or `block_filter.command_query`), the compositor iterates `view.visible.ids(blocks)` instead of the full `blocks.timeline`. The `VisibleSource` is rebuilt by `rebuild_visible()` in `pty.rs` whenever the filter state changes.
 
 ### Detail View composition
 
 ```text
 for the single expanded block:
-  DetailTopBorder (no highlight)
-  DetailBodyLine values (with is_cursor: bool for cursor highlighting)
-  DetailBottomBorder (no highlight)
+  DetailTopBorder (LAVENDER fg, no bg)
+  Body: StyledDetailBodyLine × N (ANSI-styled via parse_ansi_lines, is_cursor highlights line)
+  Metadata: BlockDetailLine × N (command, cwd, exit, duration, actions — semantic colors)
+  DetailBottomBorder (LAVENDER fg, no bg)
 
 then pad to fill screen (short output vertically centered)
 ```
 
 Detail View is a full-screen pager entered via `i` from Block View. The cursor (`detail_line_cursor`) moves independently with `j`/`k`; the viewport auto-scrolls when the cursor leaves the visible area. `g`/`G` jump to top/bottom.
 
-Height calculations come from the generated visual layout for Block View, or from direct arithmetic for Detail View. This intentionally avoids separate estimated block heights that can drift from rendered output.
+Metadata is rendered by `render_block_detail_line()` in `renderer.rs`, which applies semantic colors:
+- "Detail" header: bold MAUVE
+- Label: SUBTEXT0
+- Status values: GREEN (ok), RED (failed), YELLOW (running)
+- CWD: BLUE
+- Actions: bold MAUVE keys, BLUE descriptions
+- Duration: YELLOW
+- Exit code: GREEN (0), RED (non-zero)
+
+Height calculations come from the generated visual layout for Block View, or from direct arithmetic for Detail View accounting for metadata line count (`detail_inner_height = rows - 4 - meta_count`).
 
 ## Renderer API
 
@@ -563,7 +615,28 @@ The caller (`render_runtime` in `pty.rs`) stores the returned count in `RenderSt
 
 Crossterm `queue!` is used for batching; all drawing commands are flushed atomically at the end to avoid intermediate blank frames.
 
-Detail View rendering: `DetailTopBorder` and `DetailBottomBorder` draw titled borders without Reverse highlighting. `DetailBodyLine` applies `SetAttribute(Reverse)` only when `is_cursor` is true, followed by `SetAttribute(Reset)`.
+### Rendering by variant
+
+All borders, text, and highlights use theme colors from `theme.rs` (Catppuccin Frappe):
+
+| Variant | Rendering |
+|---------|-----------|
+| `BlockTopBorder` (selected) | LAVENDER fg + SURFACE0 bg, full-row width |
+| `BlockTopBorder` (unselected) | SURFACE2 fg, no bg |
+| `BlockBottomBorder` (selected) | LAVENDER fg + SURFACE0 bg, full-row width |
+| `BlockBottomBorder` (unselected) | SURFACE2 fg, no bg |
+| `StyledBlockBodyLine` (selected) | TEXT fg + SURFACE0 bg overrides ANSI colors |
+| `StyledBlockBodyLine` (unselected) | ANSI colors preserved via `render_styled_framed_text()` |
+| `BlockDetailLine` | `render_block_detail_line()` with semantic colors |
+| `BlockBodyLine` (plain fallback) | `render_framed_text()` |
+| `DetailTopBorder` / `DetailBottomBorder` | DETAIL_BORDER_FG (LAVENDER), no bg |
+| `StyledDetailBodyLine` (cursor) | CURSOR_FG + CURSOR_BG, full-row width |
+| `StyledDetailBodyLine` (no cursor) | ANSI colors via `render_styled_framed_text()` |
+| `Footer` | FOOTER_BG + FOOTER_FG, full-row width |
+
+`render_styled_framed_text` is the primary function for ANSI-colored body lines. It iterates `StyledText.spans`, applying per-span `TextStyle` (fg/bg, bold, italic, underline, reverse) via `apply_span_style` and resetting between spans via `reset_span_style`.
+
+`render_block_detail_line` handles metadata lines with semantic color mapping (status: green/red/yellow, cwd: blue, actions: bold mauve keys + blue descriptions, etc.).
 
 For Plain View, cursor position is drawn from `ShellBuffer.cursor_position()`. For Block/Detail views, the cursor is hidden.
 
@@ -629,7 +702,6 @@ pub struct BlockViewConfig {
     pub horizontal_margin: usize,
     pub body_padding: usize,
     pub show_footer: bool,
-    pub selected_body_reverse: bool,
 }
 
 pub struct BlockLayoutConfig {
@@ -646,7 +718,7 @@ Defaults:
 
 - `history.max_blocks = 1000`
 - `block_view.preview_lines = 4`
-- `block_view.expanded_lines = 20`
+- `block_view.expanded_lines = 15`
 - `block_view.follow_tail = true`
 - `block_view.block_gap = 0`
 - `block_view.scroll_margin_lines = 2`
@@ -655,7 +727,6 @@ Defaults:
 - `block_view.horizontal_margin = 1`
 - `block_view.body_padding = 1`
 - `block_view.show_footer = true`
-- `block_view.selected_body_reverse = false`
 - `block_layout.horizontal_padding = 1`
 - `block_layout.show_padding_in_plain = true`
 
@@ -719,10 +790,11 @@ fn maybe_flush_navigation_and_render(
 
 ```rust
 fn detail_output_line_count(state: &RuntimeState) -> usize;
+fn detail_meta_line_count(state: &RuntimeState) -> usize;
 fn detail_inner_height(state: &RuntimeState) -> usize;
 ```
 
-`detail_output_line_count` returns the number of output lines in the expanded block for Detail View (returns `1` for `RawProgram` blocks to match the compositor's single placeholder line). `detail_inner_height` returns the available output area in rows: `(state.rows as usize).saturating_sub(4)` (top margin + top border + bottom border + footer).
+`detail_output_line_count` returns the number of output lines in the expanded block for Detail View, using `parse_ansi_lines(&block.output_raw)` instead of shell line ranges (returns `1` for `RawProgram` blocks). `detail_meta_line_count` returns the number of metadata lines displayed in the Detail View pager (including `output_truncated` info and RawProgram specifics). `detail_inner_height` returns the available output scroll area: `(state.rows as usize).saturating_sub(4).saturating_sub(meta_count)` (rows minus top margin, top border, metadata, bottom border, footer).
 
 ### General flow
 
@@ -816,3 +888,88 @@ Frame rate is controlled by `FRAME_DURATION` (16ms ≈ 60fps). View mode switche
 - If a block has no captured linear text, Block View should display a placeholder such as `no captured text output`.
 - Full-screen program terminal behavior is preserved by Normal passthrough, not by a whitelist.
 - Viewport math (visible range, tail offset, scroll margin) is computed by the `Compositor` using the same `build_one_block_lines().len()` function as rendering, preventing height estimate mismatches.
+- `ViewState.filter` and `ViewState.visible` control which blocks are shown (AllTimeline vs Filtered).
+- All navigation functions use `view.visible.ids(blocks)` instead of `blocks.timeline` directly.
+- `BlockIndex.failed` tracks failed blocks incrementally; `BlockIndex.tokens` is an inverted index for command text search.
+- Body text is rendered from `block.output_raw` via `ansi::parse_ansi_lines()` when available, preserving ANSI colors and styles.
+- Renderer uses Catppuccin Frappe theme colors (`theme::Theme`) instead of raw `Attribute::Reverse` for selection highlighting.
+
+## ANSI Parser (`src/ansi.rs`)
+
+```rust
+pub fn parse_ansi_lines(bytes: &[u8]) -> Vec<StyledText>;
+
+pub struct StyledText {
+    pub spans: Vec<StyledSpan>,
+}
+
+pub struct StyledSpan {
+    pub text: String,
+    pub style: TextStyle,
+}
+
+pub struct TextStyle {
+    pub fg: Option<Color>,
+    pub bg: Option<Color>,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub reverse: bool,
+}
+```
+
+`parse_ansi_lines` processes raw PTY byte streams into per-line styled text. Only SGR sequences (`ESC[...m`) are interpreted for styling; all other control sequences (CSI cursor movement, erase, OSC, alternate screen) are consumed and discarded. Style state carries across newlines until a reset is encountered. `\r` clears the current line (for progress bar overwrites). `\r\n` (ONLCR) is handled as a single line break.
+
+Helper functions:
+- `styled_width(text: &StyledText) -> usize` — total display width across all spans
+- `styled_to_plain(text: &StyledText) -> String` — concatenate span text without styles
+- `truncate_styled_to_width(text: &StyledText, max_width: usize) -> StyledText` — unicode-aware truncation preserving per-span styles
+
+## Theme System (`src/theme.rs`)
+
+```rust
+pub struct CatppuccinFrappe;
+// LAVENDER, TEXT, SUBTEXT0, SUBTEXT1, SURFACE2, SURFACE1, SURFACE0,
+// MANTLE, GREEN, RED, YELLOW, MAUVE, BLUE
+
+pub struct Theme;
+// BORDER_NORMAL_FG, BORDER_SELECTED_FG, BODY_SELECTED_BG, BODY_SELECTED_FG,
+// CURSOR_BG, CURSOR_FG, FOOTER_BG, FOOTER_FG, DETAIL_BORDER_FG,
+// STATUS_OK_FG, STATUS_FAILED_FG, STATUS_RUNNING_FG,
+// META_LABEL_FG, META_HEADER_FG, META_PATH_FG,
+// META_ACTION_KEY_FG, META_ACTION_TEXT_FG
+```
+
+Color constants for all themed rendering. All color values are Catppuccin Frappe RGB values applied via `SetForegroundColor`/`SetBackgroundColor` instead of `Attribute::Reverse`.
+
+## Format Module (`src/format.rs`)
+
+```rust
+pub fn compact_command(command: &str, max_width: usize) -> String;
+pub fn compact_cwd(path: &Path, home: Option<&Path>, max_width: usize) -> String;
+pub fn build_top_label(block: &CommandBlock, home: Option<&Path>, available_width: usize) -> String;
+```
+
+`compact_command` strips ANSI escapes, normalizes whitespace, and right-truncates with `…` using unicode-aware width. `compact_cwd` substitutes `~` for home, middle-compresses long paths (keeping 2 tail components, falling back to 1), and right-truncates as last resort. `build_top_label` constructs the top border label (`#<id>  <command><marker>  <cwd>`) with 4-level graceful degradation as available width shrinks.
+
+## BlockIndex (`src/index.rs`)
+
+```rust
+pub struct BlockIndex {
+    pub failed: Vec<BlockId>,
+    pub tokens: HashMap<String, Vec<BlockId>>,
+}
+
+impl BlockIndex {
+    pub fn on_block_failed(&mut self, id: BlockId);
+    pub fn query_failed(&self, executions: &HashMap<BlockId, CommandBlock>) -> Vec<BlockId>;
+    pub fn index_command(&mut self, id: BlockId, command: &str);
+    pub fn query_command(&self, query: &str, executions: &HashMap<BlockId, CommandBlock>) -> Vec<BlockId>;
+}
+```
+
+`failed` is an incremental list of failed block IDs maintained by `on_block_failed()`, called from `finish_command` in the shell hook handler. `query_failed` tombstone-filters via `executions.contains_key()`.
+
+`tokens` is a token inverted index built by `index_command()`, called at block start (preexec). Commands are ANSI-stripped, lowercased, and tokenized by non-alphanumeric characters. `query_command` tokenizes the query, performs substring matching against vocab tokens, and ANDs results across query tokens. Results are sorted by `BlockId` (monotonic = temporal order).
+
+Both indexes use lazy eviction — tombstone filtering via `executions.contains_key()` avoids O(n) Vec removal on block eviction.
