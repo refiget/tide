@@ -56,7 +56,8 @@ pub enum VisualLine {
         block_id: BlockId,
         styled: crate::ansi::StyledText,
         plain_text: String,
-        selected: bool,
+        selected: bool,       // body bg highlight (false when expanded to show ANSI colors)
+        border_selected: bool, // border │ color tracks block selection regardless of ANSI mode
     },
     Footer {
         text: String,
@@ -348,6 +349,7 @@ impl Compositor {
                     styled,
                     plain_text,
                     selected: body_selected,
+                    border_selected: selected,
                 });
             }
 
@@ -496,7 +498,7 @@ impl Compositor {
         let styled_output_lines = get_block_styled_output_lines(block);
         let total = styled_output_lines.len();
 
-        let meta_lines = detail_lines(block, false);
+        let meta_lines = detail_lines(block, true);
         let meta_count = meta_lines.len();
 
         // inner_height = rows - top_margin(1) - top_border(1) - meta_lines - bottom_border(1) - footer(1)

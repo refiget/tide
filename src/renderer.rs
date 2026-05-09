@@ -187,9 +187,15 @@ fn render_line<W: Write>(
             styled,
             plain_text,
             selected,
+            border_selected,
             ..
         } => {
-            render_styled_framed_text(w, styled, plain_text, *selected, width, layout, block_view)?;
+            let border_fg = if *border_selected {
+                Theme::BORDER_SELECTED_FG
+            } else {
+                Theme::BORDER_NORMAL_FG
+            };
+            render_styled_framed_text(w, styled, plain_text, *selected, border_fg, width, layout, block_view)?;
         }
         VisualLine::StyledDetailBodyLine {
             styled,
@@ -211,7 +217,7 @@ fn render_line<W: Write>(
                 queue!(w, Print(pad_to_width(&content, width)))?;
                 queue!(w, ResetColor)?;
             } else {
-                render_styled_framed_text(w, styled, plain_text, false, width, layout, block_view)?;
+                render_styled_framed_text(w, styled, plain_text, false, Theme::DETAIL_BORDER_FG, width, layout, block_view)?;
             }
         }
         VisualLine::Footer { text } => {
@@ -491,6 +497,7 @@ fn render_styled_framed_text<W: Write>(
     styled: &StyledText,
     plain_text: &str,
     selected: bool,
+    border_fg: crossterm::style::Color,
     width: usize,
     layout: &BlockLayoutConfig,
     block_view: &BlockViewConfig,
@@ -514,8 +521,8 @@ fn render_styled_framed_text<W: Write>(
     let fill = content_w.saturating_sub(used);
     let pad_str = " ".repeat(padding);
 
-    // Left margin + border (explicit BORDER_NORMAL_FG so body │ matches top/bottom borders)
-    queue!(w, SetForegroundColor(Theme::BORDER_NORMAL_FG))?;
+    // Left margin + border
+    queue!(w, SetForegroundColor(border_fg))?;
     queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
     queue!(w, ResetColor)?;
     queue!(w, Print(&pad_str))?;
@@ -529,7 +536,7 @@ fn render_styled_framed_text<W: Write>(
 
     // Fill + right border
     queue!(w, Print(" ".repeat(fill)))?;
-    queue!(w, SetForegroundColor(Theme::BORDER_NORMAL_FG))?;
+    queue!(w, SetForegroundColor(border_fg))?;
     queue!(w, Print("│"))?;
     queue!(w, ResetColor)?;
 
