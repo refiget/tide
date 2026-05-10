@@ -952,8 +952,8 @@ fn render_help_overlay<W: Write>(
     let key_area = 13_usize;
     let desc_w = inner_w.saturating_sub(key_area);
 
-    let visible_rows = n.min((rows as usize).saturating_sub(4));
-    let box_h = visible_rows + 2;
+    let visible_rows = n.min((rows as usize).saturating_sub(5));
+    let box_h = visible_rows + 3; // top border + entries + footer row + bottom border
 
     let start_col = ((cols as usize).saturating_sub(box_w)) / 2;
     let start_row = ((rows as usize).saturating_sub(box_h)) / 2;
@@ -1003,23 +1003,10 @@ fn render_help_overlay<W: Write>(
         };
         queue!(w, SetForegroundColor(text_fg))?;
 
-        let is_last_visible = vis_i == visible_rows - 1;
-        if is_last_visible {
-            let counter = format!("{} of {}", help.cursor + 1, n);
-            let counter_w = UnicodeWidthStr::width(counter.as_str());
-            let desc = truncate_to_width(entry.desc, desc_w.saturating_sub(counter_w + 1));
-            let desc_w_used = UnicodeWidthStr::width(desc.as_str());
-            let space = desc_w.saturating_sub(desc_w_used + counter_w);
-            queue!(w, Print(&desc))?;
-            queue!(w, Print(" ".repeat(space)))?;
-            queue!(w, SetForegroundColor(Theme::HELP_DIM_FG))?;
-            queue!(w, Print(&counter))?;
-        } else {
-            let desc = truncate_to_width(entry.desc, desc_w);
-            let fill = desc_w.saturating_sub(UnicodeWidthStr::width(desc.as_str()));
-            queue!(w, Print(&desc))?;
-            queue!(w, Print(" ".repeat(fill)))?;
-        }
+        let desc = truncate_to_width(entry.desc, desc_w);
+        let fill = desc_w.saturating_sub(UnicodeWidthStr::width(desc.as_str()));
+        queue!(w, Print(&desc))?;
+        queue!(w, Print(" ".repeat(fill)))?;
 
         queue!(w, ResetColor)?;
         queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
@@ -1027,8 +1014,26 @@ fn render_help_overlay<W: Write>(
         queue!(w, ResetColor)?;
     }
 
+    // Footer row: counter
+    let footer_row = start_row + 1 + visible_rows;
+    if footer_row < rows as usize {
+        let counter = format!("{} of {}", help.cursor + 1, n);
+        let counter_w = UnicodeWidthStr::width(counter.as_str());
+        let fill = inner_w.saturating_sub(counter_w);
+        queue!(w, MoveTo(start_col as u16, footer_row as u16))?;
+        queue!(w, SetBackgroundColor(Color::Reset))?;
+        queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
+        queue!(w, Print("│"))?;
+        queue!(w, SetForegroundColor(Theme::HELP_DIM_FG))?;
+        queue!(w, Print(" ".repeat(fill)))?;
+        queue!(w, Print(&counter))?;
+        queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
+        queue!(w, Print("│"))?;
+        queue!(w, ResetColor)?;
+    }
+
     // Bottom border
-    let bottom_row = start_row + 1 + visible_rows;
+    let bottom_row = start_row + 2 + visible_rows;
     if bottom_row < rows as usize {
         queue!(w, MoveTo(start_col as u16, bottom_row as u16))?;
         queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
