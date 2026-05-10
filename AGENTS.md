@@ -113,6 +113,7 @@ Tide is not:
 - `filter` — `BlockFilter` (failed_only, command_query)
 - `visible` — `VisibleSource` (AllTimeline or Filtered ids)
 - `search_buffer` — active search input string
+- `help: Option<HelpState>` — non-None while the Help overlay is open; contains `cursor`, `scroll`, and `return_view` (the view to restore on close)
 
 `Compositor` owns visual composition:
 
@@ -128,8 +129,10 @@ Tide is not:
 
 - takes `VisualLine`
 - writes to the real terminal via crossterm
+- `BlockSelectionStyle` struct centralises all selection visual parameters — edit `::selected()` / `::normal()` to change selection appearance across all 5 render functions at once
 - applies theme colors (Catppuccin Frappe) for borders, selection, cursor, footer, metadata
 - renders ANSI-styled spans via `StyledBlockBodyLine` / `StyledDetailBodyLine`
+- renders Help overlay (`render_help_overlay`) as a floating modal over the active view
 - does not mutate block data
 - does not parse command lifecycle
 
@@ -160,7 +163,7 @@ Block View overlays Block Metadata Layer on the same shell history.
 - `Enter` toggles the selected block between default and expanded — stays in Block View, does NOT enter Detail View
 - Top and bottom metadata lines are inserted around that block's output range
 - Metadata shows block id, command, status, exit code, and duration
-- The selected block is highlighted with full-row background color (SURFACE0) and LAVENDER borders
+- The selected block is indicated by LAVENDER border color (╭╯ corners + │ sides); no body background fill. All blocks use round corners (╭╮╰╯).
 - Body lines are rendered from `output_raw` with ANSI color/style preservation (via `parse_ansi_lines`)
 - `j` / `k` or Up / Down moves selection
 - `g` jumps to the oldest block
@@ -228,12 +231,12 @@ Markers should be invisible to the user and stripped from visible shell output b
 ```text
 src/
   main.rs       Entry point
-  app.rs        Core types (BlockId, ViewKind, ViewState, CommandBlock, etc.)
+  app.rs        Core types (BlockId, ViewKind, ViewState, HelpState, FooterSegment, CommandBlock, etc.)
   pty.rs        PTY session, 3-thread runtime, input dispatch, navigation
   block.rs      BlockStore — timeline + HashMap lookup, retention, output cap
   buffer.rs     ShellBuffer — text storage with ANSI escape handling
   compositor.rs Compositor + VisualLine enum — layout, viewport math, detail pager
-  renderer.rs   Terminal drawing via crossterm — borders, framed text, styled spans
+  renderer.rs   Terminal drawing via crossterm — BlockSelectionStyle, borders, framed text, Help overlay, styled spans
   config.rs     TOML config loading, BlockViewConfig, BlockLayoutConfig
   format.rs     Label formatting (compact_command, compact_cwd, build_top_label)
   index.rs      BlockIndex — token inverted index for search, failed block index

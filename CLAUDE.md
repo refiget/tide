@@ -4,25 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Working Mode
 
-This project follows a **prompt-driven** workflow. Claude does not execute code changes directly.
-
-```
-理解项目 ──► 生成实现 Prompt ──► 用户执行并 Review ──► 生成下一个 Prompt
-```
-
-**Claude 的职责**：
-- 阅读代码，理解当前状态
-- 生成详细的实现 Prompt（交给另一个 Claude Code 会话执行）
-- 根据 Review 反馈生成下一阶段的 Prompt
-
-**Prompt 质量要求**：
-- 必须包含背景（为什么做、当前代码状态）
-- 必须列出必读文件（按顺序）
-- 必须说明哪些已存在、哪些需要新增
-- 必须给出逐步实现方案，精确到函数名和文件位置
-- 必须包含"不要做的事"避免过度实现
-- 必须包含自动化测试要求和手动测试步骤
-- 必须给出完成标准（可验证）
+This project uses **direct implementation** — Claude reads the codebase, makes changes, and runs `cargo check && cargo test` to verify. No intermediate prompt generation step.
 
 ## Read First
 
@@ -101,17 +83,35 @@ cargo fmt --check && cargo check && cargo test
 - Navigation functions use `view.visible.ids(blocks)` instead of `blocks.timeline` directly (supports filters)
 - `build_detail_lines` in compositor renders Detail View (not `build_detail_layout`)
 
+## Renderer Maintenance Groups
+
+### Group A — Block Selection Style (sync all together)
+All block selection visual changes go through `BlockSelectionStyle` in `renderer.rs`. Edit only `BlockSelectionStyle::selected()` and `::normal()` — the 5 render functions consuming it update automatically:
+
+| Function | What it renders |
+|----------|----------------|
+| `render_top_border` | ╭─ #N cmd ~/path ─╮ |
+| `render_border` | ╰──────────────────╯ |
+| `render_framed_text` | plain-text body lines │...│ |
+| `render_styled_framed_text` | ANSI body lines │...│ |
+| `render_block_detail_line` | expanded metadata lines │...│ |
+
+Current style: border color LAVENDER (selected) / SURFACE2 (normal), no body background, always round corners ╭╯.
+
+### Group B — Help Overlay
+Changes to Help appearance touch: `render_help_overlay` + `BLOCK_HELP_ENTRIES` / `DETAIL_HELP_ENTRIES` in `renderer.rs`, `ViewKind::Help` handler in `pty.rs`, and `ViewState.help: Option<HelpState>` in `app.rs`.
+
 ## Architecture (flat `src/` modules)
 
 | Module | Responsibility |
 |--------|---------------|
 | `main.rs` | Entry point — loads config, starts PTY session |
-| `app.rs` | Types: `BlockId`, `ViewKind`, `InputMode`, `ViewState`, `BlockViewport`, `ViewAnchor`, `VisibleSource`, `BlockFilter`, `CommandBlock/ExecutionBlock`, `InputAccumulator`, `RenderState`, `BlockKind`, `BlockStatus`, `BlockAction`, `AppEvent` |
+| `app.rs` | Types: `BlockId`, `ViewKind`, `InputMode`, `ViewState`, `HelpState`, `BlockViewport`, `ViewAnchor`, `VisibleSource`, `BlockFilter`, `FooterSegment`, `CommandBlock/ExecutionBlock`, `InputAccumulator`, `RenderState`, `BlockKind`, `BlockStatus`, `BlockAction`, `AppEvent` |
 | `pty.rs` | PTY session, 3-thread runtime (output reader, input reader, resize handler), `Osc777Parser` integration, frame-limited render loop, keyboard dispatch, navigation, `TerminalGuard` |
 | `block.rs` | `BlockStore` — `Vec<BlockId>` timeline + `HashMap<BlockId, CommandBlock>` lookup, retention cap, output byte cap |
 | `buffer.rs` | `ShellBuffer` — text storage with ANSI escape handling (CSI cursor/erase, OSC strings, CR, backspace, tab) |
 | `compositor.rs` | `Compositor` + `VisualLine` enum (Empty, ShellText, BlockBodyLine, StyledBlockBodyLine, BlockTopBorder, BlockBottomBorder, BlockDetailLine, DetailTopBorder, DetailBottomBorder, StyledDetailBodyLine, Footer) — builds `VisualLayout` from `ShellBuffer + BlockStore + ViewState`; viewport math; Detail View pager |
-| `renderer.rs` | Terminal drawing via crossterm — border chars, framed text, styled span rendering, theme-aware colors, footer, cursor, `truncate_to_width` |
+| `renderer.rs` | Terminal drawing via crossterm — `BlockSelectionStyle` (centralised selection palette), border chars, framed text, styled span rendering, Help overlay, theme-aware colors, footer, cursor, `truncate_to_width` |
 | `config.rs` | TOML config loading (local > XDG > legacy > defaults), `BlockViewConfig`, `BlockLayoutConfig`, `RuntimeConfig`; `.default()` for all configs |
 | `format.rs` | `compact_command()`, `compact_cwd()`, `build_top_label()` — ANSI stripping, whitespace normalization, unicode-aware truncation, top border label formatting |
 | `index.rs` | `BlockIndex` — `failed: Vec<BlockId>` index + `tokens: HashMap<String, Vec<BlockId>>` inverted index for command search |
@@ -123,7 +123,7 @@ cargo fmt --check && cargo check && cargo test
 
 - **ShellBuffer stores only shell text** — no block borders, metadata, detail lines, or selection state
 - **BlockStore stores only structured block data** — no view state
-- **ViewState owns display state** — selected block, expanded block, viewport, anchor, filter, visible, detail_line_cursor, search_buffer
+- **ViewState owns display state** — selected block, expanded block, viewport, anchor, filter, visible, detail_line_cursor, search_buffer, `help: Option<HelpState>` (non-None while Help overlay is open)
 - **Compositor is the single source of truth** for viewport math; visual layout drives height calculations
 - **Normal mode is transparent passthrough** — full-screen programs (vim, fzf, less, ssh, etc.) work without a whitelist
 - **Command boundaries from zsh hooks** (`preexec`/`precmd`), not prompt regexes
@@ -159,12 +159,14 @@ All state: `Arc<Mutex<RuntimeState>>`. Lock ordering: output thread locks `(stat
 - `Blocks` → `/` → open search bar → type query → `Enter` apply, `Esc` cancel
 - `Blocks` → `y`/`Y` → copy output/command to clipboard (with flash message)
 - `Blocks` → `r` → rerun (exit to Plain, paste command to PTY)
+- `Blocks` → `?` → `Help` overlay (underlying Blocks view rendered behind; `j`/`k`/`g`/`G` scroll list, `?`/`q`/`Esc` close)
 - `Blocks` → `q`/`Esc` → `Plain` (reset to default ViewState, force render)
 - `Detail` → `j`/`k` → move cursor line (auto-scrolls)
 - `Detail` → `g`/`G` → jump to top/bottom
 - `Detail` → `yc`/`yo`/`yb` → copy command/output/block
 - `Detail` → `r` → rerun (exit to Plain, paste command to PTY)
 - `Detail` → bare `\x1b` or `q` → `Blocks` (force render); multi-byte escape sequences (arrow keys etc.) are consumed without triggering exit
+- `Detail` → `?` → `Help` overlay (underlying Detail view rendered behind; same navigation as Blocks Help)
 
 ## Config Search Order
 

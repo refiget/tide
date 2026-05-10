@@ -68,6 +68,11 @@ impl CatppuccinFrappe {
         g: 170,
         b: 238,
     };
+    pub const TEAL: Color = Color::Rgb {
+        r: 129,
+        g: 200,
+        b: 190,
+    };
 }
 
 pub struct Theme;
@@ -92,4 +97,11 @@ impl Theme {
     pub const META_PATH_FG: Color = CatppuccinFrappe::BLUE;
     pub const META_ACTION_KEY_FG: Color = CatppuccinFrappe::MAUVE;
     pub const META_ACTION_TEXT_FG: Color = CatppuccinFrappe::BLUE;
+    pub const HELP_BG: Color = CatppuccinFrappe::SURFACE0;
+    pub const HELP_BORDER: Color = CatppuccinFrappe::MAUVE;
+    pub const HELP_KEY_FG: Color = CatppuccinFrappe::TEAL;
+    pub const HELP_TEXT_FG: Color = CatppuccinFrappe::SUBTEXT1;
+    pub const HELP_SEL_BG: Color = CatppuccinFrappe::SURFACE1;
+    pub const HELP_SEL_FG: Color = CatppuccinFrappe::TEXT;
+    pub const HELP_DIM_FG: Color = CatppuccinFrappe::SUBTEXT0;
 }

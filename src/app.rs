@@ -116,6 +116,21 @@ impl BlockFilter {
     }
 }
 
+/// State for the Help overlay. Present only while the overlay is open.
+#[derive(Debug, Clone)]
+pub struct HelpState {
+    pub cursor: usize,
+    pub scroll: usize,
+    /// The view that was active when Help was opened; restored on close.
+    pub return_view: ViewKind,
+}
+
+impl HelpState {
+    pub fn open(return_view: ViewKind) -> Self {
+        Self { cursor: 0, scroll: 0, return_view }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ViewState {
     pub view: ViewKind,
@@ -128,7 +143,8 @@ pub struct ViewState {
     pub filter: BlockFilter,
     pub visible: VisibleSource,
     pub search_buffer: Option<String>,
-    pub help_return_view: Option<ViewKind>,
+    /// Non-None while the Help overlay is open.
+    pub help: Option<HelpState>,
 }
 
 #[derive(Debug, Clone)]
@@ -159,7 +175,7 @@ impl Default for ViewState {
             filter: BlockFilter::default(),
             visible: VisibleSource::default(),
             search_buffer: None,
-            help_return_view: None,
+            help: None,
         }
     }
 }
@@ -394,4 +410,28 @@ pub enum BlockAction {
     CreateNote,
     InspectGitChanges,
     InsertSuggestedCommand(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum FooterSegment {
+    Label(String),
+    Key(String),
+    Sep,
+    Plain(String),
+    Spacer,
+}
+
+impl FooterSegment {
+    pub fn flatten(segments: &[FooterSegment]) -> String {
+        segments
+            .iter()
+            .map(|s| match s {
+                FooterSegment::Label(t) | FooterSegment::Key(t) | FooterSegment::Plain(t) => {
+                    t.as_str()
+                }
+                FooterSegment::Sep => " | ",
+                FooterSegment::Spacer => " ",
+            })
+            .collect()
+    }
 }

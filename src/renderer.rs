@@ -13,10 +13,128 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     ansi::{StyledText, TextStyle, styled_width, truncate_styled_to_width},
     app::{BlockStatus, ViewKind},
-    compositor::{FooterSegment, VisualLine},
+    app::FooterSegment,
+    compositor::VisualLine,
     config::{BlockLayoutConfig, BlockViewConfig},
     theme::{CatppuccinFrappe, Theme},
 };
+
+/// Centralised visual parameters for block selection state.
+/// All Group-A render functions take this instead of a bare `selected: bool`.
+/// To change selection appearance, edit `selected()` / `normal()` only.
+struct BlockSelectionStyle {
+    border_fg: Color,
+    body_bg: Option<Color>,
+    /// Fallback text color for content without its own semantic color.
+    text_fg: Color,
+}
+
+impl BlockSelectionStyle {
+    fn selected() -> Self {
+        Self {
+            border_fg: Theme::BORDER_SELECTED_FG,
+            body_bg: None,
+            text_fg: CatppuccinFrappe::TEXT,
+        }
+    }
+    fn normal() -> Self {
+        Self {
+            border_fg: Theme::BORDER_NORMAL_FG,
+            body_bg: None,
+            text_fg: CatppuccinFrappe::SUBTEXT1,
+        }
+    }
+    fn from_bool(selected: bool) -> Self {
+        if selected { Self::selected() } else { Self::normal() }
+    }
+}
+
+pub struct HelpEntry {
+    pub key: &'static str,
+    pub desc: &'static str,
+}
+
+pub const BLOCK_HELP_ENTRIES: &[HelpEntry] = &[
+    HelpEntry {
+        key: "j / k",
+        desc: "navigate blocks",
+    },
+    HelpEntry {
+        key: "Enter",
+        desc: "expand / collapse",
+    },
+    HelpEntry {
+        key: "i",
+        desc: "detail view",
+    },
+    HelpEntry {
+        key: "g / G",
+        desc: "top / bottom",
+    },
+    HelpEntry {
+        key: "/",
+        desc: "search commands",
+    },
+    HelpEntry {
+        key: "f",
+        desc: "toggle failed filter",
+    },
+    HelpEntry {
+        key: "y",
+        desc: "copy output",
+    },
+    HelpEntry {
+        key: "Y",
+        desc: "copy command",
+    },
+    HelpEntry {
+        key: "r",
+        desc: "rerun command",
+    },
+    HelpEntry {
+        key: "?",
+        desc: "close help",
+    },
+    HelpEntry {
+        key: "q / Esc",
+        desc: "return to shell",
+    },
+];
+
+pub const DETAIL_HELP_ENTRIES: &[HelpEntry] = &[
+    HelpEntry {
+        key: "j / k",
+        desc: "scroll output",
+    },
+    HelpEntry {
+        key: "g / G",
+        desc: "top / bottom",
+    },
+    HelpEntry {
+        key: "yc",
+        desc: "copy command",
+    },
+    HelpEntry {
+        key: "yo",
+        desc: "copy output",
+    },
+    HelpEntry {
+        key: "yb",
+        desc: "copy block",
+    },
+    HelpEntry {
+        key: "r",
+        desc: "rerun command",
+    },
+    HelpEntry {
+        key: "?",
+        desc: "close help",
+    },
+    HelpEntry {
+        key: "q / Esc",
+        desc: "back to blocks",
+    },
+];
 
 /// Enter alternate screen and hide cursor for Block/Detail view rendering.
 pub fn enter_block_render<W: Write>(w: &mut W) -> io::Result<()> {
@@ -85,6 +203,10 @@ pub fn render<W: Write>(
         queue!(w, Hide)?;
     }
 
+    if matches!(view.view, ViewKind::Help) {
+        render_help_overlay(w, view, cols, rows)?;
+    }
+
     w.flush()?;
     Ok(rendered)
 }
@@ -136,7 +258,7 @@ fn render_line<W: Write>(
             selected,
         } => {
             let _ = block_id;
-            render_framed_text(w, text, *selected, width, layout, block_view)?;
+            render_framed_text(w, text, &BlockSelectionStyle::from_bool(*selected), width, layout, block_view)?;
         }
         VisualLine::BlockTopBorder {
             block_id,
@@ -144,7 +266,7 @@ fn render_line<W: Write>(
             label,
         } => {
             let _ = block_id;
-            render_top_border(w, label, *selected, width, block_view)?;
+            render_top_border(w, label, &BlockSelectionStyle::from_bool(*selected), width, block_view)?;
         }
         VisualLine::BlockBottomBorder {
             block_id,
@@ -152,20 +274,20 @@ fn render_line<W: Write>(
             label,
         } => {
             let _ = block_id;
-            render_border(w, label, *selected, false, width, block_view)?;
+            render_border(w, label, &BlockSelectionStyle::from_bool(*selected), false, width, block_view)?;
         }
         VisualLine::BlockDetailLine {
             block_id,
             text,
             selected,
-            use_detail_border,
+            in_detail_view,
         } => {
             let _ = block_id;
             render_block_detail_line(
                 w,
                 text,
-                *selected,
-                *use_detail_border,
+                &BlockSelectionStyle::from_bool(*selected),
+                *in_detail_view,
                 width,
                 layout,
                 block_view,
@@ -198,17 +320,11 @@ fn render_line<W: Write>(
             styled,
             plain_text,
             selected,
-            border_selected,
             ..
         } => {
-            let border_fg = if *border_selected {
-                Theme::BORDER_SELECTED_FG
-            } else {
-                Theme::BORDER_NORMAL_FG
-            };
-            let bg = selected.then_some(Theme::BODY_SELECTED_BG);
+            let style = BlockSelectionStyle::from_bool(*selected);
             render_styled_framed_text(
-                w, styled, plain_text, bg, border_fg, width, layout, block_view,
+                w, styled, plain_text, style.body_bg, style.border_fg, width, layout, block_view,
             )?;
         }
         VisualLine::StyledDetailBodyLine {
@@ -240,7 +356,7 @@ fn render_line<W: Write>(
 fn render_top_border<W: Write>(
     w: &mut W,
     label: &crate::format::TopLabel,
-    selected: bool,
+    style: &BlockSelectionStyle,
     width: usize,
     block_view: &BlockViewConfig,
 ) -> io::Result<()> {
@@ -251,25 +367,13 @@ fn render_top_border<W: Write>(
     let inner_w = bw.saturating_sub(2);
     let margin = block_view.horizontal_margin;
 
-    let left = if selected { '╭' } else { '┌' };
-    let right = if selected { '╮' } else { '┐' };
-    let border_fg = if selected {
-        Theme::BORDER_SELECTED_FG
-    } else {
-        Theme::BORDER_NORMAL_FG
-    };
+    let (left, right) = ('╭', '╮');
+    let border_fg = style.border_fg;
     let command_fg = match label.status {
         BlockStatus::Success => Theme::STATUS_OK_FG,
         BlockStatus::Failed => Theme::STATUS_FAILED_FG,
-        _ => {
-            if selected {
-                CatppuccinFrappe::TEXT
-            } else {
-                CatppuccinFrappe::SUBTEXT1
-            }
-        }
+        _ => style.text_fg,
     };
-    let bg = selected.then_some(Theme::BODY_SELECTED_BG);
 
     // Build content segments
     let mut segments: Vec<(crossterm::style::Color, String)> = Vec::new();
@@ -293,10 +397,7 @@ fn render_top_border<W: Write>(
     }
     let fill = inner_w.saturating_sub(used); // used includes left corner; " " + fill + "╮" must fit in inner_w
 
-    // Render
-    if let Some(bg) = bg {
-        queue!(w, SetBackgroundColor(bg))?;
-    }
+    // Border line has no bg — highlight lives inside body rows only
     queue!(w, Print(" ".repeat(margin)))?;
     for (fg, text) in &segments {
         queue!(w, SetForegroundColor(*fg))?;
@@ -306,9 +407,6 @@ fn render_top_border<W: Write>(
     queue!(w, Print(" "))?;
     queue!(w, Print("─".repeat(fill)))?;
     queue!(w, Print(right.to_string()))?;
-    if selected {
-        queue!(w, Print(" ".repeat(width.saturating_sub(bw + margin))))?;
-    }
     queue!(w, ResetColor)?;
     Ok(())
 }
@@ -316,37 +414,19 @@ fn render_top_border<W: Write>(
 fn render_border<W: Write>(
     w: &mut W,
     label: &str,
-    selected: bool,
+    style: &BlockSelectionStyle,
     top: bool,
     width: usize,
     block_view: &BlockViewConfig,
 ) -> io::Result<()> {
-    let (left, right) = match (selected, top) {
-        (true, true) => ('╭', '╮'),
-        (true, false) => ('╰', '╯'),
-        (false, true) => ('┌', '┐'),
-        (false, false) => ('└', '┘'),
-    };
-
-    if selected {
-        let content = with_margin(
-            &titled_border(left, right, label, block_width(width, block_view)),
-            block_view,
-        );
-        queue!(w, SetForegroundColor(Theme::BORDER_SELECTED_FG))?;
-        queue!(w, SetBackgroundColor(Theme::BODY_SELECTED_BG))?;
-        queue!(w, Print(pad_to_width(&content, width)))?;
-        queue!(w, ResetColor)?;
-    } else {
-        let content = with_margin(
-            &titled_border(left, right, label, block_width(width, block_view)),
-            block_view,
-        );
-        queue!(w, SetForegroundColor(Theme::BORDER_NORMAL_FG))?;
-        queue!(w, Print(content))?;
-        queue!(w, ResetColor)?;
-    }
-
+    let (left, right) = if top { ('╭', '╮') } else { ('╰', '╯') };
+    let content = with_margin(
+        &titled_border(left, right, label, block_width(width, block_view)),
+        block_view,
+    );
+    queue!(w, SetForegroundColor(style.border_fg))?;
+    queue!(w, Print(content))?;
+    queue!(w, ResetColor)?;
     Ok(())
 }
 
@@ -365,26 +445,15 @@ fn parse_actions(value: &str) -> Vec<(String, String)> {
 fn render_block_detail_line<W: Write>(
     w: &mut W,
     text: &str,
-    selected: bool,
-    use_detail_border: bool,
+    style: &BlockSelectionStyle,
+    in_detail_view: bool,
     width: usize,
     layout: &BlockLayoutConfig,
     block_view: &BlockViewConfig,
 ) -> io::Result<()> {
-    // Border color: Detail View uses DETAIL_BORDER_FG; Block View tracks selection
-    let border_fg = if use_detail_border {
-        Theme::DETAIL_BORDER_FG
-    } else if selected {
-        Theme::BORDER_SELECTED_FG
-    } else {
-        Theme::BORDER_NORMAL_FG
-    };
-    // Background: only Block View selected rows get BODY_SELECTED_BG
-    let bg = if selected && !use_detail_border {
-        Some(Theme::BODY_SELECTED_BG)
-    } else {
-        None
-    };
+    // Detail View overrides border color and always has no bg
+    let border_fg = if in_detail_view { Theme::DETAIL_BORDER_FG } else { style.border_fg };
+    let bg = if in_detail_view { None } else { style.body_bg };
 
     if text.is_empty() {
         // Empty separator: render a plain framed empty line with correct border/bg
@@ -415,7 +484,7 @@ fn render_block_detail_line<W: Write>(
 
     let bw = block_width(width, block_view);
     if bw < 4 {
-        return render_framed_text(w, text, selected, width, layout, block_view);
+        return render_framed_text(w, text, style, width, layout, block_view);
     }
 
     let margin = block_view.horizontal_margin;
@@ -559,13 +628,7 @@ fn render_block_detail_line<W: Write>(
 
     let body = truncate_to_width(&format!("{pad_str}{text}"), inner_w);
     let fill = inner_w.saturating_sub(UnicodeWidthStr::width(body.as_str()));
-    let text_fg = if use_detail_border {
-        Theme::FOOTER_FG
-    } else if selected {
-        Theme::BODY_SELECTED_FG
-    } else {
-        Color::Reset
-    };
+    let text_fg = if in_detail_view { Theme::FOOTER_FG } else { style.text_fg };
 
     if let Some(bg) = bg {
         queue!(w, SetBackgroundColor(bg))?;
@@ -589,36 +652,32 @@ fn render_block_detail_line<W: Write>(
 fn render_framed_text<W: Write>(
     w: &mut W,
     text: &str,
-    selected: bool,
+    style: &BlockSelectionStyle,
     width: usize,
     _layout: &BlockLayoutConfig,
     block_view: &BlockViewConfig,
 ) -> io::Result<()> {
     let bw = block_width(width, block_view);
     let margin = block_view.horizontal_margin;
-
-    if selected {
-        let content = with_margin(&framed_text(text, bw, block_view.body_padding), block_view);
-        queue!(w, SetForegroundColor(Theme::BODY_SELECTED_FG))?;
-        queue!(w, SetBackgroundColor(Theme::BODY_SELECTED_BG))?;
-        queue!(w, Print(pad_to_width(&content, width)))?;
-        queue!(w, ResetColor)?;
-    } else if bw < 4 {
+    if bw < 4 {
         queue!(w, Print(truncate_to_width(text, bw)))?;
-    } else {
-        let inner_w = bw - 2;
-        let padding = " ".repeat(block_view.body_padding);
-        let body = truncate_to_width(&format!("{padding}{text}"), inner_w);
-        let fill = inner_w.saturating_sub(UnicodeWidthStr::width(body.as_str()));
-        queue!(w, SetForegroundColor(Theme::BORDER_NORMAL_FG))?;
-        queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
-        queue!(w, ResetColor)?;
-        queue!(w, Print(format!("{body}{}", " ".repeat(fill))))?;
-        queue!(w, SetForegroundColor(Theme::BORDER_NORMAL_FG))?;
-        queue!(w, Print("│"))?;
-        queue!(w, ResetColor)?;
+        return Ok(());
     }
-
+    let inner_w = bw - 2;
+    let padding = " ".repeat(block_view.body_padding);
+    let body = truncate_to_width(&format!("{padding}{text}"), inner_w);
+    let fill = inner_w.saturating_sub(UnicodeWidthStr::width(body.as_str()));
+    queue!(w, SetForegroundColor(style.border_fg))?;
+    queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
+    queue!(w, ResetColor)?;
+    if let Some(bg) = style.body_bg {
+        queue!(w, SetBackgroundColor(bg))?;
+    }
+    queue!(w, Print(format!("{body}{}", " ".repeat(fill))))?;
+    queue!(w, ResetColor)?;
+    queue!(w, SetForegroundColor(style.border_fg))?;
+    queue!(w, Print("│"))?;
+    queue!(w, ResetColor)?;
     Ok(())
 }
 
@@ -647,11 +706,10 @@ fn render_styled_framed_text<W: Write>(
     let pad_str = " ".repeat(padding);
 
     if let Some(bg) = bg {
-        // ANSI fg colors preserved; bg applied to whole line.
-        // After each span, reset attrs but restore bg so it persists across spans.
-        queue!(w, SetBackgroundColor(bg))?;
+        // │ printed without bg; highlight confined to content area between │ chars
         queue!(w, SetForegroundColor(border_fg))?;
         queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
+        queue!(w, SetBackgroundColor(bg))?;
         queue!(w, Print(&pad_str))?;
         for span in &clipped.spans {
             apply_span_style(w, &span.style)?;
@@ -660,9 +718,9 @@ fn render_styled_framed_text<W: Write>(
             queue!(w, SetBackgroundColor(bg))?;
         }
         queue!(w, Print(" ".repeat(fill)))?;
+        queue!(w, ResetColor)?;
         queue!(w, SetForegroundColor(border_fg))?;
         queue!(w, Print("│"))?;
-        queue!(w, Print(" ".repeat(width.saturating_sub(block_w + margin))))?;
         queue!(w, ResetColor)?;
         return Ok(());
     }
@@ -830,6 +888,113 @@ fn pad_to_width(value: &str, width: usize) -> String {
     let value = truncate_to_width(value, width);
     let fill = width.saturating_sub(UnicodeWidthStr::width(value.as_str()));
     format!("{value}{}", " ".repeat(fill))
+}
+
+fn render_help_overlay<W: Write>(
+    w: &mut W,
+    view: &crate::app::ViewState,
+    cols: u16,
+    rows: u16,
+) -> io::Result<()> {
+    use crate::app::ViewKind;
+
+    let help = match &view.help {
+        Some(h) => h,
+        None => return Ok(()),
+    };
+    let entries = match &help.return_view {
+        ViewKind::Detail => DETAIL_HELP_ENTRIES,
+        _ => BLOCK_HELP_ENTRIES,
+    };
+    let n = entries.len();
+
+    let box_w = 56_usize.min(cols as usize - 4).max(20);
+    let inner_w = box_w - 2;
+    let key_area = 13_usize;
+    let desc_w = inner_w.saturating_sub(key_area);
+
+    let visible_rows = n.min((rows as usize).saturating_sub(4));
+    let box_h = visible_rows + 2;
+
+    let start_col = ((cols as usize).saturating_sub(box_w)) / 2;
+    let start_row = ((rows as usize).saturating_sub(box_h)) / 2;
+
+    let scroll = help.scroll;
+
+    // Top border with title
+    queue!(w, MoveTo(start_col as u16, start_row as u16))?;
+    queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
+    queue!(w, SetBackgroundColor(Color::Reset))?;
+    queue!(w, Print(titled_border('╭', '╮', "Keybindings", box_w)))?;
+    queue!(w, ResetColor)?;
+
+    // Entry rows
+    for vis_i in 0..visible_rows {
+        let entry_i = scroll + vis_i;
+        let screen_row = start_row + 1 + vis_i;
+        if screen_row >= rows as usize || entry_i >= n {
+            break;
+        }
+        let entry = &entries[entry_i];
+        let is_sel = entry_i == help.cursor;
+
+        queue!(w, MoveTo(start_col as u16, screen_row as u16))?;
+
+        queue!(w, SetBackgroundColor(Color::Reset))?;
+        queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
+        queue!(w, Print("│"))?;
+
+        if is_sel {
+            queue!(w, SetBackgroundColor(Theme::HELP_SEL_BG))?;
+        }
+
+        let key_str = format!("  {:>9}  ", entry.key);
+        let key_fg = if is_sel { Theme::HELP_SEL_FG } else { Theme::HELP_KEY_FG };
+        queue!(w, SetForegroundColor(key_fg))?;
+        queue!(w, Print(&key_str))?;
+
+        let text_fg = if is_sel {
+            Theme::HELP_SEL_FG
+        } else {
+            Theme::HELP_TEXT_FG
+        };
+        queue!(w, SetForegroundColor(text_fg))?;
+
+        let is_last_visible = vis_i == visible_rows - 1;
+        if is_last_visible {
+            let counter = format!("{} of {}", help.cursor + 1, n);
+            let counter_w = UnicodeWidthStr::width(counter.as_str());
+            let desc = truncate_to_width(entry.desc, desc_w.saturating_sub(counter_w + 1));
+            let desc_w_used = UnicodeWidthStr::width(desc.as_str());
+            let space = desc_w.saturating_sub(desc_w_used + counter_w);
+            queue!(w, Print(&desc))?;
+            queue!(w, Print(" ".repeat(space)))?;
+            queue!(w, SetForegroundColor(Theme::HELP_DIM_FG))?;
+            queue!(w, Print(&counter))?;
+        } else {
+            let desc = truncate_to_width(entry.desc, desc_w);
+            let fill = desc_w.saturating_sub(UnicodeWidthStr::width(desc.as_str()));
+            queue!(w, Print(&desc))?;
+            queue!(w, Print(" ".repeat(fill)))?;
+        }
+
+        queue!(w, ResetColor)?;
+        queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
+        queue!(w, Print("│"))?;
+        queue!(w, ResetColor)?;
+    }
+
+    // Bottom border
+    let bottom_row = start_row + 1 + visible_rows;
+    if bottom_row < rows as usize {
+        queue!(w, MoveTo(start_col as u16, bottom_row as u16))?;
+        queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
+        queue!(w, SetBackgroundColor(Color::Reset))?;
+        queue!(w, Print(format!("╰{}╯", "─".repeat(inner_w))))?;
+        queue!(w, ResetColor)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

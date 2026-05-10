@@ -15,14 +15,14 @@ use signal_hook::{consts::signal::SIGWINCH, iterator::Signals};
 
 use crate::{
     app::{
-        BlockAction, BlockKind, BlockStatus, InputAccumulator, RenderState, ViewAnchor, ViewKind,
-        ViewState,
+        BlockAction, BlockKind, BlockStatus, HelpState, InputAccumulator, RenderState, ViewAnchor,
+        ViewKind, ViewState,
     },
     block::BlockStore,
     buffer::ShellBuffer,
     compositor::Compositor,
     config::{Config, RuntimeConfig, build_runtime_config},
-    renderer,
+    renderer::{self, BLOCK_HELP_ENTRIES, DETAIL_HELP_ENTRIES},
     shell_hooks::{Osc777Parser, ParsedPtyPart, ShellHookEvent},
 };
 
@@ -651,7 +651,7 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
         ViewKind::Agent => Some(1),
         ViewKind::Blocks => match bytes {
             [b'?', ..] => {
-                state.view.help_return_view = Some(state.view.view.clone());
+                state.view.help = Some(HelpState::open(state.view.view.clone()));
                 state.view.view = ViewKind::Help;
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
@@ -671,7 +671,7 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
         },
         ViewKind::Detail => match bytes {
             [b'?', ..] => {
-                state.view.help_return_view = Some(state.view.view.clone());
+                state.view.help = Some(HelpState::open(state.view.view.clone()));
                 state.view.view = ViewKind::Help;
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
@@ -783,21 +783,88 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
             [_byte, ..] => Some(1),
             [] => None,
         },
-        ViewKind::Help => match bytes {
-            [b'\x1b', b'[', _, ..] => Some(3),
-            [b'\x1b', ..] if bytes.len() >= 2 => Some(bytes.len().min(3)),
-            [_, ..] => {
-                state.view.view = state
-                    .view
-                    .help_return_view
-                    .take()
-                    .unwrap_or(ViewKind::Blocks);
+        ViewKind::Help => {
+            let return_view = state
+                .view
+                .help
+                .as_ref()
+                .map(|h| h.return_view.clone())
+                .unwrap_or(ViewKind::Blocks);
+            let entries = match &return_view {
+                ViewKind::Detail => DETAIL_HELP_ENTRIES,
+                _ => BLOCK_HELP_ENTRIES,
+            };
+            let n = entries.len();
+
+            let ensure_scroll = |cursor: usize, scroll: usize, visible: usize| -> usize {
+                if cursor < scroll {
+                    cursor
+                } else if cursor >= scroll + visible && visible > 0 {
+                    cursor + 1 - visible
+                } else {
+                    scroll
+                }
+            };
+
+            let visible = n.min((state.rows as usize).saturating_sub(4));
+
+            let close_help = |state: &mut RuntimeState| {
+                let rv = state.view.help.take().map(|h| h.return_view).unwrap_or(ViewKind::Blocks);
+                state.view.view = rv;
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
-                Some(1)
+            };
+
+            match bytes {
+                [b'j', ..] | [b'\x1b', b'[', b'B', ..] => {
+                    if let Some(h) = &mut state.view.help {
+                        if h.cursor + 1 < n {
+                            h.cursor += 1;
+                            h.scroll = ensure_scroll(h.cursor, h.scroll, visible);
+                            state.render_state.dirty = true;
+                            state.render_state.force_render = true;
+                        }
+                    }
+                    Some(if bytes[0] == b'\x1b' { 3 } else { 1 })
+                }
+                [b'k', ..] | [b'\x1b', b'[', b'A', ..] => {
+                    if let Some(h) = &mut state.view.help {
+                        if h.cursor > 0 {
+                            h.cursor -= 1;
+                            h.scroll = ensure_scroll(h.cursor, h.scroll, visible);
+                            state.render_state.dirty = true;
+                            state.render_state.force_render = true;
+                        }
+                    }
+                    Some(if bytes[0] == b'\x1b' { 3 } else { 1 })
+                }
+                [b'g', ..] => {
+                    if let Some(h) = &mut state.view.help { h.cursor = 0; h.scroll = 0; }
+                    state.render_state.dirty = true;
+                    state.render_state.force_render = true;
+                    Some(1)
+                }
+                [b'G', ..] => {
+                    if let Some(h) = &mut state.view.help {
+                        h.cursor = n.saturating_sub(1);
+                        h.scroll = ensure_scroll(h.cursor, h.scroll, visible);
+                    }
+                    state.render_state.dirty = true;
+                    state.render_state.force_render = true;
+                    Some(1)
+                }
+                [b'q', ..] | [b'?', ..] | [b'\x1b'] => {
+                    close_help(&mut *state);
+                    Some(1)
+                }
+                [b'\x1b', ..] => Some(bytes.len().min(3)),
+                [_, ..] => {
+                    close_help(&mut *state);
+                    Some(1)
+                }
+                [] => None,
             }
-            [] => None,
-        },
+        }
     }
 }
 

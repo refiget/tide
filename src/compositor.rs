@@ -1,36 +1,12 @@
 use std::path::Path;
 
 use crate::{
-    app::{BlockId, BlockKind, CommandBlock, ViewAnchor, ViewKind, ViewState},
+    app::{BlockId, BlockKind, CommandBlock, FooterSegment, ViewAnchor, ViewKind, ViewState},
     block::{BlockStore, format_duration_ms},
     buffer::ShellBuffer,
     config::{BlockLayoutConfig, BlockViewConfig},
     format,
 };
-
-#[derive(Debug, Clone)]
-pub enum FooterSegment {
-    Label(String),
-    Key(String),
-    Sep,
-    Plain(String),
-    Spacer,
-}
-
-impl FooterSegment {
-    pub fn flatten(segments: &[FooterSegment]) -> String {
-        segments
-            .iter()
-            .map(|s| match s {
-                FooterSegment::Label(t) | FooterSegment::Key(t) | FooterSegment::Plain(t) => {
-                    t.as_str()
-                }
-                FooterSegment::Sep => " | ",
-                FooterSegment::Spacer => " ",
-            })
-            .collect()
-    }
-}
 
 #[derive(Debug, Clone)]
 pub enum VisualLine {
@@ -58,7 +34,7 @@ pub enum VisualLine {
         block_id: BlockId,
         text: String,
         selected: bool,
-        use_detail_border: bool, // true in Detail View: LAVENDER │, no bg highlight
+        in_detail_view: bool,
     },
     DetailTopBorder {
         #[allow(dead_code)]
@@ -81,8 +57,7 @@ pub enum VisualLine {
         block_id: BlockId,
         styled: crate::ansi::StyledText,
         plain_text: String,
-        selected: bool, // body bg highlight (false when expanded to show ANSI colors)
-        border_selected: bool, // border │ color tracks block selection regardless of ANSI mode
+        selected: bool,
     },
     Footer {
         segments: Vec<FooterSegment>,
@@ -179,7 +154,37 @@ impl Compositor {
                 flash_message,
                 home,
             ),
-            ViewKind::Help => Self::build_help_lines(_width, height, block_view),
+            ViewKind::Help => {
+                let mut unsel = view.clone();
+                unsel.selected_block = None;
+                let return_view = view.help.as_ref().map(|h| &h.return_view).unwrap_or(&ViewKind::Blocks);
+                match return_view {
+                    ViewKind::Blocks => {
+                        unsel.expanded_block = None;
+                        Self::build_block_lines(
+                            shell,
+                            blocks,
+                            &unsel,
+                            height,
+                            _width,
+                            block_view,
+                            flash_message,
+                            home,
+                        )
+                    }
+                    ViewKind::Detail => Self::build_detail_lines(
+                        shell,
+                        blocks,
+                        &unsel,
+                        _width,
+                        height,
+                        block_view,
+                        flash_message,
+                        home,
+                    ),
+                    _ => vec![],
+                }
+            }
             ViewKind::Agent => Vec::new(),
         }
     }
@@ -364,15 +369,13 @@ impl Compositor {
                 block_view.preview_lines.min(total)
             };
 
-            let body_selected = selected;
             for styled in styled_lines.into_iter().take(shown) {
                 let plain_text = crate::ansi::styled_to_plain(&styled);
                 lines.push(VisualLine::StyledBlockBodyLine {
                     block_id,
                     styled,
                     plain_text,
-                    selected: body_selected,
-                    border_selected: selected,
+                    selected,
                 });
             }
 
@@ -528,7 +531,11 @@ impl Compositor {
         let inner_height = height.saturating_sub(4).saturating_sub(meta_count);
         let short_mode = inner_height == 0 || total <= inner_height;
 
-        let cursor = view.detail_line_cursor.min(total.saturating_sub(1));
+        let cursor = if matches!(view.view, ViewKind::Help) {
+            usize::MAX // suppress cursor highlight when Help overlay is open
+        } else {
+            view.detail_line_cursor.min(total.saturating_sub(1))
+        };
         let line_offset = view.block_viewport.line_offset;
 
         let mut result: Vec<VisualLine> = Vec::with_capacity(height);
@@ -609,78 +616,6 @@ impl Compositor {
         // by block_id, width, view mode, expanded state, and config.
         Self::build_one_block_lines(shell_lines, block, view, block_view, selected, 0, None).len()
     }
-
-    fn build_help_lines(width: u16, height: u16, block_view: &BlockViewConfig) -> Vec<VisualLine> {
-        use FooterSegment::*;
-        let height = height as usize;
-        let width = width as usize;
-        let bw = width.saturating_sub(block_view.horizontal_margin.saturating_mul(2));
-        let inner_w = if bw >= 2 { bw - 2 } else { 0 };
-        let content_w = inner_w.saturating_sub(block_view.body_padding);
-
-        let help_texts: Vec<&str> = vec![
-            "",
-            "  Block View",
-            "  j / k       navigate blocks",
-            "  Enter       expand / collapse",
-            "  i           detail view",
-            "  g / G       jump to top / bottom",
-            "  /           search commands",
-            "  f           toggle failed filter",
-            "  y / Y       copy output / command",
-            "  r           rerun command",
-            "  q / Esc     return to shell",
-            "",
-            "  Detail View",
-            "  j / k       scroll output",
-            "  g / G       jump to top / bottom",
-            "  yc          copy command",
-            "  yo          copy output",
-            "  yb          copy block",
-            "  r           rerun command",
-            "  q / Esc     back to blocks",
-            "",
-        ];
-
-        let mut lines: Vec<VisualLine> = Vec::with_capacity(help_texts.len() + 3);
-        lines.push(VisualLine::DetailTopBorder {
-            block_id: BlockId(0),
-            label: "Keybindings".into(),
-        });
-        for text in help_texts {
-            let t = if text.is_empty() {
-                String::new()
-            } else {
-                format::truncate_str(text, content_w)
-            };
-            lines.push(VisualLine::BlockDetailLine {
-                block_id: BlockId(0),
-                text: t,
-                selected: false,
-                use_detail_border: true,
-            });
-        }
-        lines.push(VisualLine::DetailBottomBorder {
-            block_id: BlockId(0),
-            label: String::new(),
-        });
-        lines.push(VisualLine::Footer {
-            segments: vec![Plain("press any key to close".into())],
-        });
-
-        let total_content = lines.len();
-        if total_content < height {
-            let top_padding = (height.saturating_sub(total_content)) / 2;
-            let mut padded: Vec<VisualLine> =
-                std::iter::repeat_n(VisualLine::Empty, top_padding).collect();
-            padded.extend(lines);
-            while padded.len() < height {
-                padded.push(VisualLine::Empty);
-            }
-            lines = padded;
-        }
-        lines
-    }
 }
 
 fn get_block_styled_output_lines(block: &CommandBlock) -> Vec<crate::ansi::StyledText> {
@@ -728,7 +663,7 @@ fn detail_footer_segments(
     vec![left, Spacer, Label("Keybindings: ".into()), Key("?".into())]
 }
 
-fn detail_lines(block: &CommandBlock, selected: bool, use_detail_border: bool) -> Vec<VisualLine> {
+fn detail_lines(block: &CommandBlock, selected: bool, in_detail_view: bool) -> Vec<VisualLine> {
     let block_id = block.id;
     let exit = block
         .exit_code
@@ -774,7 +709,7 @@ fn detail_lines(block: &CommandBlock, selected: bool, use_detail_border: bool) -
             block_id,
             text,
             selected,
-            use_detail_border,
+            in_detail_view,
         })
         .collect()
 }
