@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     ansi::{StyledText, TextStyle, styled_width, truncate_styled_to_width},
-    app::FooterSegment,
+    app::{ConfirmKind, FooterSegment},
     app::{BlockStatus, ViewKind},
     compositor::VisualLine,
     config::{BlockLayoutConfig, BlockViewConfig},
@@ -44,8 +44,21 @@ impl BlockSelectionStyle {
             text_fg: CatppuccinFrappe::SUBTEXT1,
         }
     }
+    fn visual() -> Self {
+        Self {
+            border_fg: Theme::VISUAL_BORDER_FG,
+            body_bg: None,
+            text_fg: CatppuccinFrappe::SUBTEXT1,
+        }
+    }
     fn from_bool(selected: bool) -> Self {
-        if selected {
+        if selected { Self::selected() } else { Self::normal() }
+    }
+    fn from_state(selected: bool, in_visual: bool) -> Self {
+        if in_visual {
+            // Visual range wins over selection — cursor block gets same YELLOW as others.
+            Self::visual()
+        } else if selected {
             Self::selected()
         } else {
             Self::normal()
@@ -59,85 +72,35 @@ pub struct HelpEntry {
 }
 
 pub const BLOCK_HELP_ENTRIES: &[HelpEntry] = &[
-    HelpEntry {
-        key: "j / k",
-        desc: "navigate blocks",
-    },
-    HelpEntry {
-        key: "Enter",
-        desc: "expand / collapse",
-    },
-    HelpEntry {
-        key: "i",
-        desc: "detail view",
-    },
-    HelpEntry {
-        key: "g / G",
-        desc: "top / bottom",
-    },
-    HelpEntry {
-        key: "/",
-        desc: "search commands",
-    },
-    HelpEntry {
-        key: "f",
-        desc: "toggle failed filter",
-    },
-    HelpEntry {
-        key: "y",
-        desc: "copy output",
-    },
-    HelpEntry {
-        key: "Y",
-        desc: "copy command",
-    },
-    HelpEntry {
-        key: "r",
-        desc: "rerun command",
-    },
-    HelpEntry {
-        key: "?",
-        desc: "close help",
-    },
-    HelpEntry {
-        key: "q / Esc",
-        desc: "return to shell",
-    },
+    HelpEntry { key: "j / k", desc: "navigate blocks" },
+    HelpEntry { key: "Ctrl-u / Ctrl-d", desc: "scroll half screen" },
+    HelpEntry { key: "Ctrl-b / Ctrl-f", desc: "scroll full screen" },
+    HelpEntry { key: "g / G", desc: "top / bottom" },
+    HelpEntry { key: "Enter", desc: "expand / collapse" },
+    HelpEntry { key: "i", desc: "detail view" },
+    HelpEntry { key: "v", desc: "visual select mode" },
+    HelpEntry { key: "/", desc: "search commands" },
+    HelpEntry { key: "n / N", desc: "next / prev result" },
+    HelpEntry { key: "f", desc: "toggle failed filter" },
+    HelpEntry { key: "c", desc: "copy command" },
+    HelpEntry { key: "o", desc: "copy output" },
+    HelpEntry { key: "y", desc: "copy command + output" },
+    HelpEntry { key: "r", desc: "rerun command" },
+    HelpEntry { key: "d", desc: "delete block" },
+    HelpEntry { key: "?", desc: "close help" },
+    HelpEntry { key: "q / Esc", desc: "return to shell" },
 ];
 
 pub const DETAIL_HELP_ENTRIES: &[HelpEntry] = &[
-    HelpEntry {
-        key: "j / k",
-        desc: "scroll output",
-    },
-    HelpEntry {
-        key: "g / G",
-        desc: "top / bottom",
-    },
-    HelpEntry {
-        key: "yc",
-        desc: "copy command",
-    },
-    HelpEntry {
-        key: "yo",
-        desc: "copy output",
-    },
-    HelpEntry {
-        key: "yb",
-        desc: "copy block",
-    },
-    HelpEntry {
-        key: "r",
-        desc: "rerun command",
-    },
-    HelpEntry {
-        key: "?",
-        desc: "close help",
-    },
-    HelpEntry {
-        key: "q / Esc",
-        desc: "back to blocks",
-    },
+    HelpEntry { key: "j / k", desc: "scroll output" },
+    HelpEntry { key: "g / G", desc: "top / bottom" },
+    HelpEntry { key: "v / V", desc: "visual line select" },
+    HelpEntry { key: "c", desc: "copy command" },
+    HelpEntry { key: "o", desc: "copy output / selection" },
+    HelpEntry { key: "y", desc: "copy command + output" },
+    HelpEntry { key: "r", desc: "rerun command" },
+    HelpEntry { key: "?", desc: "close help" },
+    HelpEntry { key: "q / Esc", desc: "back to blocks" },
 ];
 
 /// Enter alternate screen and hide cursor for Block/Detail view rendering.
@@ -211,6 +174,10 @@ pub fn render<W: Write>(
         render_help_overlay(w, view, cols, rows)?;
     }
 
+    if view.confirm.is_some() {
+        render_confirm_overlay(w, view, cols, rows)?;
+    }
+
     w.flush()?;
     Ok(rendered)
 }
@@ -260,12 +227,13 @@ fn render_line<W: Write>(
             text,
             block_id,
             selected,
+            in_visual,
         } => {
             let _ = block_id;
             render_framed_text(
                 w,
                 text,
-                &BlockSelectionStyle::from_bool(*selected),
+                &BlockSelectionStyle::from_state(*selected, *in_visual),
                 width,
                 layout,
                 block_view,
@@ -274,13 +242,14 @@ fn render_line<W: Write>(
         VisualLine::BlockTopBorder {
             block_id,
             selected,
+            in_visual,
             label,
         } => {
             let _ = block_id;
             render_top_border(
                 w,
                 label,
-                &BlockSelectionStyle::from_bool(*selected),
+                &BlockSelectionStyle::from_state(*selected, *in_visual),
                 width,
                 block_view,
             )?;
@@ -288,13 +257,14 @@ fn render_line<W: Write>(
         VisualLine::BlockBottomBorder {
             block_id,
             selected,
+            in_visual,
             label,
         } => {
             let _ = block_id;
             render_border(
                 w,
                 label,
-                &BlockSelectionStyle::from_bool(*selected),
+                &BlockSelectionStyle::from_state(*selected, *in_visual),
                 false,
                 width,
                 block_view,
@@ -304,13 +274,14 @@ fn render_line<W: Write>(
             block_id,
             text,
             selected,
+            in_visual,
             in_detail_view,
         } => {
             let _ = block_id;
             render_block_detail_line(
                 w,
                 text,
-                &BlockSelectionStyle::from_bool(*selected),
+                &BlockSelectionStyle::from_state(*selected, *in_visual),
                 *in_detail_view,
                 width,
                 layout,
@@ -344,9 +315,10 @@ fn render_line<W: Write>(
             styled,
             plain_text,
             selected,
+            in_visual,
             ..
         } => {
-            let style = BlockSelectionStyle::from_bool(*selected);
+            let style = BlockSelectionStyle::from_state(*selected, *in_visual);
             render_styled_framed_text(
                 w,
                 styled,
@@ -362,9 +334,16 @@ fn render_line<W: Write>(
             styled,
             plain_text,
             is_cursor,
+            is_visual,
             ..
         } => {
-            let bg = is_cursor.then_some(Theme::CURSOR_BG);
+            let bg = if *is_cursor {
+                Some(Theme::CURSOR_BG)
+            } else if *is_visual {
+                Some(Theme::VISUAL_LINE_BG)
+            } else {
+                None
+            };
             render_styled_framed_text(
                 w,
                 styled,
@@ -923,6 +902,24 @@ fn titled_border(left: char, right: char, label: &str, width: usize) -> String {
     format!("{left}{label}{}{right}", "─".repeat(fill))
 }
 
+fn titled_border_centered(left: char, right: char, label: &str, width: usize) -> String {
+    if width < 2 {
+        return String::new();
+    }
+
+    let inner_width = width - 2;
+    let label_str = truncate_to_width(&format!(" {label} "), inner_width);
+    let label_w = UnicodeWidthStr::width(label_str.as_str());
+    let remaining = inner_width.saturating_sub(label_w);
+    let left_fill = remaining / 2;
+    let right_fill = remaining - left_fill;
+    format!(
+        "{left}{}{label_str}{}{right}",
+        "─".repeat(left_fill),
+        "─".repeat(right_fill)
+    )
+}
+
 fn pad_to_width(value: &str, width: usize) -> String {
     let value = truncate_to_width(value, width);
     let fill = width.saturating_sub(UnicodeWidthStr::width(value.as_str()));
@@ -964,7 +961,7 @@ fn render_help_overlay<W: Write>(
     queue!(w, MoveTo(start_col as u16, start_row as u16))?;
     queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
     queue!(w, SetBackgroundColor(Color::Reset))?;
-    queue!(w, Print(titled_border('╭', '╮', "Keybindings", box_w)))?;
+    queue!(w, Print(titled_border_centered('╭', '╮', "Keybindings", box_w)))?;
     queue!(w, ResetColor)?;
 
     // Entry rows
@@ -1040,6 +1037,135 @@ fn render_help_overlay<W: Write>(
         queue!(w, SetBackgroundColor(Color::Reset))?;
         queue!(w, Print(format!("╰{}╯", "─".repeat(inner_w))))?;
         queue!(w, ResetColor)?;
+    }
+
+    Ok(())
+}
+
+fn render_confirm_overlay<W: Write>(
+    w: &mut W,
+    view: &crate::app::ViewState,
+    cols: u16,
+    rows: u16,
+) -> io::Result<()> {
+    let confirm = match &view.confirm {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+
+    let message = match &confirm.kind {
+        ConfirmKind::DeleteBlock => format!(
+            "Delete block [{}]?",
+            confirm.block_ids.first().map(|id| id.0).unwrap_or(0)
+        ),
+        ConfirmKind::DeleteBlocks => format!("Delete [{}] blocks?", confirm.block_ids.len()),
+        ConfirmKind::RerunBlocks => format!("Rerun [{}] commands?", confirm.block_ids.len()),
+    };
+    let hint = "This cannot be undone.";
+
+    let box_w = 44_usize.min(cols as usize - 4).max(24);
+    let inner_w = box_w - 2;
+
+    // 6 rows: top border + message + hint + blank + divider + actions + bottom border
+    let box_h = 7_usize;
+    let start_col = ((cols as usize).saturating_sub(box_w)) / 2;
+    let start_row = ((rows as usize).saturating_sub(box_h)) / 2;
+
+    // Top border
+    queue!(w, MoveTo(start_col as u16, start_row as u16))?;
+    queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
+    queue!(w, SetBackgroundColor(Color::Reset))?;
+    queue!(w, Print(titled_border_centered('╭', '╮', "Confirm", box_w)))?;
+    queue!(w, ResetColor)?;
+
+    // Message row
+    {
+        let row = start_row + 1;
+        let text = truncate_to_width(&message, inner_w);
+        let fill = inner_w.saturating_sub(UnicodeWidthStr::width(text.as_str()));
+        queue!(w, MoveTo(start_col as u16, row as u16))?;
+        queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
+        queue!(w, SetBackgroundColor(Color::Reset))?;
+        queue!(w, Print("│"))?;
+        queue!(w, SetForegroundColor(CatppuccinFrappe::TEXT))?;
+        queue!(w, Print(format!(" {text}")))?;
+        queue!(w, Print(" ".repeat(fill.saturating_sub(1))))?;
+        queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
+        queue!(w, Print("│"))?;
+        queue!(w, ResetColor)?;
+    }
+
+    // Hint row
+    {
+        let row = start_row + 2;
+        let text = truncate_to_width(hint, inner_w);
+        let fill = inner_w.saturating_sub(UnicodeWidthStr::width(text.as_str()));
+        queue!(w, MoveTo(start_col as u16, row as u16))?;
+        queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
+        queue!(w, SetBackgroundColor(Color::Reset))?;
+        queue!(w, Print("│"))?;
+        queue!(w, SetForegroundColor(Theme::HELP_DIM_FG))?;
+        queue!(w, Print(format!(" {text}")))?;
+        queue!(w, Print(" ".repeat(fill.saturating_sub(1))))?;
+        queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
+        queue!(w, Print("│"))?;
+        queue!(w, ResetColor)?;
+    }
+
+    // Blank row
+    {
+        let row = start_row + 3;
+        queue!(w, MoveTo(start_col as u16, row as u16))?;
+        queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
+        queue!(w, SetBackgroundColor(Color::Reset))?;
+        queue!(w, Print(format!("│{}│", " ".repeat(inner_w))))?;
+        queue!(w, ResetColor)?;
+    }
+
+    // Divider
+    {
+        let row = start_row + 4;
+        queue!(w, MoveTo(start_col as u16, row as u16))?;
+        queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
+        queue!(w, SetBackgroundColor(Color::Reset))?;
+        queue!(w, Print(format!("├{}┤", "─".repeat(inner_w))))?;
+        queue!(w, ResetColor)?;
+    }
+
+    // Actions row
+    {
+        let row = start_row + 5;
+        let yes = "[Y]es";
+        let no = "(N)o";
+        let yes_w = UnicodeWidthStr::width(yes);
+        let no_w = UnicodeWidthStr::width(no);
+        let gap = inner_w.saturating_sub(yes_w + no_w + 2); // 1 space padding each side
+        queue!(w, MoveTo(start_col as u16, row as u16))?;
+        queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
+        queue!(w, SetBackgroundColor(Color::Reset))?;
+        queue!(w, Print("│"))?;
+        queue!(w, Print(" "))?;
+        queue!(w, SetForegroundColor(Theme::HELP_KEY_FG))?;
+        queue!(w, Print(yes))?;
+        queue!(w, Print(" ".repeat(gap)))?;
+        queue!(w, SetForegroundColor(Theme::HELP_DIM_FG))?;
+        queue!(w, Print(no))?;
+        queue!(w, Print(" "))?;
+        queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
+        queue!(w, Print("│"))?;
+        queue!(w, ResetColor)?;
+    }
+
+    // Bottom border
+    {
+        let row = start_row + 6;
+        if row < rows as usize {
+            queue!(w, MoveTo(start_col as u16, row as u16))?;
+            queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
+            queue!(w, SetBackgroundColor(Color::Reset))?;
+            queue!(w, Print(format!("╰{}╯", "─".repeat(inner_w))))?;
+            queue!(w, ResetColor)?;
+        }
     }
 
     Ok(())

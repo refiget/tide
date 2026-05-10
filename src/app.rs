@@ -116,6 +116,30 @@ impl BlockFilter {
     }
 }
 
+/// State for a confirmation dialog. Present only while the dialog is open.
+#[derive(Debug, Clone)]
+pub struct ConfirmState {
+    pub kind: ConfirmKind,
+    /// All block ids this action covers. Always at least one element.
+    pub block_ids: Vec<BlockId>,
+}
+
+impl ConfirmState {
+    pub fn single(kind: ConfirmKind, id: BlockId) -> Self {
+        Self { kind, block_ids: vec![id] }
+    }
+    pub fn multi(kind: ConfirmKind, ids: Vec<BlockId>) -> Self {
+        Self { kind, block_ids: ids }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmKind {
+    DeleteBlock,
+    DeleteBlocks,
+    RerunBlocks,
+}
+
 /// State for the Help overlay. Present only while the overlay is open.
 #[derive(Debug, Clone)]
 pub struct HelpState {
@@ -149,6 +173,12 @@ pub struct ViewState {
     pub search_buffer: Option<String>,
     /// Non-None while the Help overlay is open.
     pub help: Option<HelpState>,
+    /// Non-None while a confirmation dialog is open.
+    pub confirm: Option<ConfirmState>,
+    /// Anchor block for Block View visual selection (v mode). None = not in visual mode.
+    pub visual_anchor: Option<BlockId>,
+    /// Anchor line for Detail View visual selection (v mode). None = not in visual mode.
+    pub detail_visual_anchor: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +210,9 @@ impl Default for ViewState {
             visible: VisibleSource::default(),
             search_buffer: None,
             help: None,
+            confirm: None,
+            visual_anchor: None,
+            detail_visual_anchor: None,
         }
     }
 }

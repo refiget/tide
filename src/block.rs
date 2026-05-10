@@ -140,6 +140,11 @@ impl BlockStore {
         self.executions.get_mut(&id)
     }
 
+    pub fn remove(&mut self, id: BlockId) {
+        self.timeline.retain(|&b| b != id);
+        self.executions.remove(&id);
+    }
+
     pub fn set_cwd(&mut self, cwd: String) {
         self.current_cwd = PathBuf::from(cwd);
     }

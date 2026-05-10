@@ -15,8 +15,8 @@ use signal_hook::{consts::signal::SIGWINCH, iterator::Signals};
 
 use crate::{
     app::{
-        BlockAction, BlockKind, BlockStatus, HelpState, InputAccumulator, RenderState, ViewAnchor,
-        ViewKind, ViewState,
+        BlockAction, BlockId, BlockKind, BlockStatus, ConfirmKind, ConfirmState, HelpState,
+        InputAccumulator, RenderState, ViewAnchor, ViewKind, ViewState, VisibleSource,
     },
     block::BlockStore,
     buffer::ShellBuffer,
@@ -162,7 +162,10 @@ pub fn run_shell(config: &Config) -> Result<()> {
 
                     let should_render = output_state
                         .lock()
-                        .map(|state| !matches!(state.view.view, ViewKind::Plain))
+                        .map(|state| {
+                            !matches!(state.view.view, ViewKind::Plain | ViewKind::Help)
+                                && state.view.confirm.is_none()
+                        })
                         .unwrap_or(false);
                     if should_render && render_runtime(&output_state, &output_stdout).is_err() {
                         break;
@@ -175,7 +178,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
 
         let remaining = parser.flush_visible();
         if !remaining.is_empty() {
-            let view = if let Ok(mut state) = output_state.lock() {
+            let (view, has_overlay) = if let Ok(mut state) = output_state.lock() {
                 let active_block_id = state.blocks.active_block_id();
                 if active_block_id.is_some() && contains_alternate_screen_switch(&remaining) {
                     state.capture_suspended = true;
@@ -188,9 +191,11 @@ pub fn run_shell(config: &Config) -> Result<()> {
                 if !state.capture_suspended {
                     state.shell.append(&remaining, active_block_id);
                 }
-                state.view.view.clone()
+                let has_overlay = matches!(state.view.view, ViewKind::Help)
+                    || state.view.confirm.is_some();
+                (state.view.view.clone(), has_overlay)
             } else {
-                ViewKind::Plain
+                (ViewKind::Plain, false)
             };
 
             if matches!(view, ViewKind::Plain) {
@@ -198,7 +203,10 @@ pub fn run_shell(config: &Config) -> Result<()> {
                     let _ = stdout.write_all(&remaining);
                     let _ = stdout.flush();
                 }
-            } else {
+            } else if !has_overlay {
+                // Skip re-render when a static overlay (Help/Confirm) is showing —
+                // the overlay was drawn with force_render when opened; re-rendering
+                // from PTY output would cause visible flicker without adding value.
                 let _ = render_runtime(&output_state, &output_stdout);
             }
         }
@@ -493,6 +501,87 @@ fn perform_block_action(state: &mut RuntimeState, action: BlockAction) {
     }
 }
 
+/// Returns all BlockIds in the current visual range (anchor → cursor), in timeline order.
+/// When no visual mode is active, returns the single selected block (if any).
+fn visual_range_ids(state: &RuntimeState) -> Vec<BlockId> {
+    let ids = state.view.visible.ids(&state.blocks);
+    let cur_idx = state
+        .view
+        .block_viewport
+        .selected_index
+        .min(ids.len().saturating_sub(1));
+    match state.view.visual_anchor {
+        None => ids.get(cur_idx).copied().into_iter().collect(),
+        Some(anchor) => {
+            let anchor_idx = ids.iter().position(|&id| id == anchor).unwrap_or(cur_idx);
+            let lo = anchor_idx.min(cur_idx);
+            let hi = anchor_idx.max(cur_idx).min(ids.len().saturating_sub(1));
+            ids[lo..=hi].to_vec()
+        }
+    }
+}
+
+fn exit_visual_mode(state: &mut RuntimeState) {
+    state.view.visual_anchor = None;
+}
+
+enum CopyMode {
+    Command,
+    Output,
+    Both,
+}
+
+fn copy_blocks(state: &mut RuntimeState, mode: CopyMode) {
+    let ids = visual_range_ids(state);
+    if ids.is_empty() {
+        return;
+    }
+    let separator = "\n\n---\n\n";
+    let text: String = ids
+        .iter()
+        .filter_map(|&id| state.blocks.block(id))
+        .map(|b| match mode {
+            CopyMode::Command => b.command.clone(),
+            CopyMode::Output => b.output_text.clone(),
+            CopyMode::Both => format!("{}\n\n{}", b.command, b.output_text),
+        })
+        .collect::<Vec<_>>()
+        .join(separator);
+    let msg = match mode {
+        CopyMode::Command => "copied command",
+        CopyMode::Output => "copied output",
+        CopyMode::Both => "copied block",
+    };
+    if write_to_clipboard(&text) {
+        state.render_state.flash_message = Some((msg.to_string(), Instant::now()));
+        state.render_state.dirty = true;
+        state.render_state.force_render = true;
+    }
+    exit_visual_mode(state);
+}
+
+/// For Detail View: copy output respecting visual line selection.
+fn detail_copy_output(state: &RuntimeState) -> Option<String> {
+    let id = state.view.expanded_block?;
+    let block = state.blocks.block(id)?;
+    if let Some(anchor) = state.view.detail_visual_anchor {
+        let plain_lines: Vec<String> = crate::ansi::parse_ansi_lines(&block.output_raw)
+            .into_iter()
+            .map(|s| crate::ansi::styled_to_plain(&s))
+            .collect();
+        let total = plain_lines.len();
+        if total == 0 {
+            return Some(String::new());
+        }
+        let cursor = state.view.detail_line_cursor.min(total.saturating_sub(1));
+        let lo = anchor.min(cursor);
+        let hi = anchor.max(cursor).min(total.saturating_sub(1));
+        Some(plain_lines[lo..=hi].join("\n"))
+    } else {
+        Some(block.output_text.clone())
+    }
+}
+
 fn render_runtime(
     state: &Arc<Mutex<RuntimeState>>,
     stdout: &Arc<Mutex<io::Stdout>>,
@@ -650,6 +739,12 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
         ViewKind::RawProgram => None,
         ViewKind::Agent => Some(1),
         ViewKind::Blocks => match bytes {
+            // While a confirm dialog is open, all input goes through its handler.
+            _ if state.view.confirm.is_some() => {
+                let byte = bytes[0];
+                handle_block_view_byte(byte, &mut state);
+                Some(bytes.len().min(3))
+            }
             [b'?', ..] => {
                 state.view.help = Some(HelpState::open(state.view.view.clone()));
                 state.view.view = ViewKind::Help;
@@ -677,21 +772,55 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                 state.render_state.force_render = true;
                 Some(1)
             }
-            // Two-key copy sequences
-            [b'y', b'c', ..] => {
+            // Copy: single keys replace old yc/yo/yb sequences
+            [b'c', ..] => {
                 perform_block_action(&mut state, BlockAction::CopyCommand);
-                Some(2)
+                Some(1)
             }
-            [b'y', b'o', ..] => {
-                perform_block_action(&mut state, BlockAction::CopyOutput);
-                Some(2)
+            [b'o', ..] => {
+                // Copy output — respects visual line selection
+                let text = detail_copy_output(&state);
+                if let Some(text) = text {
+                    if write_to_clipboard(&text) {
+                        state.render_state.flash_message =
+                            Some(("copied output".to_string(), Instant::now()));
+                    }
+                }
+                state.view.detail_visual_anchor = None;
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+                Some(1)
             }
-            [b'y', b'b', ..] => {
-                perform_block_action(&mut state, BlockAction::CopyBlock);
-                Some(2)
+            [b'y', ..] => {
+                // Copy command + output (or command + visual selection)
+                let out = detail_copy_output(&state).unwrap_or_default();
+                let cmd = state
+                    .view
+                    .expanded_block
+                    .and_then(|id| state.blocks.block(id))
+                    .map(|b| b.command.clone())
+                    .unwrap_or_default();
+                let text = format!("{cmd}\n\n{out}");
+                if write_to_clipboard(&text) {
+                    state.render_state.flash_message =
+                        Some(("copied block".to_string(), Instant::now()));
+                }
+                state.view.detail_visual_anchor = None;
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+                Some(1)
             }
-            [b'y', ..] => Some(1),
-
+            // Visual line selection
+            [b'v', ..] | [b'V', ..] => {
+                if state.view.detail_visual_anchor.is_some() {
+                    state.view.detail_visual_anchor = None;
+                } else {
+                    state.view.detail_visual_anchor = Some(state.view.detail_line_cursor);
+                }
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+                Some(1)
+            }
             // Cursor movement + auto-scroll
             [b'j', ..] | [b'\x1b', b'[', b'B', ..] => {
                 let total = detail_output_line_count(&state);
@@ -708,11 +837,7 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                 }
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
-                Some(if bytes.len() >= 3 && bytes[0] == b'\x1b' {
-                    3
-                } else {
-                    1
-                })
+                Some(if bytes.len() >= 3 && bytes[0] == b'\x1b' { 3 } else { 1 })
             }
             [b'k', ..] | [b'\x1b', b'[', b'A', ..] => {
                 if state.view.detail_line_cursor > 0 {
@@ -723,13 +848,8 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                 }
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
-                Some(if bytes.len() >= 3 && bytes[0] == b'\x1b' {
-                    3
-                } else {
-                    1
-                })
+                Some(if bytes.len() >= 3 && bytes[0] == b'\x1b' { 3 } else { 1 })
             }
-
             // Jump to end
             [b'G', ..] => {
                 let total = detail_output_line_count(&state);
@@ -742,7 +862,6 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                 state.render_state.force_render = true;
                 Some(1)
             }
-
             // Jump to start
             [b'g', ..] => {
                 state.view.detail_line_cursor = 0;
@@ -751,7 +870,6 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                 state.render_state.force_render = true;
                 Some(1)
             }
-
             // Rerun
             [b'r', ..] => {
                 let command = state
@@ -767,12 +885,12 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                 }
                 Some(1)
             }
-
             // Return to Block View
             [b'q', ..] | [b'\x1b'] => {
                 state.view.view = ViewKind::Blocks;
                 state.view.expanded_block = None;
                 state.view.detail_line_cursor = 0;
+                state.view.detail_visual_anchor = None;
                 state.view.block_viewport.line_offset = 0;
                 ensure_selected_visible(&mut state);
                 state.render_state.dirty = true;
@@ -971,19 +1089,108 @@ fn handle_search_input(byte: u8, state: &mut RuntimeState) -> bool {
     true
 }
 
+fn execute_delete_blocks(state: &mut RuntimeState, block_ids: Vec<BlockId>) {
+    if block_ids.is_empty() {
+        return;
+    }
+
+    // Determine a neighbor outside the deleted range to land on after deletion.
+    // Use the block after the last deleted id, or before the first.
+    let last_id = *block_ids.last().unwrap();
+    let first_id = block_ids[0];
+    let next_sel = state
+        .blocks
+        .next_block(last_id)
+        .filter(|id| !block_ids.contains(id))
+        .or_else(|| {
+            state
+                .blocks
+                .prev_block(first_id)
+                .filter(|id| !block_ids.contains(id))
+        });
+
+    let id_set: std::collections::HashSet<BlockId> = block_ids.iter().copied().collect();
+
+    for &id in &block_ids {
+        state.blocks.remove(id);
+        // BlockIndex queries filter by executions.contains_key(), so no explicit index cleanup needed.
+    }
+
+    // Sync VisibleSource if a filter is active.
+    if let VisibleSource::Filtered(ref mut ids) = state.view.visible {
+        ids.retain(|id| !id_set.contains(id));
+    }
+
+    // Clear expanded state if it pointed at a deleted block.
+    if state.view.expanded_block.map_or(false, |id| id_set.contains(&id)) {
+        state.view.expanded_block = None;
+    }
+
+    state.view.selected_block = next_sel;
+    exit_visual_mode(state);
+    restore_or_clamp_selection(state);
+
+    state.render_state.dirty = true;
+    state.render_state.force_render = true;
+}
+
 fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
+    // Confirm dialog intercepts all input while open.
+    if state.view.confirm.is_some() {
+        match byte {
+            b'y' | b'Y' | b'\r' | b'\n' => {
+                if let Some(cs) = state.view.confirm.take() {
+                    match cs.kind {
+                        ConfirmKind::DeleteBlock | ConfirmKind::DeleteBlocks => {
+                            execute_delete_blocks(state, cs.block_ids);
+                        }
+                        ConfirmKind::RerunBlocks => {
+                            // Rerun the first command (sequential rerun is out of scope).
+                            if let Some(&first_id) = cs.block_ids.first() {
+                                let command = state
+                                    .blocks
+                                    .block(first_id)
+                                    .map(|b| b.command.clone())
+                                    .filter(|cmd| !cmd.is_empty());
+                                if let Some(cmd) = command {
+                                    exit_visual_mode(state);
+                                    state.view = ViewState::default();
+                                    state.input_accumulator.pending_block_delta = 0;
+                                    state.render_state.needs_cleanup = true;
+                                    state.render_state.pending_paste = Some(cmd);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                state.view.confirm = None;
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+            }
+        }
+        return true;
+    }
+
     if state.view.search_buffer.is_some() {
         return handle_search_input(byte, state);
     }
     match byte {
+        // Exit visual mode (first press) or exit Block View (when not in visual mode)
         b'q' | b'\x1b' => {
-            state.view = ViewState::default();
-            state.input_accumulator.pending_block_delta = 0;
-            // Defer to the alt-screen cleanup handler (not dirty/force_render,
-            // to avoid rendering Plain view on top of the restored main screen).
-            state.render_state.needs_cleanup = true;
+            if state.view.visual_anchor.is_some() {
+                exit_visual_mode(state);
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+            } else {
+                state.view = ViewState::default();
+                state.input_accumulator.pending_block_delta = 0;
+                state.render_state.needs_cleanup = true;
+            }
             true
         }
+        // Navigation
         b'j' => {
             accumulate_block_delta(state, 1);
             true
@@ -1006,47 +1213,126 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
             state.render_state.force_render = true;
             true
         }
+        // Scroll: Ctrl-u = half screen up, Ctrl-d = half screen down
+        b'\x15' => {
+            let half = (state.rows / 4).max(1) as isize;
+            accumulate_block_delta(state, -half);
+            true
+        }
+        b'\x04' => {
+            let half = (state.rows / 4).max(1) as isize;
+            accumulate_block_delta(state, half);
+            true
+        }
+        // Ctrl-b = full screen up, Ctrl-f = full screen down
+        b'\x02' => {
+            let full = (state.rows / 2).max(1) as isize;
+            accumulate_block_delta(state, -full);
+            true
+        }
+        b'\x06' => {
+            let full = (state.rows / 2).max(1) as isize;
+            accumulate_block_delta(state, full);
+            true
+        }
+        // Search result navigation (only meaningful when a filter is active)
+        b'n' => {
+            if state.view.filter.is_active() {
+                let len = state.view.visible.len(&state.blocks);
+                if len > 0 {
+                    let cur = state.view.block_viewport.selected_index.min(len - 1);
+                    let next = (cur + 1) % len;
+                    select_block_index(state, next, ViewAnchor::Manual);
+                    state.render_state.dirty = true;
+                    state.render_state.force_render = true;
+                }
+            }
+            true
+        }
+        b'N' => {
+            if state.view.filter.is_active() {
+                let len = state.view.visible.len(&state.blocks);
+                if len > 0 {
+                    let cur = state.view.block_viewport.selected_index.min(len - 1);
+                    let prev = if cur == 0 { len - 1 } else { cur - 1 };
+                    select_block_index(state, prev, ViewAnchor::Manual);
+                    state.render_state.dirty = true;
+                    state.render_state.force_render = true;
+                }
+            }
+            true
+        }
+        // Visual mode toggle
+        b'v' => {
+            if state.view.visual_anchor.is_some() {
+                exit_visual_mode(state);
+            } else {
+                state.view.visual_anchor = state.view.selected_block;
+            }
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+            true
+        }
+        // Expand / collapse
         b'\r' | b'\n' => {
             flush_navigation_delta(state);
             let selected = state.view.selected_block;
             if state.view.expanded_block == selected && selected.is_some() {
-                // Already expanded → collapse.
                 state.view.expanded_block = None;
             } else {
-                // Not expanded → expand.
                 state.view.expanded_block = selected;
             }
-            // Stay in Block View — no ViewKind change.
             ensure_selected_visible(state);
             state.render_state.dirty = true;
             state.render_state.force_render = true;
             true
         }
+        // Copy: c = command, o = output, y = both
+        b'c' => {
+            copy_blocks(state, CopyMode::Command);
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+            true
+        }
+        b'o' => {
+            copy_blocks(state, CopyMode::Output);
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+            true
+        }
         b'y' => {
-            perform_block_action(state, BlockAction::CopyOutput);
+            copy_blocks(state, CopyMode::Both);
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
             true
         }
-        b'Y' => {
-            perform_block_action(state, BlockAction::CopyCommand);
-            true
-        }
+        // Rerun: single block exits directly, multiple shows confirm
         b'r' => {
-            let command = state
-                .view
-                .selected_block
-                .and_then(|id| state.blocks.block(id))
-                .map(|b| b.command.clone())
-                .filter(|cmd| !cmd.is_empty());
-            if let Some(cmd) = command {
-                state.view = ViewState::default();
-                state.input_accumulator.pending_block_delta = 0;
-                state.render_state.needs_cleanup = true;
-                state.render_state.pending_paste = Some(cmd);
+            let ids = visual_range_ids(state);
+            if ids.len() > 1 {
+                state.view.confirm = Some(ConfirmState::multi(ConfirmKind::RerunBlocks, ids));
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+            } else {
+                let command = ids
+                    .first()
+                    .and_then(|&id| state.blocks.block(id))
+                    .map(|b| b.command.clone())
+                    .filter(|cmd| !cmd.is_empty());
+                if let Some(cmd) = command {
+                    exit_visual_mode(state);
+                    state.view = ViewState::default();
+                    state.input_accumulator.pending_block_delta = 0;
+                    state.render_state.needs_cleanup = true;
+                    state.render_state.pending_paste = Some(cmd);
+                }
             }
             true
         }
+        // Detail View
         b'i' => {
             if let Some(selected) = state.view.selected_block {
+                exit_visual_mode(state);
                 state.view.view = ViewKind::Detail;
                 state.view.expanded_block = Some(selected);
                 state.view.block_viewport.line_offset = 0;
@@ -1056,6 +1342,7 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
             }
             true
         }
+        // Filter
         b'f' => {
             state.view.filter.failed_only = !state.view.filter.failed_only;
             rebuild_visible(state);
@@ -1064,10 +1351,26 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
             state.render_state.force_render = true;
             true
         }
+        // Search
         b'/' => {
             state.view.search_buffer = Some(String::new());
             state.render_state.dirty = true;
             state.render_state.force_render = true;
+            true
+        }
+        // Delete: single or visual range
+        b'd' => {
+            let ids = visual_range_ids(state);
+            if !ids.is_empty() {
+                let kind = if ids.len() == 1 {
+                    ConfirmKind::DeleteBlock
+                } else {
+                    ConfirmKind::DeleteBlocks
+                };
+                state.view.confirm = Some(ConfirmState::multi(kind, ids));
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+            }
             true
         }
         _ => true,
@@ -1695,16 +1998,14 @@ mod tests {
     }
 
     #[test]
-    fn block_view_y_copies_output_to_clipboard() {
+    fn block_view_o_copies_output_to_clipboard() {
         let mut state = runtime_state();
         add_block(&mut state, "echo hello");
         enter_block_view(&mut state);
         state.render_state.dirty = false;
         state.render_state.force_render = false;
 
-        assert!(handle_block_view_byte(b'y', &mut state));
-        // Clipboard write may fail in headless CI, but flash_message should
-        // be set when clipboard succeeds, and the handler never panics.
+        assert!(handle_block_view_byte(b'o', &mut state));
         if write_to_clipboard("test") {
             let (msg, _) = state.render_state.flash_message.as_ref().unwrap();
             assert_eq!(msg, "copied output");
@@ -1712,15 +2013,28 @@ mod tests {
     }
 
     #[test]
-    fn block_view_y_upper_copies_command_to_clipboard() {
+    fn block_view_c_copies_command_to_clipboard() {
         let mut state = runtime_state();
         add_block(&mut state, "echo hello");
         enter_block_view(&mut state);
 
-        assert!(handle_block_view_byte(b'Y', &mut state));
+        assert!(handle_block_view_byte(b'c', &mut state));
         if write_to_clipboard("test") {
             let (msg, _) = state.render_state.flash_message.as_ref().unwrap();
             assert_eq!(msg, "copied command");
+        }
+    }
+
+    #[test]
+    fn block_view_y_copies_combined_to_clipboard() {
+        let mut state = runtime_state();
+        add_block(&mut state, "echo hello");
+        enter_block_view(&mut state);
+
+        assert!(handle_block_view_byte(b'y', &mut state));
+        if write_to_clipboard("test") {
+            let (msg, _) = state.render_state.flash_message.as_ref().unwrap();
+            assert_eq!(msg, "copied block");
         }
     }
 
@@ -1730,7 +2044,8 @@ mod tests {
         add_block(&mut state, "true");
         enter_block_view(&mut state);
 
-        // y on a block with no output should never panic.
+        // o/y on a block with no output should never panic.
+        assert!(handle_block_view_byte(b'o', &mut state));
         assert!(handle_block_view_byte(b'y', &mut state));
     }
 
@@ -1739,7 +2054,8 @@ mod tests {
         let mut state = runtime_state();
         enter_block_view(&mut state);
 
-        // y on empty block store should never panic.
+        // copy keys on empty block store should never panic.
+        assert!(handle_block_view_byte(b'o', &mut state));
         assert!(handle_block_view_byte(b'y', &mut state));
     }
 
@@ -1830,7 +2146,7 @@ mod tests {
     }
 
     #[test]
-    fn detail_yc_copies_command() {
+    fn detail_c_copies_command() {
         let state = Arc::new(Mutex::new(runtime_state()));
         {
             let mut s = state.lock().unwrap();
@@ -1840,7 +2156,7 @@ mod tests {
             s.view.expanded_block = s.view.selected_block;
         }
 
-        assert_eq!(handle_view_key_sequence(b"yc", &state), Some(2));
+        assert_eq!(handle_view_key_sequence(b"c", &state), Some(1));
         let s = state.lock().unwrap();
         assert!(matches!(s.view.view, ViewKind::Detail));
         if write_to_clipboard("test") {
@@ -1853,7 +2169,7 @@ mod tests {
     }
 
     #[test]
-    fn detail_yo_copies_output() {
+    fn detail_o_copies_output() {
         let state = Arc::new(Mutex::new(runtime_state()));
         {
             let mut s = state.lock().unwrap();
@@ -1863,7 +2179,7 @@ mod tests {
             s.view.expanded_block = s.view.selected_block;
         }
 
-        assert_eq!(handle_view_key_sequence(b"yo", &state), Some(2));
+        assert_eq!(handle_view_key_sequence(b"o", &state), Some(1));
         let s = state.lock().unwrap();
         assert!(matches!(s.view.view, ViewKind::Detail));
         if write_to_clipboard("test") {

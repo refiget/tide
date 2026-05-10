@@ -19,21 +19,25 @@ pub enum VisualLine {
         text: String,
         block_id: BlockId,
         selected: bool,
+        in_visual: bool,
     },
     BlockTopBorder {
         block_id: BlockId,
         selected: bool,
+        in_visual: bool,
         label: crate::format::TopLabel,
     },
     BlockBottomBorder {
         block_id: BlockId,
         selected: bool,
+        in_visual: bool,
         label: String,
     },
     BlockDetailLine {
         block_id: BlockId,
         text: String,
         selected: bool,
+        in_visual: bool,
         in_detail_view: bool,
     },
     DetailTopBorder {
@@ -52,12 +56,14 @@ pub enum VisualLine {
         styled: crate::ansi::StyledText,
         plain_text: String,
         is_cursor: bool,
+        is_visual: bool,
     },
     StyledBlockBodyLine {
         block_id: BlockId,
         styled: crate::ansi::StyledText,
         plain_text: String,
         selected: bool,
+        in_visual: bool,
     },
     Footer {
         segments: Vec<FooterSegment>,
@@ -228,17 +234,27 @@ impl Compositor {
         let mut lines = Vec::new();
         let mut spans = Vec::new();
 
+        // Compute visual selection range (block indices, inclusive) once before the loop.
+        let visual_range: Option<(usize, usize)> = view.visual_anchor.and_then(|anchor| {
+            let a_idx = view.visible.index_of(blocks, anchor)?;
+            let b_idx = view.visible.index_of(blocks, view.selected_block?)?;
+            Some((a_idx.min(b_idx), a_idx.max(b_idx)))
+        });
+
         for (block_index, block_id) in view.visible.ids(blocks).iter().copied().enumerate() {
             let Some(block) = blocks.block(block_id) else {
                 continue;
             };
             let start_line = lines.len();
+            let in_visual =
+                visual_range.map_or(false, |(lo, hi)| block_index >= lo && block_index <= hi);
             let block_lines = Self::build_one_block_lines(
                 &shell_lines,
                 block,
                 view,
                 block_view,
                 view.selected_block == Some(block_id),
+                in_visual,
                 width,
                 home,
             );
@@ -319,6 +335,7 @@ impl Compositor {
         view: &ViewState,
         block_view: &BlockViewConfig,
         selected: bool,
+        in_visual: bool,
         width: u16,
         home: Option<&Path>,
     ) -> Vec<VisualLine> {
@@ -332,6 +349,7 @@ impl Compositor {
         lines.push(VisualLine::BlockTopBorder {
             block_id,
             selected,
+            in_visual,
             label: format::build_top_label_parts(block, home, available_label_width),
         });
 
@@ -340,6 +358,7 @@ impl Compositor {
                 text: "interactive program; screen output was not captured".to_string(),
                 block_id,
                 selected,
+                in_visual,
             });
         } else if block.output_raw.is_empty() {
             // No raw output yet — render shell_lines as plain text
@@ -350,6 +369,7 @@ impl Compositor {
                     text: "no captured text output".to_string(),
                     block_id,
                     selected,
+                    in_visual,
                 });
             } else {
                 let body_end = block.end_line.min(shell_lines.len().saturating_sub(1));
@@ -359,6 +379,7 @@ impl Compositor {
                         text: line.text.clone(),
                         block_id,
                         selected,
+                        in_visual,
                     });
                 }
             }
@@ -380,6 +401,7 @@ impl Compositor {
                     styled,
                     plain_text,
                     selected,
+                    in_visual,
                 });
             }
 
@@ -394,17 +416,19 @@ impl Compositor {
                     text,
                     block_id,
                     selected,
+                    in_visual,
                 });
             }
         }
 
         if view.expanded_block == Some(block_id) {
-            lines.extend(detail_lines(block, selected, false));
+            lines.extend(detail_lines(block, selected, in_visual, false));
         }
 
         lines.push(VisualLine::BlockBottomBorder {
             block_id,
             selected,
+            in_visual,
             label: bottom_label(block),
         });
 
@@ -528,7 +552,7 @@ impl Compositor {
         let styled_output_lines = get_block_styled_output_lines(block);
         let total = styled_output_lines.len();
 
-        let meta_lines = detail_lines(block, false, true);
+        let meta_lines = detail_lines(block, false, false, true);
         let meta_count = meta_lines.len();
 
         // inner_height = rows - top_margin(1) - top_border(1) - meta_lines - bottom_border(1) - footer(1)
@@ -541,6 +565,17 @@ impl Compositor {
             view.detail_line_cursor.min(total.saturating_sub(1))
         };
         let line_offset = view.block_viewport.line_offset;
+
+        // Visual selection range for Detail View lines.
+        let visual_range: Option<(usize, usize)> =
+            if !matches!(view.view, ViewKind::Help) {
+                view.detail_visual_anchor.map(|anchor| {
+                    let real_cursor = view.detail_line_cursor.min(total.saturating_sub(1));
+                    (anchor.min(real_cursor), anchor.max(real_cursor))
+                })
+            } else {
+                None
+            };
 
         let mut result: Vec<VisualLine> = Vec::with_capacity(height);
 
@@ -564,11 +599,14 @@ impl Compositor {
         if short_mode {
             for (i, styled) in styled_output_lines.iter().enumerate() {
                 let plain_text = crate::ansi::styled_to_plain(styled);
+                let is_visual =
+                    visual_range.map_or(false, |(lo, hi)| i >= lo && i <= hi);
                 result.push(VisualLine::StyledDetailBodyLine {
                     styled: styled.clone(),
                     plain_text,
                     block_id,
                     is_cursor: i == cursor,
+                    is_visual,
                 });
             }
             result.extend(meta_lines);
@@ -586,11 +624,14 @@ impl Compositor {
             for (i, styled) in styled_output_lines[start..end].iter().enumerate() {
                 let abs = start + i;
                 let plain_text = crate::ansi::styled_to_plain(styled);
+                let is_visual =
+                    visual_range.map_or(false, |(lo, hi)| abs >= lo && abs <= hi);
                 result.push(VisualLine::StyledDetailBodyLine {
                     styled: styled.clone(),
                     plain_text,
                     block_id,
                     is_cursor: abs == cursor,
+                    is_visual,
                 });
             }
             result.extend(meta_lines);
@@ -618,7 +659,8 @@ impl Compositor {
         // Keep viewport math and rendered output on exactly the same code path.
         // If scrolling performance becomes an issue, cache visual heights keyed
         // by block_id, width, view mode, expanded state, and config.
-        Self::build_one_block_lines(shell_lines, block, view, block_view, selected, 0, None).len()
+        Self::build_one_block_lines(shell_lines, block, view, block_view, selected, false, 0, None)
+            .len()
     }
 }
 
@@ -667,7 +709,12 @@ fn detail_footer_segments(
     vec![left, Spacer, Label("Keybindings: ".into()), Key("?".into())]
 }
 
-fn detail_lines(block: &CommandBlock, selected: bool, in_detail_view: bool) -> Vec<VisualLine> {
+fn detail_lines(
+    block: &CommandBlock,
+    selected: bool,
+    in_visual: bool,
+    in_detail_view: bool,
+) -> Vec<VisualLine> {
     let block_id = block.id;
     let exit = block
         .exit_code
@@ -701,10 +748,10 @@ fn detail_lines(block: &CommandBlock, selected: bool, in_detail_view: bool) -> V
         lines.extend([
             "type: interactive program".to_string(),
             "capture: no linear text output was captured for this block.".to_string(),
-            "actions:  y copy output   Y copy command   r rerun".to_string(),
+            "actions:  c copy command   o copy output   y copy both   r rerun".to_string(),
         ]);
     } else {
-        lines.push("actions:  y copy output   Y copy command   r rerun".to_string());
+        lines.push("actions:  c copy command   o copy output   y copy both   r rerun".to_string());
     }
 
     lines
@@ -713,6 +760,7 @@ fn detail_lines(block: &CommandBlock, selected: bool, in_detail_view: bool) -> V
             block_id,
             text,
             selected,
+            in_visual,
             in_detail_view,
         })
         .collect()
@@ -1281,12 +1329,12 @@ mod tests {
         assert!(actions_line.is_some(), "detail should contain actions line");
         let actions = actions_line.unwrap();
         assert!(
-            actions.contains("y copy output"),
-            "actions should show y copy output, got: {actions}"
+            actions.contains("o copy output"),
+            "actions should show o copy output, got: {actions}"
         );
         assert!(
-            actions.contains("Y copy command"),
-            "actions should show Y copy command, got: {actions}"
+            actions.contains("c copy command"),
+            "actions should show c copy command, got: {actions}"
         );
     }
 

@@ -104,4 +104,6 @@ impl Theme {
     pub const HELP_SEL_BG: Color = CatppuccinFrappe::SURFACE1;
     pub const HELP_SEL_FG: Color = CatppuccinFrappe::TEXT;
     pub const HELP_DIM_FG: Color = CatppuccinFrappe::SUBTEXT0;
+    pub const VISUAL_BORDER_FG: Color = CatppuccinFrappe::YELLOW;
+    pub const VISUAL_LINE_BG: Color = CatppuccinFrappe::SURFACE1;
 }
