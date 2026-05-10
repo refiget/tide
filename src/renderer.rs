@@ -12,8 +12,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     ansi::{StyledText, TextStyle, styled_width, truncate_styled_to_width},
-    app::{BlockStatus, ViewKind},
     app::FooterSegment,
+    app::{BlockStatus, ViewKind},
     compositor::VisualLine,
     config::{BlockLayoutConfig, BlockViewConfig},
     theme::{CatppuccinFrappe, Theme},
@@ -45,7 +45,11 @@ impl BlockSelectionStyle {
         }
     }
     fn from_bool(selected: bool) -> Self {
-        if selected { Self::selected() } else { Self::normal() }
+        if selected {
+            Self::selected()
+        } else {
+            Self::normal()
+        }
     }
 }
 
@@ -258,7 +262,14 @@ fn render_line<W: Write>(
             selected,
         } => {
             let _ = block_id;
-            render_framed_text(w, text, &BlockSelectionStyle::from_bool(*selected), width, layout, block_view)?;
+            render_framed_text(
+                w,
+                text,
+                &BlockSelectionStyle::from_bool(*selected),
+                width,
+                layout,
+                block_view,
+            )?;
         }
         VisualLine::BlockTopBorder {
             block_id,
@@ -266,7 +277,13 @@ fn render_line<W: Write>(
             label,
         } => {
             let _ = block_id;
-            render_top_border(w, label, &BlockSelectionStyle::from_bool(*selected), width, block_view)?;
+            render_top_border(
+                w,
+                label,
+                &BlockSelectionStyle::from_bool(*selected),
+                width,
+                block_view,
+            )?;
         }
         VisualLine::BlockBottomBorder {
             block_id,
@@ -274,7 +291,14 @@ fn render_line<W: Write>(
             label,
         } => {
             let _ = block_id;
-            render_border(w, label, &BlockSelectionStyle::from_bool(*selected), false, width, block_view)?;
+            render_border(
+                w,
+                label,
+                &BlockSelectionStyle::from_bool(*selected),
+                false,
+                width,
+                block_view,
+            )?;
         }
         VisualLine::BlockDetailLine {
             block_id,
@@ -324,7 +348,14 @@ fn render_line<W: Write>(
         } => {
             let style = BlockSelectionStyle::from_bool(*selected);
             render_styled_framed_text(
-                w, styled, plain_text, style.body_bg, style.border_fg, width, layout, block_view,
+                w,
+                styled,
+                plain_text,
+                style.body_bg,
+                style.border_fg,
+                width,
+                layout,
+                block_view,
             )?;
         }
         VisualLine::StyledDetailBodyLine {
@@ -452,7 +483,11 @@ fn render_block_detail_line<W: Write>(
     block_view: &BlockViewConfig,
 ) -> io::Result<()> {
     // Detail View overrides border color and always has no bg
-    let border_fg = if in_detail_view { Theme::DETAIL_BORDER_FG } else { style.border_fg };
+    let border_fg = if in_detail_view {
+        Theme::DETAIL_BORDER_FG
+    } else {
+        style.border_fg
+    };
     let bg = if in_detail_view { None } else { style.body_bg };
 
     if text.is_empty() {
@@ -628,7 +663,11 @@ fn render_block_detail_line<W: Write>(
 
     let body = truncate_to_width(&format!("{pad_str}{text}"), inner_w);
     let fill = inner_w.saturating_sub(UnicodeWidthStr::width(body.as_str()));
-    let text_fg = if in_detail_view { Theme::FOOTER_FG } else { style.text_fg };
+    let text_fg = if in_detail_view {
+        Theme::FOOTER_FG
+    } else {
+        style.text_fg
+    };
 
     if let Some(bg) = bg {
         queue!(w, SetBackgroundColor(bg))?;
@@ -949,7 +988,11 @@ fn render_help_overlay<W: Write>(
         }
 
         let key_str = format!("  {:>9}  ", entry.key);
-        let key_fg = if is_sel { Theme::HELP_SEL_FG } else { Theme::HELP_KEY_FG };
+        let key_fg = if is_sel {
+            Theme::HELP_SEL_FG
+        } else {
+            Theme::HELP_KEY_FG
+        };
         queue!(w, SetForegroundColor(key_fg))?;
         queue!(w, Print(&key_str))?;
 

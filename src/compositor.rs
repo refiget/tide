@@ -157,7 +157,11 @@ impl Compositor {
             ViewKind::Help => {
                 let mut unsel = view.clone();
                 unsel.selected_block = None;
-                let return_view = view.help.as_ref().map(|h| &h.return_view).unwrap_or(&ViewKind::Blocks);
+                let return_view = view
+                    .help
+                    .as_ref()
+                    .map(|h| &h.return_view)
+                    .unwrap_or(&ViewKind::Blocks);
                 match return_view {
                     ViewKind::Blocks => {
                         unsel.expanded_block = None;
@@ -649,15 +653,15 @@ fn detail_footer_segments(
         return vec![Plain(msg.to_string())];
     }
 
-    let id = block.id;
+    let _id = block.id;
     let left = if total_lines > inner_height {
         let cursor_display = view
             .detail_line_cursor
             .saturating_add(1)
             .min(total_lines.max(1));
-        Plain(format!("#{id}  {cursor_display}/{total_lines}"))
+        Plain(format!("{cursor_display}/{total_lines}"))
     } else {
-        Plain(format!("#{id}"))
+        Plain(String::new())
     };
 
     vec![left, Spacer, Label("Keybindings: ".into()), Key("?".into())]

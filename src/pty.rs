@@ -809,7 +809,12 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
             let visible = n.min((state.rows as usize).saturating_sub(4));
 
             let close_help = |state: &mut RuntimeState| {
-                let rv = state.view.help.take().map(|h| h.return_view).unwrap_or(ViewKind::Blocks);
+                let rv = state
+                    .view
+                    .help
+                    .take()
+                    .map(|h| h.return_view)
+                    .unwrap_or(ViewKind::Blocks);
                 state.view.view = rv;
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
@@ -839,7 +844,10 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                     Some(if bytes[0] == b'\x1b' { 3 } else { 1 })
                 }
                 [b'g', ..] => {
-                    if let Some(h) = &mut state.view.help { h.cursor = 0; h.scroll = 0; }
+                    if let Some(h) = &mut state.view.help {
+                        h.cursor = 0;
+                        h.scroll = 0;
+                    }
                     state.render_state.dirty = true;
                     state.render_state.force_render = true;
                     Some(1)

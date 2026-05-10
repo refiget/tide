@@ -134,7 +134,7 @@ pub fn build_top_label_parts(
     home: Option<&Path>,
     available_width: usize,
 ) -> TopLabel {
-    let id_str = format!("#{}", block.id);
+    let id_str = format!("[{}]", block.id);
     let id_w = UnicodeWidthStr::width(id_str.as_str());
 
     let marker = match block.status {
@@ -438,7 +438,7 @@ mod tests {
             "/Users/bob/Projects/tide",
         );
         let label = build_top_label(&b, Some(&home()), 60);
-        assert!(label.contains("#42"));
+        assert!(label.contains("[42]"));
         assert!(label.contains("cargo test"));
         assert!(label.contains("~/Projects/tide"));
     }
@@ -462,7 +462,7 @@ mod tests {
             "/Users/bob/very-long-project/frontend",
         );
         let label = build_top_label(&b, Some(&home()), 16);
-        assert!(label.contains("#88"));
+        assert!(label.contains("[88]"));
         // At 16-width budget, cwd is dropped or heavily truncated
         assert!(UnicodeWidthStr::width(label.as_str()) <= 16);
     }
@@ -478,7 +478,7 @@ mod tests {
     fn build_top_label_id_only_when_extremely_narrow() {
         let b = make_block(42, "cargo test", BlockStatus::Failed, "/Users/bob");
         let label = build_top_label(&b, Some(&home()), 4);
-        assert_eq!(label, "#42");
+        assert_eq!(label, "[42]");
     }
 
     #[test]

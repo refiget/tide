@@ -127,7 +127,11 @@ pub struct HelpState {
 
 impl HelpState {
     pub fn open(return_view: ViewKind) -> Self {
-        Self { cursor: 0, scroll: 0, return_view }
+        Self {
+            cursor: 0,
+            scroll: 0,
+            return_view,
+        }
     }
 }
 
