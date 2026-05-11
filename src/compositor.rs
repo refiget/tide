@@ -359,7 +359,7 @@ impl Compositor {
                 .to_string(),
         });
 
-        if block.kind == BlockKind::RawProgram {
+        if matches!(block.kind, BlockKind::RawProgram | BlockKind::TuiSession) {
             lines.push(VisualLine::BlockBodyLine {
                 text: "interactive program; screen output was not captured".to_string(),
                 block_id,
@@ -678,7 +678,7 @@ impl Compositor {
 
 fn get_block_styled_output_lines(block: &CommandBlock) -> Vec<crate::ansi::StyledText> {
     use crate::ansi::StyledText;
-    if block.kind == BlockKind::RawProgram {
+    if matches!(block.kind, BlockKind::RawProgram | BlockKind::TuiSession) {
         return vec![StyledText::plain(
             "interactive program; screen output was not captured",
         )];
@@ -755,7 +755,7 @@ fn detail_lines(
         lines.push(String::new());
     }
 
-    if block.kind == BlockKind::RawProgram {
+    if matches!(block.kind, BlockKind::RawProgram | BlockKind::TuiSession) {
         lines.extend([
             "type: interactive program".to_string(),
             "capture: no linear text output was captured for this block.".to_string(),
@@ -789,7 +789,7 @@ fn format_ago(t: std::time::SystemTime) -> String {
 }
 
 fn bottom_label(block: &CommandBlock) -> String {
-    if block.kind == BlockKind::RawProgram {
+    if matches!(block.kind, BlockKind::RawProgram | BlockKind::TuiSession) {
         return format!("raw · {}", format_duration_ms(block.duration_ms));
     }
     let truncated = if block.output_truncated {

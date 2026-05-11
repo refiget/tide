@@ -1811,7 +1811,7 @@ fn detail_output_line_count(state: &RuntimeState) -> usize {
     let Some(block) = state.blocks.block(id) else {
         return 0;
     };
-    if block.kind == BlockKind::RawProgram {
+    if matches!(block.kind, BlockKind::RawProgram | BlockKind::TuiSession) {
         return 1;
     }
     if block.output_raw.is_empty() {
@@ -1832,7 +1832,7 @@ fn detail_meta_line_count(state: &RuntimeState) -> usize {
     if block.output_truncated {
         count += 2;
     }
-    if block.kind == BlockKind::RawProgram {
+    if matches!(block.kind, BlockKind::RawProgram | BlockKind::TuiSession) {
         count += 2;
     }
     count
