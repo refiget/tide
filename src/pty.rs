@@ -16,8 +16,8 @@ use signal_hook::{consts::signal::SIGWINCH, iterator::Signals};
 use crate::{
     app::{
         BlockAction, BlockId, BlockKind, BlockStatus, BlockViewAction, ConfirmKind, ConfirmState,
-        DetailViewAction, HelpState, InputAccumulator, RenderState, ViewAnchor, ViewKind,
-        ViewState, VisibleSource,
+        DEFAULT_TUI_COMMANDS, DetailViewAction, HelpState, InputAccumulator, RenderState,
+        TuiAppMatch, TuiAppMatchSource, ViewAnchor, ViewKind, ViewState, VisibleSource,
     },
     block::BlockStore,
     buffer::ShellBuffer,
@@ -39,6 +39,11 @@ struct RuntimeState {
     rows: u16,
     cols: u16,
     index: crate::index::BlockIndex,
+    /// Set during preexec when the command matches a known TUI app.
+    pending_tui_app: Option<TuiAppMatch>,
+    /// Set when alt-screen enter is detected for a known TUI app.
+    #[allow(dead_code)]
+    active_tui_session: Option<BlockId>,
 }
 
 const FRAME_DURATION: Duration = Duration::from_millis(16);
@@ -101,6 +106,8 @@ pub fn run_shell(config: &Config) -> Result<()> {
         rows,
         cols,
         index: crate::index::BlockIndex::new(),
+        pending_tui_app: None,
+        active_tui_session: None,
     }));
     let stdout = Arc::new(Mutex::new(io::stdout()));
     let debug_blocks = std::env::var_os("TIDE_DEBUG_BLOCKS").is_some();
@@ -128,14 +135,12 @@ pub fn run_shell(config: &Config) -> Result<()> {
                                     let active_block_id = state.blocks.active_block_id();
                                     if active_block_id.is_some()
                                         && contains_alternate_screen_switch(&visible)
-                                    {
-                                        state.capture_suspended = true;
-                                        if let Some(id) = active_block_id {
-                                            if let Some(block) = state.blocks.block_mut(id) {
-                                                block.kind = BlockKind::RawProgram;
-                                            }
+                                        {
+                                            handle_alt_screen_enter(
+                                                &mut state,
+                                                active_block_id.unwrap(),
+                                            );
                                         }
-                                    }
                                     if !state.capture_suspended {
                                         state.blocks.append_output(&visible);
                                         state.shell.append(&visible, active_block_id);
@@ -183,12 +188,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
             let (view, has_overlay) = if let Ok(mut state) = output_state.lock() {
                 let active_block_id = state.blocks.active_block_id();
                 if active_block_id.is_some() && contains_alternate_screen_switch(&remaining) {
-                    state.capture_suspended = true;
-                    if let Some(id) = active_block_id {
-                        if let Some(block) = state.blocks.block_mut(id) {
-                            block.kind = BlockKind::RawProgram;
-                        }
-                    }
+                    handle_alt_screen_enter(&mut state, active_block_id.unwrap());
                 }
                 if !state.capture_suspended {
                     state.shell.append(&remaining, active_block_id);
@@ -388,6 +388,115 @@ pub fn run_shell(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Extract the actual command name from a shell command line.
+///
+/// Handles common prefixes: sudo, doas, env, command, noglob, builtin, time,
+/// and `KEY=value` environment variable assignments.
+fn extract_command_name(command_line: &str) -> Option<String> {
+    let tokens: Vec<&str> = command_line.split_whitespace().collect();
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = tokens[i];
+        match token {
+            "sudo" | "doas" => {
+                i += 1;
+                while i < tokens.len() {
+                    let t = tokens[i];
+                    if !t.starts_with('-') {
+                        break;
+                    }
+                    i += 1;
+                    if t == "-u" && i < tokens.len() {
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            "command" | "noglob" | "builtin" | "time" | "/usr/bin/time" => {
+                i += 1;
+                continue;
+            }
+            "env" => {
+                i += 1;
+                while i < tokens.len() {
+                    let t = tokens[i];
+                    if t.contains('=') && !t.starts_with('-') {
+                        i += 1;
+                        continue;
+                    }
+                    if t.starts_with('-') {
+                        i += 1;
+                        if t == "-u" && i < tokens.len() {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    break;
+                }
+                continue;
+            }
+            _ if token.contains('=') && !token.starts_with('/') => {
+                // Handles: FOO=bar nvim
+                i += 1;
+                continue;
+            }
+            _ => {
+                return Some(basename_command(token));
+            }
+        }
+    }
+    None
+}
+
+fn basename_command(command: &str) -> String {
+    command.rsplit('/').next().unwrap_or(command).to_string()
+}
+
+/// Match a command name against known TUI apps.
+///
+/// Priority:
+/// 1. User-configured app in `tui_apps` (exact command match)
+/// 2. User `tui_extra_commands` list
+/// 3. Builtin default list (`DEFAULT_TUI_COMMANDS`)
+fn detect_tui_app(
+    command_line: &str,
+    extra_commands: &[String],
+    tui_apps: &std::collections::BTreeMap<String, crate::config::TuiAppConfig>,
+) -> Option<TuiAppMatch> {
+    let command_name = extract_command_name(command_line)?;
+
+    // 1. User app config exact match
+    for (app_name, app_cfg) in tui_apps {
+        if app_cfg.commands.iter().any(|c| c == &command_name) {
+            return Some(TuiAppMatch {
+                app_name: app_name.clone(),
+                command_name: command_name.clone(),
+                source: TuiAppMatchSource::UserConfig,
+            });
+        }
+    }
+
+    // 2. User extra_commands list
+    if extra_commands.iter().any(|c| c == &command_name) {
+        return Some(TuiAppMatch {
+            app_name: command_name.clone(),
+            command_name,
+            source: TuiAppMatchSource::UserConfig,
+        });
+    }
+
+    // 3. Builtin default list
+    if DEFAULT_TUI_COMMANDS.contains(&command_name.as_str()) {
+        return Some(TuiAppMatch {
+            app_name: command_name.clone(),
+            command_name,
+            source: TuiAppMatchSource::Builtin,
+        });
+    }
+
+    None
+}
+
 fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug_blocks: bool) {
     match event {
         ShellHookEvent::Preexec { command } => {
@@ -398,6 +507,14 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
                     .blocks
                     .start_command(command.clone(), start_line, BlockKind::NormalCommand);
             state.index.index_command(block_id, &command);
+
+            // Detect known TUI apps for later handoff / return panel.
+            state.pending_tui_app = detect_tui_app(
+                &command,
+                &state.config.tui_extra_commands,
+                &state.config.tui_apps,
+            );
+
             sync_block_viewport_after_history_change(state);
         }
         ShellHookEvent::Precmd { exit_code, cwd } => {
@@ -409,6 +526,10 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             let end_line = state.shell.line_count().saturating_sub(1);
             state.blocks.finish_command(exit_code, end_line);
             state.capture_suspended = false;
+            // Clear TUI state — the session has ended and precmd is the final
+            // lifecycle event for this command.
+            state.pending_tui_app = None;
+            state.active_tui_session = None;
             sync_block_viewport_after_history_change(state);
             if let Some(block_id) = active_id {
                 if let Some(block) = state.blocks.block(block_id) {
@@ -1761,6 +1882,19 @@ fn content_height(state: &RuntimeState) -> usize {
     (state.rows as usize).saturating_sub(usize::from(state.config.block_view.show_footer))
 }
 
+fn handle_alt_screen_enter(state: &mut RuntimeState, block_id: BlockId) {
+    state.capture_suspended = true;
+    let is_known_tui = state.pending_tui_app.is_some();
+    if let Some(block) = state.blocks.block_mut(block_id) {
+        if is_known_tui {
+            block.kind = BlockKind::TuiSession;
+            state.active_tui_session = Some(block_id);
+        } else {
+            block.kind = BlockKind::RawProgram;
+        }
+    }
+}
+
 fn contains_alternate_screen_switch(bytes: &[u8]) -> bool {
     bytes
         .windows(b"\x1b[?1049h".len())
@@ -1812,6 +1946,8 @@ mod tests {
             rows: 24,
             cols: 80,
             index: crate::index::BlockIndex::new(),
+            pending_tui_app: None,
+            active_tui_session: None,
         }
     }
 
@@ -2636,6 +2772,182 @@ mod tests {
         if write_to_clipboard("test") {
             assert!(s.render_state.flash_message.is_some());
         }
+    }
+
+    // ─── extract_command_name tests ──────────────────────────────────────
+
+    #[test]
+    fn extract_bare_command() {
+        assert_eq!(extract_command_name("vim main.rs"), Some("vim".into()));
+    }
+
+    #[test]
+    fn extract_sudo_prefix() {
+        assert_eq!(extract_command_name("sudo nvim"), Some("nvim".into()));
+    }
+
+    #[test]
+    fn extract_sudo_with_flag_arg() {
+        assert_eq!(
+            extract_command_name("sudo -u alice nvim"),
+            Some("nvim".into())
+        );
+    }
+
+    #[test]
+    fn extract_sudo_with_multiple_flags() {
+        assert_eq!(
+            extract_command_name("sudo -E -u alice nvim"),
+            Some("nvim".into())
+        );
+    }
+
+    #[test]
+    fn extract_sudo_flag_arg_before_command() {
+        assert_eq!(
+            extract_command_name("sudo -u alice -E nvim"),
+            Some("nvim".into())
+        );
+    }
+
+    #[test]
+    fn extract_doas_with_flag_arg() {
+        assert_eq!(
+            extract_command_name("doas -u bob nvim"),
+            Some("nvim".into())
+        );
+    }
+
+    #[test]
+    fn extract_env_key_value() {
+        assert_eq!(
+            extract_command_name("env FOO=bar nvim"),
+            Some("nvim".into())
+        );
+    }
+
+    #[test]
+    fn extract_env_unset_flag() {
+        assert_eq!(
+            extract_command_name("env -u HOME nvim"),
+            Some("nvim".into())
+        );
+    }
+
+    #[test]
+    fn extract_env_key_value_before_unset() {
+        assert_eq!(
+            extract_command_name("env FOO=bar -u HOME nvim"),
+            Some("nvim".into())
+        );
+    }
+
+    #[test]
+    fn extract_command_prefixes() {
+        assert_eq!(
+            extract_command_name("command nvim"),
+            Some("nvim".into())
+        );
+        assert_eq!(
+            extract_command_name("noglob nvim"),
+            Some("nvim".into())
+        );
+        assert_eq!(
+            extract_command_name("builtin echo"),
+            Some("echo".into())
+        );
+        assert_eq!(
+            extract_command_name("time nvim"),
+            Some("nvim".into())
+        );
+    }
+
+    #[test]
+    fn extract_empty_input() {
+        assert_eq!(extract_command_name(""), None);
+    }
+
+    #[test]
+    fn extract_only_prefixes() {
+        assert_eq!(extract_command_name("sudo"), None);
+    }
+
+    #[test]
+    fn extract_key_value_only() {
+        assert_eq!(extract_command_name("FOO=bar"), None);
+    }
+
+    #[test]
+    fn extract_basename_strips_path() {
+        assert_eq!(
+            extract_command_name("/usr/bin/nvim"),
+            Some("nvim".into())
+        );
+    }
+
+    // ─── detect_tui_app tests ────────────────────────────────────────────
+
+    fn empty_tui_apps() -> std::collections::BTreeMap<String, crate::config::TuiAppConfig> {
+        std::collections::BTreeMap::new()
+    }
+
+    #[test]
+    fn detect_non_tui_returns_none() {
+        assert!(detect_tui_app("ls", &[], &empty_tui_apps()).is_none());
+    }
+
+    #[test]
+    fn detect_default_tui_command() {
+        let result = detect_tui_app("lazygit", &[], &empty_tui_apps());
+        assert!(result.is_some());
+        assert_eq!(result.as_ref().unwrap().command_name, "lazygit");
+        assert_eq!(result.as_ref().unwrap().source, TuiAppMatchSource::Builtin);
+    }
+
+    #[test]
+    fn detect_sudo_default_tui() {
+        let result = detect_tui_app("sudo -u alice lazygit", &[], &empty_tui_apps());
+        assert!(result.is_some());
+        assert_eq!(result.as_ref().unwrap().command_name, "lazygit");
+    }
+
+    #[test]
+    fn detect_extra_commands() {
+        let result = detect_tui_app("myapp", &["myapp".into()], &empty_tui_apps());
+        assert!(result.is_some());
+        assert_eq!(result.as_ref().unwrap().command_name, "myapp");
+        assert_eq!(result.as_ref().unwrap().source, TuiAppMatchSource::UserConfig);
+    }
+
+    #[test]
+    fn detect_app_config_exact_match() {
+        let cfg = crate::config::TuiAppConfig {
+            commands: vec!["custom-tui".into()],
+            handoff: false,
+            snapshot: vec![],
+            after_exit: vec![],
+            return_panel: crate::config::ReturnPanelTarget::None,
+        };
+        let mut apps = std::collections::BTreeMap::new();
+        apps.insert("my-custom-app".into(), cfg);
+        let result = detect_tui_app("custom-tui", &[], &apps);
+        assert!(result.is_some());
+        assert_eq!(result.as_ref().unwrap().app_name, "my-custom-app");
+        assert_eq!(result.as_ref().unwrap().source, TuiAppMatchSource::UserConfig);
+    }
+
+    #[test]
+    fn detect_env_with_tui() {
+        let result = detect_tui_app("env FOO=bar nvim", &[], &empty_tui_apps());
+        assert!(result.is_some());
+        assert_eq!(result.as_ref().unwrap().command_name, "nvim");
+    }
+
+    #[test]
+    fn detect_env_unset_with_tui() {
+        let result = detect_tui_app("env -u HOME lazygit", &[], &empty_tui_apps());
+        assert!(result.is_some());
+        assert_eq!(result.as_ref().unwrap().command_name, "lazygit");
     }
 }
 

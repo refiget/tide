@@ -519,6 +519,69 @@ pub enum FooterSegment {
     Spacer,
 }
 
+// ─── TUI App Detection ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct TuiAppMatch {
+    pub app_name: String,
+    pub command_name: String,
+    pub source: TuiAppMatchSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiAppMatchSource {
+    Builtin,
+    UserConfig,
+}
+
+/// Default list of well-known TUI / full-screen programs.
+/// These are commands that enter alternate screen or take over the terminal.
+pub const DEFAULT_TUI_COMMANDS: &[&str] = &[
+    // editors
+    "vim",
+    "vi",
+    "nvim",
+    "nano",
+    "emacs",
+    "hx",
+    "micro",
+    // git / dev TUI
+    "lazygit",
+    "tig",
+    "gitui",
+    "gh-dash",
+    // file managers
+    "ranger",
+    "lf",
+    "nnn",
+    "yazi",
+    "vifm",
+    "mc",
+    // fuzzy finders
+    "fzf",
+    "sk",
+    "peco",
+    // pagers / docs
+    "less",
+    "more",
+    "most",
+    "man",
+    "info",
+    // monitors
+    "htop",
+    "btop",
+    "btm",
+    "glances",
+    // multiplexers
+    "tmux",
+    "screen",
+    "zellij",
+    // infra TUIs
+    "lazydocker",
+    "k9s",
+    "ctop",
+];
+
 impl FooterSegment {
     pub fn flatten(segments: &[FooterSegment]) -> String {
         segments

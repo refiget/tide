@@ -31,6 +31,8 @@ pub struct Config {
     #[serde(default)]
     pub tui_apps: BTreeMap<String, TuiAppConfig>,
     #[serde(default)]
+    pub tui: TuiConfig,
+    #[serde(default)]
     pub keymap: KeymapConfig,
 }
 
@@ -87,6 +89,7 @@ impl Default for Config {
             block_layout: BlockLayoutConfig::default(),
             raw_programs: Vec::new(),
             tui_apps: BTreeMap::new(),
+            tui: TuiConfig::default(),
             keymap: KeymapConfig::default(),
         }
     }
@@ -107,6 +110,10 @@ pub struct RuntimeConfig {
     pub max_blocks: Option<usize>,
     pub resolved_block_keymap: HashMap<u8, BlockViewAction>,
     pub resolved_detail_keymap: HashMap<u8, DetailViewAction>,
+    /// Extra TUI commands from user config (merged with builtins).
+    pub tui_extra_commands: Vec<String>,
+    /// Per-app TUI configuration from `[tui.apps]` or `[tui_apps]`.
+    pub tui_apps: BTreeMap<String, TuiAppConfig>,
 }
 
 fn deserialize_block_action(s: &str) -> Option<BlockViewAction> {
@@ -245,12 +252,20 @@ pub fn build_runtime_config(config: Config) -> RuntimeConfig {
         .max_blocks
         .or_else(|| Some(config.blocks.max_blocks));
 
+    // Merge legacy `tui_apps` top-level section with `[tui.apps]` (latter wins).
+    let mut merged_apps = config.tui_apps;
+    for (name, app) in config.tui.apps {
+        merged_apps.insert(name, app);
+    }
+
     RuntimeConfig {
         block_layout: config.block_layout,
         block_view: config.block_view,
         max_blocks,
         resolved_block_keymap: build_resolved_block_keymap(&config.keymap.blocks),
         resolved_detail_keymap: build_resolved_detail_keymap(&config.keymap.detail),
+        tui_extra_commands: config.tui.extra_commands,
+        tui_apps: merged_apps,
     }
 }
 
@@ -408,8 +423,26 @@ pub struct TuiAppConfig {
     pub snapshot: Vec<String>,
     #[serde(default)]
     pub after_exit: Vec<String>,
-    #[serde(default = "default_return_panel")]
-    pub return_panel: String,
+    #[serde(default)]
+    pub return_panel: ReturnPanelTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReturnPanelTarget {
+    #[default]
+    None,
+    Plain,
+    Blocks,
+    Detail,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TuiConfig {
+    #[serde(default)]
+    pub extra_commands: Vec<String>,
+    #[serde(default)]
+    pub apps: BTreeMap<String, TuiAppConfig>,
 }
 
 fn default_shell_program() -> String {
@@ -490,10 +523,6 @@ fn default_show_padding_in_plain() -> bool {
 
 fn default_strip_ansi_for_text() -> bool {
     true
-}
-
-fn default_return_panel() -> String {
-    "none".to_string()
 }
 
 #[cfg(test)]
