@@ -39,17 +39,17 @@ Before committing terminal behavior changes:
 cargo fmt --check && cargo check && cargo test
 ```
 
-## Test Locations (~126 tests)
+## Test Locations (~145 tests)
 
 | Module | Count | What's tested |
 |--------|-------|---------------|
 | `ansi.rs` | 14 | SGR parsing, 256-color, truecolor, OSC/CSI ignoring, multiline, \r/\r\n, truncation |
-| `pty.rs` | 25 | View transitions, force-render flags, viewport clamping, boundary navigation, Detail scroll, clipboard copy, live search, CopyFormat |
-| `compositor.rs` | 22 | Visual layout, viewport math, anchors (Top/Tail/Manual), span invariants, footer, Detail layout, flash messages |
+| `pty.rs` | 36 | View transitions, force-render flags, viewport clamping, boundary navigation, Detail scroll, clipboard copy, live search, CopyFormat, delete flow, rerun flow, keymap dispatch |
+| `compositor.rs` | 27 | Visual layout, viewport math, anchors (Top/Tail/Manual), span invariants, footer, Detail layout, flash messages, block_gap |
 | `block.rs` | 4 | Retention cap, prev/next navigation, unbounded history, output truncation flag |
 | `shell_hooks.rs` | 8 | OSC 777 marker stripping, split-event handling, normal output passthrough, hex decoding |
 | `renderer.rs` | 5 | Framed text width with wide/unicode chars, titled border width, search highlight spans |
-| `config.rs` | 4 | Runtime config defaults, legacy field handling, CopyFormat deserialization |
+| `config.rs` | 7 | Runtime config defaults, legacy field handling, CopyFormat deserialization, keymap defaults, user override, unknown action ignored |
 | `format.rs` | 43 | compact_command, compact_cwd, build_top_label, CopyFormat (plaintext/markdown/transcript/json, multi-record) |
 | `index.rs` | 1 | Token inverted index query (substring + AND semantics) |
 
@@ -106,13 +106,13 @@ Changes to Help appearance touch: `render_help_overlay` + `BLOCK_HELP_ENTRIES` /
 | Module | Responsibility |
 |--------|---------------|
 | `main.rs` | Entry point — loads config, starts PTY session |
-| `app.rs` | Types: `BlockId`, `ViewKind`, `InputMode`, `ViewState`, `HelpState`, `BlockViewport`, `ViewAnchor`, `VisibleSource`, `BlockFilter`, `FooterSegment`, `CommandBlock/ExecutionBlock`, `InputAccumulator`, `RenderState`, `BlockKind`, `BlockStatus`, `BlockAction`, `AppEvent` |
-| `pty.rs` | PTY session, 3-thread runtime (output reader, input reader, resize handler), `Osc777Parser` integration, frame-limited render loop, keyboard dispatch, navigation, `TerminalGuard` |
+| `app.rs` | Types: `BlockId`, `ViewKind`, `InputMode`, `ViewState`, `HelpState`, `BlockViewport`, `ViewAnchor`, `VisibleSource`, `BlockFilter`, `FooterSegment`, `CommandBlock/ExecutionBlock`, `InputAccumulator`, `RenderState`, `BlockKind`, `BlockStatus`, `BlockAction`, `BlockViewAction`, `DetailViewAction`, `AppEvent` |
+| `pty.rs` | PTY session, 3-thread runtime (output reader, input reader, resize handler), `Osc777Parser` integration, frame-limited render loop, keyboard dispatch via `execute_block_view_action`/`execute_detail_view_action`, navigation, `TerminalGuard` |
 | `block.rs` | `BlockStore` — `Vec<BlockId>` timeline + `HashMap<BlockId, CommandBlock>` lookup, retention cap, output byte cap |
 | `buffer.rs` | `ShellBuffer` — text storage with ANSI escape handling (CSI cursor/erase, OSC strings, CR, backspace, tab) |
 | `compositor.rs` | `Compositor` + `VisualLine` enum (Empty, ShellText, BlockBodyLine, StyledBlockBodyLine, BlockTopBorder, BlockBottomBorder, BlockDetailLine, DetailTopBorder, DetailBottomBorder, StyledDetailBodyLine, Footer) — builds `VisualLayout` from `ShellBuffer + BlockStore + ViewState`; viewport math; Detail View pager |
 | `renderer.rs` | Terminal drawing via crossterm — `BlockSelectionStyle` (centralised selection palette), border chars, framed text, styled span rendering, Help overlay, theme-aware colors, footer, cursor, `truncate_to_width` |
-| `config.rs` | TOML config loading (local > XDG > legacy > defaults), `BlockViewConfig`, `BlockLayoutConfig`, `RuntimeConfig`; `.default()` for all configs |
+| `config.rs` | TOML config loading (local > XDG > legacy > defaults), `BlockViewConfig`, `BlockLayoutConfig`, `KeymapConfig`, `RuntimeConfig`; `.default()` for all configs; keymap resolution (defaults overlaid by user TOML) |
 | `format.rs` | `compact_command()`, `compact_cwd()`, `build_top_label()` — ANSI stripping, whitespace normalization, unicode-aware truncation, top border label formatting |
 | `index.rs` | `BlockIndex` — `failed: Vec<BlockId>` index + `tokens: HashMap<String, Vec<BlockId>>` inverted index for command search |
 | `ansi.rs` | `parse_ansi_lines()` — parses raw PTY bytes into `Vec<StyledText>` with per-span `TextStyle` (fg/bg/bold/italic/underline/reverse), handles SGR/OSC/CSI |
@@ -163,10 +163,23 @@ All state: `Arc<Mutex<RuntimeState>>`. Lock ordering: output thread locks `(stat
 - `Blocks` → `q`/`Esc` → `Plain` (reset to default ViewState, force render)
 - `Detail` → `j`/`k` → move cursor line (auto-scrolls)
 - `Detail` → `g`/`G` → jump to top/bottom
-- `Detail` → `yc`/`yo`/`yb` → copy command/output/block
+- `Detail` → `c`/`o`/`y` → copy command/output/both
 - `Detail` → `r` → rerun (exit to Plain, paste command to PTY)
 - `Detail` → bare `\x1b` or `q` → `Blocks` (force render); multi-byte escape sequences (arrow keys etc.) are consumed without triggering exit
 - `Detail` → `?` → `Help` overlay (underlying Detail view rendered behind; same navigation as Blocks Help)
+
+## Keymap System
+
+Single-byte keys in Block View and Detail View are dispatched through a resolved `HashMap<u8, BlockViewAction>` / `HashMap<u8, DetailViewAction>` stored in `RuntimeConfig`. Multi-byte sequences (arrow keys, Ctrl-chords) remain hardcoded in `handle_view_key_sequence`.
+
+**Resolution:** `default_block_keymap()` / `default_detail_keymap()` (in `config.rs`) provide defaults; user overrides in `[keymap.blocks]` / `[keymap.detail]` TOML sections are layered on top via `build_resolved_block_keymap()`. Format: `action_name = "char"` (e.g. `nav_down = "j"`).
+
+**Adding a new remappable action:**
+1. Add variant to `BlockViewAction` or `DetailViewAction` in `app.rs`
+2. Add default binding in `default_block_keymap()` / `default_detail_keymap()` in `config.rs`
+3. Add match arm in `execute_block_view_action()` / `execute_detail_view_action()` in `pty.rs`
+
+**Not remappable:** confirm dialog keys (y/n/Enter/Esc), search input characters, Help overlay navigation (j/k/g/G), Ctrl-B (enter Block View from Plain).
 
 ## Config Search Order
 

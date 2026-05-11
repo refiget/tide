@@ -17,7 +17,7 @@ Tide is **not** a terminal emulator, zsh replacement, scrollback scraper, or AI-
 | Build | `cargo build` |
 | Run | `cargo run` |
 | Type-check | `cargo check` |
-| Test all (~126 across 9 modules) | `cargo test` |
+| Test all (~145 across 9 modules) | `cargo test` |
 | Test module | `cargo test -- compositor` |
 | Single test | `cargo test tail_offset_is_zero` |
 | Format check | `cargo fmt --check` |
@@ -41,12 +41,13 @@ All 12 modules declared in `main.rs` — no `mod.rs`/`lib.rs`. `app.rs` and `con
 | `buffer.rs` | `ShellBuffer` — text storage, ANSI escape handling |
 | `compositor.rs` | `ShellBuffer + BlockStore + ViewState` → `VisualLayout`; viewport math, Detail pager |
 | `renderer.rs` | Crossterm drawing — borders, styled spans, Help overlay, `BlockSelectionStyle` |
-| `config.rs` | TOML config loading, `BlockViewConfig`, `BlockLayoutConfig` |
+| `config.rs` | TOML config loading, `BlockViewConfig`, `BlockLayoutConfig`, `KeymapConfig`, keymap resolution |
 | `format.rs` | `compact_command()`, `compact_cwd()`, `build_top_label()`, `CopyFormat`/`CopyPart`/`format_blocks()` |
 | `index.rs` | Token inverted index for command search (substring, AND) |
 | `ansi.rs` | `parse_ansi_lines()` — raw bytes → `StyledText` spans |
 | `theme.rs` | Catppuccin Frappe color constants |
 | `shell_hooks.rs` | `Osc777Parser` — strips OSC 777 markers, emits `ShellHookEvent` |
+| `app.rs` | `BlockViewAction` (22 variants) / `DetailViewAction` (15 variants) — remappable key action enums |
 
 ## Hard Rules
 
