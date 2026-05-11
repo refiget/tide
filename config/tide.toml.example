@@ -71,3 +71,43 @@ return_panel = "none"
 commands = ["less"]
 handoff = true
 return_panel = "none"
+
+# Key bindings — single-byte keys only. Multi-byte sequences (arrows, Ctrl-chords)
+# stay hardcoded. Action name is the key, value is the character string.
+# Uncomment and change to remap:
+# [keymap.blocks]
+# nav_down = "j"   # default
+# nav_up = "k"     # default
+# nav_bottom = "G" # default
+# nav_top = "g"    # default
+# scroll_half_up = "ë"        # Ctrl-U
+# scroll_half_down = "ä"      # Ctrl-D
+# scroll_full_up = "â"        # Ctrl-B
+# scroll_full_down = "æ"      # Ctrl-F
+# expand = "ï"                # Enter
+# detail_view = "i"  # default
+# toggle_failed_filter = "f"  # default
+# open_search = "/"  # default
+# copy_command = "c" # default
+# copy_output = "o"  # default
+# copy_both = "y"    # default
+# rerun = "r"        # default
+# delete = "d"       # default
+# visual_mode = "v"  # default
+# search_next = "n"  # default
+# search_prev = "N"  # default
+# help = "?"         # default
+# quit = "q"         # default
+
+# [keymap.detail]
+# nav_down = "j"   # default
+# nav_up = "k"     # default
+# nav_bottom = "G" # default
+# nav_top = "g"    # default
+# copy_command = "c" # default
+# copy_output = "o"  # default
+# copy_both = "y"    # default
+# rerun = "r"        # default
+# visual_mode = "v"  # default
+# help = "?"         # default
+# quit = "q"         # default

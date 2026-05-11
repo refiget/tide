@@ -15,8 +15,9 @@ use signal_hook::{consts::signal::SIGWINCH, iterator::Signals};
 
 use crate::{
     app::{
-        BlockAction, BlockId, BlockKind, BlockStatus, ConfirmKind, ConfirmState, HelpState,
-        InputAccumulator, RenderState, ViewAnchor, ViewKind, ViewState, VisibleSource,
+        BlockAction, BlockId, BlockKind, BlockStatus, BlockViewAction, ConfirmKind, ConfirmState,
+        DetailViewAction, HelpState, InputAccumulator, RenderState, ViewAnchor, ViewKind,
+        ViewState, VisibleSource,
     },
     block::BlockStore,
     buffer::ShellBuffer,
@@ -772,13 +773,6 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                 handle_block_view_byte(byte, &mut state);
                 Some(bytes.len().min(3))
             }
-            [b'?', ..] => {
-                state.view.help = Some(HelpState::open(state.view.view.clone()));
-                state.view.view = ViewKind::Help;
-                state.render_state.dirty = true;
-                state.render_state.force_render = true;
-                Some(1)
-            }
             [b'\x1b', b'[', b'B', ..] => {
                 accumulate_block_delta(&mut state, 1);
                 Some(3)
@@ -792,159 +786,24 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
             [] => None,
         },
         ViewKind::Detail => match bytes {
-            [b'?', ..] => {
-                state.view.help = Some(HelpState::open(state.view.view.clone()));
-                state.view.view = ViewKind::Help;
-                state.render_state.dirty = true;
-                state.render_state.force_render = true;
-                Some(1)
+            // Multi-byte escape sequences — hardcoded (not remappable)
+            [b'\x1b', b'[', b'B', ..] => {
+                execute_detail_view_action(DetailViewAction::NavDown, &mut state);
+                Some(3)
             }
-            // Copy: single keys replace old yc/yo/yb sequences
-            [b'c', ..] => {
-                perform_block_action(&mut state, BlockAction::CopyCommand);
-                Some(1)
+            [b'\x1b', b'[', b'A', ..] => {
+                execute_detail_view_action(DetailViewAction::NavUp, &mut state);
+                Some(3)
             }
-            [b'o', ..] => {
-                // Copy output — respects visual line selection
-                let fmt = state.config.block_view.copy_format;
-                let text = detail_copy_output(&state);
-                if let Some(text) = text {
-                    if write_to_clipboard(&text) {
-                        state.render_state.flash_message =
-                            Some((copy_flash(1, CopyPart::Output, fmt), Instant::now()));
-                    }
-                }
-                state.view.detail_visual_anchor = None;
-                state.render_state.dirty = true;
-                state.render_state.force_render = true;
-                Some(1)
-            }
-            [b'y', ..] => {
-                // Copy command + output (or command + visual selection)
-                let fmt = state.config.block_view.copy_format;
-                let out = detail_copy_output(&state).unwrap_or_default();
-                let cmd = state
-                    .view
-                    .expanded_block
-                    .and_then(|id| state.blocks.block(id))
-                    .map(|b| b.command.clone())
-                    .unwrap_or_default();
-                let text = format_blocks(
-                    &[&crate::app::CommandBlock {
-                        command: cmd,
-                        output_text: out,
-                        ..crate::app::CommandBlock::default()
-                    }],
-                    CopyPart::Both,
-                    fmt,
-                );
-                if write_to_clipboard(&text) {
-                    state.render_state.flash_message =
-                        Some((copy_flash(1, CopyPart::Both, fmt), Instant::now()));
-                }
-                state.view.detail_visual_anchor = None;
-                state.render_state.dirty = true;
-                state.render_state.force_render = true;
-                Some(1)
-            }
-            // Visual line selection
-            [b'v', ..] | [b'V', ..] => {
-                if state.view.detail_visual_anchor.is_some() {
-                    state.view.detail_visual_anchor = None;
-                } else {
-                    state.view.detail_visual_anchor = Some(state.view.detail_line_cursor);
-                }
-                state.render_state.dirty = true;
-                state.render_state.force_render = true;
-                Some(1)
-            }
-            // Cursor movement + auto-scroll
-            [b'j', ..] | [b'\x1b', b'[', b'B', ..] => {
-                let total = detail_output_line_count(&state);
-                if total > 0 && state.view.detail_line_cursor + 1 < total {
-                    state.view.detail_line_cursor += 1;
-                    let inner = detail_inner_height(&state);
-                    let lo = state.view.block_viewport.line_offset;
-                    if state.view.detail_line_cursor >= lo + inner {
-                        state.view.block_viewport.line_offset = state
-                            .view
-                            .detail_line_cursor
-                            .saturating_sub(inner.saturating_sub(1));
-                    }
-                }
-                state.render_state.dirty = true;
-                state.render_state.force_render = true;
-                Some(if bytes.len() >= 3 && bytes[0] == b'\x1b' {
-                    3
-                } else {
-                    1
-                })
-            }
-            [b'k', ..] | [b'\x1b', b'[', b'A', ..] => {
-                if state.view.detail_line_cursor > 0 {
-                    state.view.detail_line_cursor -= 1;
-                    if state.view.detail_line_cursor < state.view.block_viewport.line_offset {
-                        state.view.block_viewport.line_offset = state.view.detail_line_cursor;
-                    }
-                }
-                state.render_state.dirty = true;
-                state.render_state.force_render = true;
-                Some(if bytes.len() >= 3 && bytes[0] == b'\x1b' {
-                    3
-                } else {
-                    1
-                })
-            }
-            // Jump to end
-            [b'G', ..] => {
-                let total = detail_output_line_count(&state);
-                let inner = detail_inner_height(&state);
-                if total > 0 {
-                    state.view.detail_line_cursor = total.saturating_sub(1);
-                    state.view.block_viewport.line_offset = total.saturating_sub(inner);
-                }
-                state.render_state.dirty = true;
-                state.render_state.force_render = true;
-                Some(1)
-            }
-            // Jump to start
-            [b'g', ..] => {
-                state.view.detail_line_cursor = 0;
-                state.view.block_viewport.line_offset = 0;
-                state.render_state.dirty = true;
-                state.render_state.force_render = true;
-                Some(1)
-            }
-            // Rerun
-            [b'r', ..] => {
-                let command = state
-                    .view
-                    .expanded_block
-                    .and_then(|id| state.blocks.block(id))
-                    .map(|b| b.command.clone())
-                    .filter(|cmd| !cmd.is_empty());
-                if let Some(cmd) = command {
-                    state.view = ViewState::default();
-                    state.input_accumulator.pending_block_delta = 0;
-                    state.render_state.needs_cleanup = true;
-                    state.render_state.pending_paste = Some(cmd);
+            // Catch other escape sequences (3+ bytes)
+            [b'\x1b', ..] if bytes.len() >= 3 => Some(bytes.len().min(3)),
+            // Single byte: dispatch through resolved keymap
+            [byte, ..] => {
+                if let Some(action) = state.config.resolved_detail_keymap.get(byte) {
+                    execute_detail_view_action(*action, &mut state);
                 }
                 Some(1)
             }
-            // Return to Block View
-            [b'q', ..] | [b'\x1b'] => {
-                state.view.view = ViewKind::Blocks;
-                state.view.expanded_block = None;
-                state.view.detail_line_cursor = 0;
-                state.view.detail_visual_anchor = None;
-                state.view.block_viewport.line_offset = 0;
-                ensure_selected_visible(&mut state);
-                state.render_state.dirty = true;
-                state.render_state.force_render = true;
-                Some(1)
-            }
-            [b'\x1b', ..] => Some(bytes.len().min(3)),
-            [_byte, ..] => Some(1),
             [] => None,
         },
         ViewKind::Help => {
@@ -1201,6 +1060,392 @@ fn execute_delete_blocks(state: &mut RuntimeState, block_ids: Vec<BlockId>) {
     state.render_state.force_render = true;
 }
 
+fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) -> bool {
+    match action {
+        BlockViewAction::Quit => {
+            if state.view.visual_anchor.is_some() {
+                exit_visual_mode(state);
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+            } else {
+                state.view = ViewState::default();
+                state.input_accumulator.pending_block_delta = 0;
+                state.render_state.needs_cleanup = true;
+            }
+            true
+        }
+        BlockViewAction::NavDown => {
+            accumulate_block_delta(state, 1);
+            true
+        }
+        BlockViewAction::NavUp => {
+            accumulate_block_delta(state, -1);
+            true
+        }
+        BlockViewAction::NavBottom => {
+            state.input_accumulator.pending_block_delta = 0;
+            select_tail_block(state);
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+            true
+        }
+        BlockViewAction::NavTop => {
+            state.input_accumulator.pending_block_delta = 0;
+            select_block_index(state, 0, ViewAnchor::Top);
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+            true
+        }
+        BlockViewAction::ScrollHalfUp => {
+            let half = (state.rows / 4).max(1) as isize;
+            accumulate_block_delta(state, -half);
+            true
+        }
+        BlockViewAction::ScrollHalfDown => {
+            let half = (state.rows / 4).max(1) as isize;
+            accumulate_block_delta(state, half);
+            true
+        }
+        BlockViewAction::ScrollFullUp => {
+            let full = (state.rows / 2).max(1) as isize;
+            accumulate_block_delta(state, -full);
+            true
+        }
+        BlockViewAction::ScrollFullDown => {
+            let full = (state.rows / 2).max(1) as isize;
+            accumulate_block_delta(state, full);
+            true
+        }
+        BlockViewAction::SearchNext => {
+            if state.view.filter.is_active() {
+                let len = state.view.visible.len(&state.blocks);
+                if len > 0 {
+                    let cur = state.view.block_viewport.selected_index.min(len - 1);
+                    let next = (cur + 1) % len;
+                    select_block_index(state, next, ViewAnchor::Manual);
+                    state.render_state.dirty = true;
+                    state.render_state.force_render = true;
+                }
+            }
+            true
+        }
+        BlockViewAction::SearchPrev => {
+            if state.view.filter.is_active() {
+                let len = state.view.visible.len(&state.blocks);
+                if len > 0 {
+                    let cur = state.view.block_viewport.selected_index.min(len - 1);
+                    let prev = if cur == 0 { len - 1 } else { cur - 1 };
+                    select_block_index(state, prev, ViewAnchor::Manual);
+                    state.render_state.dirty = true;
+                    state.render_state.force_render = true;
+                }
+            }
+            true
+        }
+        BlockViewAction::VisualMode => {
+            if state.view.visual_anchor.is_some() {
+                exit_visual_mode(state);
+            } else {
+                state.view.visual_anchor = state.view.selected_block;
+            }
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+            true
+        }
+        BlockViewAction::Expand => {
+            flush_navigation_delta(state);
+            let selected = state.view.selected_block;
+            if state.view.expanded_block == selected && selected.is_some() {
+                state.view.expanded_block = None;
+            } else {
+                state.view.expanded_block = selected;
+            }
+            ensure_selected_visible(state);
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+            true
+        }
+        BlockViewAction::CopyCommand => {
+            copy_blocks(state, CopyPart::Command);
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+            true
+        }
+        BlockViewAction::CopyOutput => {
+            copy_blocks(state, CopyPart::Output);
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+            true
+        }
+        BlockViewAction::CopyBoth => {
+            copy_blocks(state, CopyPart::Both);
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+            true
+        }
+        BlockViewAction::Rerun => {
+            let ids = visual_range_ids(state);
+            if ids.len() > 1 {
+                state.view.confirm = Some(ConfirmState::multi(ConfirmKind::RerunBlocks, ids));
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+            } else {
+                let command = ids
+                    .first()
+                    .and_then(|&id| state.blocks.block(id))
+                    .map(|b| b.command.clone())
+                    .filter(|cmd| !cmd.is_empty());
+                if let Some(cmd) = command {
+                    exit_visual_mode(state);
+                    state.view = ViewState::default();
+                    state.input_accumulator.pending_block_delta = 0;
+                    state.render_state.needs_cleanup = true;
+                    state.render_state.pending_paste = Some(cmd);
+                }
+            }
+            true
+        }
+        BlockViewAction::DetailView => {
+            if let Some(selected) = state.view.selected_block {
+                exit_visual_mode(state);
+                state.view.view = ViewKind::Detail;
+                state.view.expanded_block = Some(selected);
+                state.view.block_viewport.line_offset = 0;
+                state.view.detail_line_cursor = 0;
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+            }
+            true
+        }
+        BlockViewAction::ToggleFailedFilter => {
+            state.view.filter.failed_only = !state.view.filter.failed_only;
+            rebuild_visible(state);
+            restore_or_clamp_selection(state);
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+            true
+        }
+        BlockViewAction::OpenSearch => {
+            state.view.pre_search_query = state.view.filter.command_query.clone();
+            state.view.search_buffer = Some(String::new());
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+            true
+        }
+        BlockViewAction::Delete => {
+            let ids = visual_range_ids(state);
+            if !ids.is_empty() {
+                let kind = if ids.len() == 1 {
+                    ConfirmKind::DeleteBlock
+                } else {
+                    ConfirmKind::DeleteBlocks
+                };
+                state.view.confirm = Some(ConfirmState::multi(kind, ids));
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+            }
+            true
+        }
+        BlockViewAction::Help => {
+            state.view.help = Some(HelpState::open(ViewKind::Blocks));
+            state.view.view = ViewKind::Help;
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+            true
+        }
+    }
+}
+
+fn execute_detail_view_action(action: DetailViewAction, state: &mut RuntimeState) {
+    match action {
+        DetailViewAction::NavDown => {
+            let total = detail_output_line_count(state);
+            if total > 0 && state.view.detail_line_cursor + 1 < total {
+                state.view.detail_line_cursor += 1;
+                let inner = detail_inner_height(state);
+                let lo = state.view.block_viewport.line_offset;
+                if state.view.detail_line_cursor >= lo + inner {
+                    state.view.block_viewport.line_offset = state
+                        .view
+                        .detail_line_cursor
+                        .saturating_sub(inner.saturating_sub(1));
+                }
+            }
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+        }
+        DetailViewAction::NavUp => {
+            if state.view.detail_line_cursor > 0 {
+                state.view.detail_line_cursor -= 1;
+                if state.view.detail_line_cursor < state.view.block_viewport.line_offset {
+                    state.view.block_viewport.line_offset = state.view.detail_line_cursor;
+                }
+            }
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+        }
+        DetailViewAction::NavTop => {
+            state.view.detail_line_cursor = 0;
+            state.view.block_viewport.line_offset = 0;
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+        }
+        DetailViewAction::NavBottom => {
+            let total = detail_output_line_count(state);
+            let inner = detail_inner_height(state);
+            if total > 0 {
+                state.view.detail_line_cursor = total.saturating_sub(1);
+                state.view.block_viewport.line_offset = total.saturating_sub(inner);
+            }
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+        }
+        DetailViewAction::ScrollHalfDown => {
+            let half = (state.rows / 4).max(1) as usize;
+            let total = detail_output_line_count(state);
+            if total > 0 {
+                let target = state
+                    .view
+                    .detail_line_cursor
+                    .saturating_add(half)
+                    .min(total.saturating_sub(1));
+                state.view.detail_line_cursor = target;
+                let inner = detail_inner_height(state);
+                let lo = state.view.block_viewport.line_offset;
+                if state.view.detail_line_cursor >= lo + inner {
+                    state.view.block_viewport.line_offset =
+                        target.saturating_sub(inner.saturating_sub(1));
+                }
+            }
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+        }
+        DetailViewAction::ScrollHalfUp => {
+            let half = (state.rows / 4).max(1) as usize;
+            if state.view.detail_line_cursor > 0 {
+                state.view.detail_line_cursor = state.view.detail_line_cursor.saturating_sub(half);
+                if state.view.detail_line_cursor < state.view.block_viewport.line_offset {
+                    state.view.block_viewport.line_offset = state.view.detail_line_cursor;
+                }
+            }
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+        }
+        DetailViewAction::ScrollFullDown => {
+            let full = (state.rows / 2).max(1) as usize;
+            let total = detail_output_line_count(state);
+            if total > 0 {
+                let target = state
+                    .view
+                    .detail_line_cursor
+                    .saturating_add(full)
+                    .min(total.saturating_sub(1));
+                state.view.detail_line_cursor = target;
+                let inner = detail_inner_height(state);
+                let lo = state.view.block_viewport.line_offset;
+                if state.view.detail_line_cursor >= lo + inner {
+                    state.view.block_viewport.line_offset =
+                        target.saturating_sub(inner.saturating_sub(1));
+                }
+            }
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+        }
+        DetailViewAction::ScrollFullUp => {
+            let full = (state.rows / 2).max(1) as usize;
+            if state.view.detail_line_cursor > 0 {
+                state.view.detail_line_cursor = state.view.detail_line_cursor.saturating_sub(full);
+                if state.view.detail_line_cursor < state.view.block_viewport.line_offset {
+                    state.view.block_viewport.line_offset = state.view.detail_line_cursor;
+                }
+            }
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+        }
+        DetailViewAction::CopyCommand => {
+            perform_block_action(state, BlockAction::CopyCommand);
+        }
+        DetailViewAction::CopyOutput => {
+            let fmt = state.config.block_view.copy_format;
+            let text = detail_copy_output(state);
+            if let Some(text) = text {
+                if write_to_clipboard(&text) {
+                    state.render_state.flash_message =
+                        Some((copy_flash(1, CopyPart::Output, fmt), Instant::now()));
+                }
+            }
+            state.view.detail_visual_anchor = None;
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+        }
+        DetailViewAction::CopyBoth => {
+            let fmt = state.config.block_view.copy_format;
+            let out = detail_copy_output(state).unwrap_or_default();
+            let cmd = state
+                .view
+                .expanded_block
+                .and_then(|id| state.blocks.block(id))
+                .map(|b| b.command.clone())
+                .unwrap_or_default();
+            let text = format_blocks(
+                &[&crate::app::CommandBlock {
+                    command: cmd,
+                    output_text: out,
+                    ..crate::app::CommandBlock::default()
+                }],
+                CopyPart::Both,
+                fmt,
+            );
+            if write_to_clipboard(&text) {
+                state.render_state.flash_message =
+                    Some((copy_flash(1, CopyPart::Both, fmt), Instant::now()));
+            }
+            state.view.detail_visual_anchor = None;
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+        }
+        DetailViewAction::Rerun => {
+            let command = state
+                .view
+                .expanded_block
+                .and_then(|id| state.blocks.block(id))
+                .map(|b| b.command.clone())
+                .filter(|cmd| !cmd.is_empty());
+            if let Some(cmd) = command {
+                state.view = ViewState::default();
+                state.input_accumulator.pending_block_delta = 0;
+                state.render_state.needs_cleanup = true;
+                state.render_state.pending_paste = Some(cmd);
+            }
+        }
+        DetailViewAction::VisualMode => {
+            if state.view.detail_visual_anchor.is_some() {
+                state.view.detail_visual_anchor = None;
+            } else {
+                state.view.detail_visual_anchor = Some(state.view.detail_line_cursor);
+            }
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+        }
+        DetailViewAction::Help => {
+            state.view.help = Some(HelpState::open(ViewKind::Detail));
+            state.view.view = ViewKind::Help;
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+        }
+        DetailViewAction::Quit => {
+            state.view.view = ViewKind::Blocks;
+            state.view.expanded_block = None;
+            state.view.detail_line_cursor = 0;
+            state.view.detail_visual_anchor = None;
+            state.view.block_viewport.line_offset = 0;
+            ensure_selected_visible(state);
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+        }
+    }
+}
+
 fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
     // Confirm dialog intercepts all input while open.
     if state.view.confirm.is_some() {
@@ -1243,206 +1488,12 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
     if state.view.search_buffer.is_some() {
         return handle_search_input(byte, state);
     }
-    match byte {
-        // Exit visual mode (first press) or exit Block View (when not in visual mode)
-        b'q' | b'\x1b' => {
-            if state.view.visual_anchor.is_some() {
-                exit_visual_mode(state);
-                state.render_state.dirty = true;
-                state.render_state.force_render = true;
-            } else {
-                state.view = ViewState::default();
-                state.input_accumulator.pending_block_delta = 0;
-                state.render_state.needs_cleanup = true;
-            }
-            true
-        }
-        // Navigation
-        b'j' => {
-            accumulate_block_delta(state, 1);
-            true
-        }
-        b'k' => {
-            accumulate_block_delta(state, -1);
-            true
-        }
-        b'G' => {
-            state.input_accumulator.pending_block_delta = 0;
-            select_tail_block(state);
-            state.render_state.dirty = true;
-            state.render_state.force_render = true;
-            true
-        }
-        b'g' => {
-            state.input_accumulator.pending_block_delta = 0;
-            select_block_index(state, 0, ViewAnchor::Top);
-            state.render_state.dirty = true;
-            state.render_state.force_render = true;
-            true
-        }
-        // Scroll: Ctrl-u = half screen up, Ctrl-d = half screen down
-        b'\x15' => {
-            let half = (state.rows / 4).max(1) as isize;
-            accumulate_block_delta(state, -half);
-            true
-        }
-        b'\x04' => {
-            let half = (state.rows / 4).max(1) as isize;
-            accumulate_block_delta(state, half);
-            true
-        }
-        // Ctrl-b = full screen up, Ctrl-f = full screen down
-        b'\x02' => {
-            let full = (state.rows / 2).max(1) as isize;
-            accumulate_block_delta(state, -full);
-            true
-        }
-        b'\x06' => {
-            let full = (state.rows / 2).max(1) as isize;
-            accumulate_block_delta(state, full);
-            true
-        }
-        // Search result navigation (only meaningful when a filter is active)
-        b'n' => {
-            if state.view.filter.is_active() {
-                let len = state.view.visible.len(&state.blocks);
-                if len > 0 {
-                    let cur = state.view.block_viewport.selected_index.min(len - 1);
-                    let next = (cur + 1) % len;
-                    select_block_index(state, next, ViewAnchor::Manual);
-                    state.render_state.dirty = true;
-                    state.render_state.force_render = true;
-                }
-            }
-            true
-        }
-        b'N' => {
-            if state.view.filter.is_active() {
-                let len = state.view.visible.len(&state.blocks);
-                if len > 0 {
-                    let cur = state.view.block_viewport.selected_index.min(len - 1);
-                    let prev = if cur == 0 { len - 1 } else { cur - 1 };
-                    select_block_index(state, prev, ViewAnchor::Manual);
-                    state.render_state.dirty = true;
-                    state.render_state.force_render = true;
-                }
-            }
-            true
-        }
-        // Visual mode toggle
-        b'v' => {
-            if state.view.visual_anchor.is_some() {
-                exit_visual_mode(state);
-            } else {
-                state.view.visual_anchor = state.view.selected_block;
-            }
-            state.render_state.dirty = true;
-            state.render_state.force_render = true;
-            true
-        }
-        // Expand / collapse
-        b'\r' | b'\n' => {
-            flush_navigation_delta(state);
-            let selected = state.view.selected_block;
-            if state.view.expanded_block == selected && selected.is_some() {
-                state.view.expanded_block = None;
-            } else {
-                state.view.expanded_block = selected;
-            }
-            ensure_selected_visible(state);
-            state.render_state.dirty = true;
-            state.render_state.force_render = true;
-            true
-        }
-        // Copy: c = command, o = output, y = both
-        b'c' => {
-            copy_blocks(state, CopyPart::Command);
-            state.render_state.dirty = true;
-            state.render_state.force_render = true;
-            true
-        }
-        b'o' => {
-            copy_blocks(state, CopyPart::Output);
-            state.render_state.dirty = true;
-            state.render_state.force_render = true;
-            true
-        }
-        b'y' => {
-            copy_blocks(state, CopyPart::Both);
-            state.render_state.dirty = true;
-            state.render_state.force_render = true;
-            true
-        }
-        // Rerun: single block exits directly, multiple shows confirm
-        b'r' => {
-            let ids = visual_range_ids(state);
-            if ids.len() > 1 {
-                state.view.confirm = Some(ConfirmState::multi(ConfirmKind::RerunBlocks, ids));
-                state.render_state.dirty = true;
-                state.render_state.force_render = true;
-            } else {
-                let command = ids
-                    .first()
-                    .and_then(|&id| state.blocks.block(id))
-                    .map(|b| b.command.clone())
-                    .filter(|cmd| !cmd.is_empty());
-                if let Some(cmd) = command {
-                    exit_visual_mode(state);
-                    state.view = ViewState::default();
-                    state.input_accumulator.pending_block_delta = 0;
-                    state.render_state.needs_cleanup = true;
-                    state.render_state.pending_paste = Some(cmd);
-                }
-            }
-            true
-        }
-        // Detail View
-        b'i' => {
-            if let Some(selected) = state.view.selected_block {
-                exit_visual_mode(state);
-                state.view.view = ViewKind::Detail;
-                state.view.expanded_block = Some(selected);
-                state.view.block_viewport.line_offset = 0;
-                state.view.detail_line_cursor = 0;
-                state.render_state.dirty = true;
-                state.render_state.force_render = true;
-            }
-            true
-        }
-        // Filter
-        b'f' => {
-            state.view.filter.failed_only = !state.view.filter.failed_only;
-            rebuild_visible(state);
-            restore_or_clamp_selection(state);
-            state.render_state.dirty = true;
-            state.render_state.force_render = true;
-            true
-        }
-        // Search
-        b'/' => {
-            state.view.pre_search_query = state.view.filter.command_query.clone();
-            state.view.search_buffer = Some(String::new());
-            state.render_state.dirty = true;
-            state.render_state.force_render = true;
-            true
-        }
-        // Delete: single or visual range
-        b'd' => {
-            let ids = visual_range_ids(state);
-            if !ids.is_empty() {
-                let kind = if ids.len() == 1 {
-                    ConfirmKind::DeleteBlock
-                } else {
-                    ConfirmKind::DeleteBlocks
-                };
-                state.view.confirm = Some(ConfirmState::multi(kind, ids));
-                state.render_state.dirty = true;
-                state.render_state.force_render = true;
-            }
-            true
-        }
-        _ => true,
+
+    if let Some(action) = state.config.resolved_block_keymap.get(&byte) {
+        return execute_block_view_action(*action, state);
     }
+
+    true
 }
 
 fn accumulate_block_delta(state: &mut RuntimeState, delta: isize) {

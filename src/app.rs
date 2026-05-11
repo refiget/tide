@@ -32,6 +32,53 @@ impl App {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockViewAction {
+    NavDown,
+    NavUp,
+    NavTop,
+    NavBottom,
+    ScrollHalfDown,
+    ScrollHalfUp,
+    ScrollFullDown,
+    ScrollFullUp,
+    Expand,
+    DetailView,
+    ToggleFailedFilter,
+    OpenSearch,
+    CopyCommand,
+    CopyOutput,
+    CopyBoth,
+    Rerun,
+    Delete,
+    VisualMode,
+    SearchNext,
+    SearchPrev,
+    Help,
+    Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DetailViewAction {
+    NavDown,
+    NavUp,
+    NavTop,
+    NavBottom,
+    ScrollHalfDown,
+    ScrollHalfUp,
+    ScrollFullDown,
+    ScrollFullUp,
+    CopyCommand,
+    CopyOutput,
+    CopyBoth,
+    Rerun,
+    VisualMode,
+    Help,
+    Quit,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppMode {
     ShellIdle,
