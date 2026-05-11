@@ -12,8 +12,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     ansi::{StyledText, TextStyle, styled_width, truncate_styled_to_width},
-    app::{ConfirmKind, FooterSegment},
     app::{BlockStatus, ViewKind},
+    app::{ConfirmKind, FooterSegment},
     compositor::VisualLine,
     config::{BlockLayoutConfig, BlockViewConfig},
     theme::{CatppuccinFrappe, Theme},
@@ -52,7 +52,11 @@ impl BlockSelectionStyle {
         }
     }
     fn from_bool(selected: bool) -> Self {
-        if selected { Self::selected() } else { Self::normal() }
+        if selected {
+            Self::selected()
+        } else {
+            Self::normal()
+        }
     }
     fn from_state(selected: bool, in_visual: bool) -> Self {
         if in_visual {
@@ -72,35 +76,113 @@ pub struct HelpEntry {
 }
 
 pub const BLOCK_HELP_ENTRIES: &[HelpEntry] = &[
-    HelpEntry { key: "j / k", desc: "navigate blocks" },
-    HelpEntry { key: "Ctrl-u / Ctrl-d", desc: "scroll half screen" },
-    HelpEntry { key: "Ctrl-b / Ctrl-f", desc: "scroll full screen" },
-    HelpEntry { key: "g / G", desc: "top / bottom" },
-    HelpEntry { key: "Enter", desc: "expand / collapse" },
-    HelpEntry { key: "i", desc: "detail view" },
-    HelpEntry { key: "v", desc: "visual select mode" },
-    HelpEntry { key: "/", desc: "search commands" },
-    HelpEntry { key: "n / N", desc: "next / prev result" },
-    HelpEntry { key: "f", desc: "toggle failed filter" },
-    HelpEntry { key: "c", desc: "copy command" },
-    HelpEntry { key: "o", desc: "copy output" },
-    HelpEntry { key: "y", desc: "copy command + output" },
-    HelpEntry { key: "r", desc: "rerun command" },
-    HelpEntry { key: "d", desc: "delete block" },
-    HelpEntry { key: "?", desc: "close help" },
-    HelpEntry { key: "q / Esc", desc: "return to shell" },
+    HelpEntry {
+        key: "j / k",
+        desc: "navigate blocks",
+    },
+    HelpEntry {
+        key: "Ctrl-u / Ctrl-d",
+        desc: "scroll half screen",
+    },
+    HelpEntry {
+        key: "Ctrl-b / Ctrl-f",
+        desc: "scroll full screen",
+    },
+    HelpEntry {
+        key: "g / G",
+        desc: "top / bottom",
+    },
+    HelpEntry {
+        key: "Enter",
+        desc: "expand / collapse",
+    },
+    HelpEntry {
+        key: "i",
+        desc: "detail view",
+    },
+    HelpEntry {
+        key: "v",
+        desc: "visual select mode",
+    },
+    HelpEntry {
+        key: "/",
+        desc: "search commands",
+    },
+    HelpEntry {
+        key: "n / N",
+        desc: "next / prev result",
+    },
+    HelpEntry {
+        key: "f",
+        desc: "toggle failed filter",
+    },
+    HelpEntry {
+        key: "c",
+        desc: "copy command",
+    },
+    HelpEntry {
+        key: "o",
+        desc: "copy output",
+    },
+    HelpEntry {
+        key: "y",
+        desc: "copy command + output",
+    },
+    HelpEntry {
+        key: "r",
+        desc: "rerun command",
+    },
+    HelpEntry {
+        key: "d",
+        desc: "delete block",
+    },
+    HelpEntry {
+        key: "?",
+        desc: "close help",
+    },
+    HelpEntry {
+        key: "q / Esc",
+        desc: "return to shell",
+    },
 ];
 
 pub const DETAIL_HELP_ENTRIES: &[HelpEntry] = &[
-    HelpEntry { key: "j / k", desc: "scroll output" },
-    HelpEntry { key: "g / G", desc: "top / bottom" },
-    HelpEntry { key: "v / V", desc: "visual line select" },
-    HelpEntry { key: "c", desc: "copy command" },
-    HelpEntry { key: "o", desc: "copy output / selection" },
-    HelpEntry { key: "y", desc: "copy command + output" },
-    HelpEntry { key: "r", desc: "rerun command" },
-    HelpEntry { key: "?", desc: "close help" },
-    HelpEntry { key: "q / Esc", desc: "back to blocks" },
+    HelpEntry {
+        key: "j / k",
+        desc: "scroll output",
+    },
+    HelpEntry {
+        key: "g / G",
+        desc: "top / bottom",
+    },
+    HelpEntry {
+        key: "v / V",
+        desc: "visual line select",
+    },
+    HelpEntry {
+        key: "c",
+        desc: "copy command",
+    },
+    HelpEntry {
+        key: "o",
+        desc: "copy output / selection",
+    },
+    HelpEntry {
+        key: "y",
+        desc: "copy command + output",
+    },
+    HelpEntry {
+        key: "r",
+        desc: "rerun command",
+    },
+    HelpEntry {
+        key: "?",
+        desc: "close help",
+    },
+    HelpEntry {
+        key: "q / Esc",
+        desc: "back to blocks",
+    },
 ];
 
 /// Enter alternate screen and hide cursor for Block/Detail view rendering.
@@ -591,9 +673,13 @@ fn render_block_detail_line<W: Write>(
             "command" => "󰘧",
             "cwd" => "󰉋",
             "status" => {
-                if value.starts_with("ok") { "󰄬" }
-                else if value.starts_with("fail") { "󰅙" }
-                else { "󰔟" }
+                if value.starts_with("ok") {
+                    "󰄬"
+                } else if value.starts_with("fail") {
+                    "󰅙"
+                } else {
+                    "󰔟"
+                }
             }
             "duration" => "󰔟",
             "actions" => "󰘳",
@@ -602,12 +688,16 @@ fn render_block_detail_line<W: Write>(
 
         let icon_fg = match label {
             "status" => {
-                if value.starts_with("ok") { Theme::STATUS_OK_FG }
-                else if value.starts_with("fail") { Theme::STATUS_FAILED_FG }
-                else { Theme::STATUS_RUNNING_FG }
+                if value.starts_with("ok") {
+                    Theme::STATUS_OK_FG
+                } else if value.starts_with("fail") {
+                    Theme::STATUS_FAILED_FG
+                } else {
+                    Theme::STATUS_RUNNING_FG
+                }
             }
             "command" => Theme::ICON_CMD_FG,
-            "cwd"     => Theme::ICON_PATH_FG,
+            "cwd" => Theme::ICON_PATH_FG,
             "duration" => Theme::ICON_TIME_FG,
             "actions" => Theme::ICON_ACTION_FG,
             _ => Theme::META_LABEL_FG,
@@ -615,9 +705,13 @@ fn render_block_detail_line<W: Write>(
 
         let value_fg: Option<Color> = match label {
             "status" => {
-                if value.starts_with("ok") { Some(Theme::STATUS_OK_FG) }
-                else if value.starts_with("fail") { Some(Theme::STATUS_FAILED_FG) }
-                else { Some(Theme::STATUS_RUNNING_FG) }
+                if value.starts_with("ok") {
+                    Some(Theme::STATUS_OK_FG)
+                } else if value.starts_with("fail") {
+                    Some(Theme::STATUS_FAILED_FG)
+                } else {
+                    Some(Theme::STATUS_RUNNING_FG)
+                }
             }
             "cwd" => Some(Theme::META_PATH_FG),
             "duration" => Some(Theme::STATUS_RUNNING_FG),
@@ -631,7 +725,9 @@ fn render_block_detail_line<W: Write>(
             let label_pad = DETAIL_LABEL_COL.saturating_sub(NERD_W + 1 + label_text_w);
             let actions = parse_actions(value);
 
-            if let Some(bg) = bg { queue!(w, SetBackgroundColor(bg))?; }
+            if let Some(bg) = bg {
+                queue!(w, SetBackgroundColor(bg))?;
+            }
             queue!(w, SetForegroundColor(border_fg))?;
             queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
             queue!(w, Print(&pad_str))?;
@@ -650,21 +746,30 @@ fn render_block_detail_line<W: Write>(
                     "r" => "󰑓",
                     _ => "",
                 };
-                let aicon_w: usize = if action_icon.is_empty() { 0 } else { NERD_W + 1 };
+                let aicon_w: usize = if action_icon.is_empty() {
+                    0
+                } else {
+                    NERD_W + 1
+                };
                 let key_w = UnicodeWidthStr::width(key.as_str());
                 let text_w = UnicodeWidthStr::width(action_text.as_str());
                 let seg_w = aicon_w + key_w + 1 + text_w;
                 let sep_w: usize = if first { 0 } else { 2 };
-                if used_w + sep_w + seg_w > content_w { break; }
+                if used_w + sep_w + seg_w > content_w {
+                    break;
+                }
 
-                if !first { queue!(w, Print("  "))?; used_w += 2; }
+                if !first {
+                    queue!(w, Print("  "))?;
+                    used_w += 2;
+                }
                 first = false;
 
                 if !action_icon.is_empty() {
                     let aicon_fg = match key.as_str() {
                         "c" => Theme::ICON_CMD_FG,
                         "o" => Theme::ICON_PATH_FG,
-                        _   => Theme::ICON_ACTION_FG,  // y, r
+                        _ => Theme::ICON_ACTION_FG, // y, r
                     };
                     queue!(w, SetForegroundColor(aicon_fg))?;
                     queue!(w, Print(action_icon))?;
@@ -675,7 +780,9 @@ fn render_block_detail_line<W: Write>(
                 queue!(w, SetForegroundColor(Theme::META_ACTION_KEY_FG))?;
                 queue!(w, Print(key))?;
                 queue!(w, SetAttribute(Attribute::Reset))?;
-                if let Some(bg) = bg { queue!(w, SetBackgroundColor(bg))?; }
+                if let Some(bg) = bg {
+                    queue!(w, SetBackgroundColor(bg))?;
+                }
                 queue!(w, SetForegroundColor(Theme::META_ACTION_TEXT_FG))?;
                 queue!(w, Print(" "))?;
                 queue!(w, Print(action_text))?;
@@ -702,7 +809,9 @@ fn render_block_detail_line<W: Write>(
             let value_display_w = UnicodeWidthStr::width(value_display.as_str());
             let fill = content_w.saturating_sub(DETAIL_LABEL_COL + value_display_w);
 
-            if let Some(bg) = bg { queue!(w, SetBackgroundColor(bg))?; }
+            if let Some(bg) = bg {
+                queue!(w, SetBackgroundColor(bg))?;
+            }
             queue!(w, SetForegroundColor(border_fg))?;
             queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
             queue!(w, Print(&pad_str))?;
@@ -714,7 +823,9 @@ fn render_block_detail_line<W: Write>(
                 queue!(w, SetForegroundColor(fg))?;
             } else {
                 queue!(w, ResetColor)?;
-                if let Some(bg) = bg { queue!(w, SetBackgroundColor(bg))?; }
+                if let Some(bg) = bg {
+                    queue!(w, SetBackgroundColor(bg))?;
+                }
             }
             queue!(w, Print(&value_display))?;
             queue!(w, Print(" ".repeat(fill)))?;
@@ -737,7 +848,9 @@ fn render_block_detail_line<W: Write>(
             .saturating_sub(UnicodeWidthStr::width(label_display.as_str()))
             .saturating_sub(UnicodeWidthStr::width(value_display.as_str()));
 
-        if let Some(bg) = bg { queue!(w, SetBackgroundColor(bg))?; }
+        if let Some(bg) = bg {
+            queue!(w, SetBackgroundColor(bg))?;
+        }
         queue!(w, SetForegroundColor(border_fg))?;
         queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
         queue!(w, Print(&pad_str))?;
@@ -747,7 +860,9 @@ fn render_block_detail_line<W: Write>(
             queue!(w, SetForegroundColor(fg))?;
         } else {
             queue!(w, ResetColor)?;
-            if let Some(bg) = bg { queue!(w, SetBackgroundColor(bg))?; }
+            if let Some(bg) = bg {
+                queue!(w, SetBackgroundColor(bg))?;
+            }
         }
         queue!(w, Print(&value_display))?;
         queue!(w, Print(" ".repeat(fill_base)))?;
@@ -1081,7 +1196,10 @@ fn render_help_overlay<W: Write>(
     queue!(w, MoveTo(start_col as u16, start_row as u16))?;
     queue!(w, SetForegroundColor(Theme::HELP_BORDER))?;
     queue!(w, SetBackgroundColor(Color::Reset))?;
-    queue!(w, Print(titled_border_centered('╭', '╮', "Keybindings", box_w)))?;
+    queue!(
+        w,
+        Print(titled_border_centered('╭', '╮', "Keybindings", box_w))
+    )?;
     queue!(w, ResetColor)?;
 
     // Entry rows
@@ -1347,8 +1465,16 @@ fn highlight_spans<'a>(text: &'a str, tokens: &[String]) -> Vec<(bool, &'a str)>
         .map(|(s, e)| {
             let sc = text_lower[..s].chars().count();
             let ec = text_lower[..e].chars().count();
-            let bs = text.char_indices().nth(sc).map(|(p, _)| p).unwrap_or(text.len());
-            let be = text.char_indices().nth(ec).map(|(p, _)| p).unwrap_or(text.len());
+            let bs = text
+                .char_indices()
+                .nth(sc)
+                .map(|(p, _)| p)
+                .unwrap_or(text.len());
+            let be = text
+                .char_indices()
+                .nth(ec)
+                .map(|(p, _)| p)
+                .unwrap_or(text.len());
             (bs, be)
         })
         .collect();
@@ -1400,7 +1526,11 @@ mod tests {
         );
         assert!(spans.iter().any(|(hi, s)| *hi && *s == "cargo"));
         assert!(spans.iter().any(|(hi, s)| *hi && *s == "test"));
-        assert!(spans.iter().any(|(hi, s)| !*hi && s.contains("--workspace")));
+        assert!(
+            spans
+                .iter()
+                .any(|(hi, s)| !*hi && s.contains("--workspace"))
+        );
     }
 
     #[test]

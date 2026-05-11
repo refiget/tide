@@ -39,18 +39,18 @@ Before committing terminal behavior changes:
 cargo fmt --check && cargo check && cargo test
 ```
 
-## Test Locations (~99 tests)
+## Test Locations (~126 tests)
 
 | Module | Count | What's tested |
 |--------|-------|---------------|
 | `ansi.rs` | 14 | SGR parsing, 256-color, truecolor, OSC/CSI ignoring, multiline, \r/\r\n, truncation |
-| `pty.rs` | 21 | View transitions, force-render flags, viewport clamping, boundary navigation, Detail scroll, clipboard copy |
-| `compositor.rs` | 20 | Visual layout, viewport math, anchors (Top/Tail/Manual), span invariants, footer, Detail layout, flash messages |
+| `pty.rs` | 25 | View transitions, force-render flags, viewport clamping, boundary navigation, Detail scroll, clipboard copy, live search, CopyFormat |
+| `compositor.rs` | 22 | Visual layout, viewport math, anchors (Top/Tail/Manual), span invariants, footer, Detail layout, flash messages |
 | `block.rs` | 4 | Retention cap, prev/next navigation, unbounded history, output truncation flag |
-| `shell_hooks.rs` | 7 | OSC 777 marker stripping, split-event handling, normal output passthrough, hex decoding |
-| `renderer.rs` | 2 | Framed text width with wide/unicode chars, titled border width |
-| `config.rs` | 2 | Runtime config defaults, legacy field handling |
-| `format.rs` | 24 | compact_command, compact_cwd, build_top_label (ANSI strip, unicode, compression) |
+| `shell_hooks.rs` | 8 | OSC 777 marker stripping, split-event handling, normal output passthrough, hex decoding |
+| `renderer.rs` | 5 | Framed text width with wide/unicode chars, titled border width, search highlight spans |
+| `config.rs` | 4 | Runtime config defaults, legacy field handling, CopyFormat deserialization |
+| `format.rs` | 43 | compact_command, compact_cwd, build_top_label, CopyFormat (plaintext/markdown/transcript/json, multi-record) |
 | `index.rs` | 1 | Token inverted index query (substring + AND semantics) |
 
 ## Key Terminology (Critical — Do Not Confuse)

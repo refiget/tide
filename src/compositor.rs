@@ -352,7 +352,11 @@ impl Compositor {
             selected,
             in_visual,
             label: format::build_top_label_parts(block, home, available_label_width),
-            match_query: view.filter.command_query.clone(),
+            match_query: view
+                .search_buffer
+                .as_deref()
+                .unwrap_or(&view.filter.command_query)
+                .to_string(),
         });
 
         if block.kind == BlockKind::RawProgram {
@@ -569,15 +573,14 @@ impl Compositor {
         let line_offset = view.block_viewport.line_offset;
 
         // Visual selection range for Detail View lines.
-        let visual_range: Option<(usize, usize)> =
-            if !matches!(view.view, ViewKind::Help) {
-                view.detail_visual_anchor.map(|anchor| {
-                    let real_cursor = view.detail_line_cursor.min(total.saturating_sub(1));
-                    (anchor.min(real_cursor), anchor.max(real_cursor))
-                })
-            } else {
-                None
-            };
+        let visual_range: Option<(usize, usize)> = if !matches!(view.view, ViewKind::Help) {
+            view.detail_visual_anchor.map(|anchor| {
+                let real_cursor = view.detail_line_cursor.min(total.saturating_sub(1));
+                (anchor.min(real_cursor), anchor.max(real_cursor))
+            })
+        } else {
+            None
+        };
 
         let mut result: Vec<VisualLine> = Vec::with_capacity(height);
 
@@ -601,8 +604,7 @@ impl Compositor {
         if short_mode {
             for (i, styled) in styled_output_lines.iter().enumerate() {
                 let plain_text = crate::ansi::styled_to_plain(styled);
-                let is_visual =
-                    visual_range.map_or(false, |(lo, hi)| i >= lo && i <= hi);
+                let is_visual = visual_range.map_or(false, |(lo, hi)| i >= lo && i <= hi);
                 result.push(VisualLine::StyledDetailBodyLine {
                     styled: styled.clone(),
                     plain_text,
@@ -626,8 +628,7 @@ impl Compositor {
             for (i, styled) in styled_output_lines[start..end].iter().enumerate() {
                 let abs = start + i;
                 let plain_text = crate::ansi::styled_to_plain(styled);
-                let is_visual =
-                    visual_range.map_or(false, |(lo, hi)| abs >= lo && abs <= hi);
+                let is_visual = visual_range.map_or(false, |(lo, hi)| abs >= lo && abs <= hi);
                 result.push(VisualLine::StyledDetailBodyLine {
                     styled: styled.clone(),
                     plain_text,
@@ -661,8 +662,17 @@ impl Compositor {
         // Keep viewport math and rendered output on exactly the same code path.
         // If scrolling performance becomes an issue, cache visual heights keyed
         // by block_id, width, view mode, expanded state, and config.
-        Self::build_one_block_lines(shell_lines, block, view, block_view, selected, false, 0, None)
-            .len()
+        Self::build_one_block_lines(
+            shell_lines,
+            block,
+            view,
+            block_view,
+            selected,
+            false,
+            0,
+            None,
+        )
+        .len()
     }
 }
 
@@ -782,7 +792,11 @@ fn bottom_label(block: &CommandBlock) -> String {
     if block.kind == BlockKind::RawProgram {
         return format!("raw · {}", format_duration_ms(block.duration_ms));
     }
-    let truncated = if block.output_truncated { " · truncated" } else { "" };
+    let truncated = if block.output_truncated {
+        " · truncated"
+    } else {
+        ""
+    };
     let ago = block
         .finished_at
         .map(format_ago)

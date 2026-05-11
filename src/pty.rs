@@ -192,8 +192,8 @@ pub fn run_shell(config: &Config) -> Result<()> {
                 if !state.capture_suspended {
                     state.shell.append(&remaining, active_block_id);
                 }
-                let has_overlay = matches!(state.view.view, ViewKind::Help)
-                    || state.view.confirm.is_some();
+                let has_overlay =
+                    matches!(state.view.view, ViewKind::Help) || state.view.confirm.is_some();
                 (state.view.view.clone(), has_overlay)
             } else {
                 (ViewKind::Plain, false)
@@ -546,9 +546,27 @@ fn copy_blocks(state: &mut RuntimeState, part: CopyPart) {
 
 fn copy_flash(count: usize, part: CopyPart, fmt: CopyFormat) -> String {
     let what = match part {
-        CopyPart::Command => if count == 1 { "command" } else { "commands" },
-        CopyPart::Output => if count == 1 { "output" } else { "outputs" },
-        CopyPart::Both => if count == 1 { "block" } else { "blocks" },
+        CopyPart::Command => {
+            if count == 1 {
+                "command"
+            } else {
+                "commands"
+            }
+        }
+        CopyPart::Output => {
+            if count == 1 {
+                "output"
+            } else {
+                "outputs"
+            }
+        }
+        CopyPart::Both => {
+            if count == 1 {
+                "block"
+            } else {
+                "blocks"
+            }
+        }
     };
     let prefix = if count == 1 {
         format!("copied {what}")
@@ -792,10 +810,8 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                 let text = detail_copy_output(&state);
                 if let Some(text) = text {
                     if write_to_clipboard(&text) {
-                        state.render_state.flash_message = Some((
-                            copy_flash(1, CopyPart::Output, fmt),
-                            Instant::now(),
-                        ));
+                        state.render_state.flash_message =
+                            Some((copy_flash(1, CopyPart::Output, fmt), Instant::now()));
                     }
                 }
                 state.view.detail_visual_anchor = None;
@@ -823,10 +839,8 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                     fmt,
                 );
                 if write_to_clipboard(&text) {
-                    state.render_state.flash_message = Some((
-                        copy_flash(1, CopyPart::Both, fmt),
-                        Instant::now(),
-                    ));
+                    state.render_state.flash_message =
+                        Some((copy_flash(1, CopyPart::Both, fmt), Instant::now()));
                 }
                 state.view.detail_visual_anchor = None;
                 state.render_state.dirty = true;
@@ -860,7 +874,11 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                 }
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
-                Some(if bytes.len() >= 3 && bytes[0] == b'\x1b' { 3 } else { 1 })
+                Some(if bytes.len() >= 3 && bytes[0] == b'\x1b' {
+                    3
+                } else {
+                    1
+                })
             }
             [b'k', ..] | [b'\x1b', b'[', b'A', ..] => {
                 if state.view.detail_line_cursor > 0 {
@@ -871,7 +889,11 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                 }
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
-                Some(if bytes.len() >= 3 && bytes[0] == b'\x1b' { 3 } else { 1 })
+                Some(if bytes.len() >= 3 && bytes[0] == b'\x1b' {
+                    3
+                } else {
+                    1
+                })
             }
             // Jump to end
             [b'G', ..] => {
@@ -1074,7 +1096,6 @@ fn handle_search_input(byte: u8, state: &mut RuntimeState) -> bool {
             let query = state.view.search_buffer.take().unwrap_or_default();
             state.view.filter.command_query = query;
             rebuild_visible(state);
-
             if state.view.visible.len(&state.blocks) == 0
                 && !state.view.filter.command_query.is_empty()
             {
@@ -1083,12 +1104,14 @@ fn handle_search_input(byte: u8, state: &mut RuntimeState) -> bool {
                 state.render_state.flash_message =
                     Some(("no matches".to_string(), std::time::Instant::now()));
             }
-
             restore_or_clamp_selection(state);
             state.render_state.dirty = true;
             state.render_state.force_render = true;
         }
         b'\x1b' => {
+            state.view.filter.command_query = state.view.pre_search_query.clone();
+            rebuild_visible(state);
+            restore_or_clamp_selection(state);
             state.view.search_buffer = None;
             state.render_state.dirty = true;
             state.render_state.force_render = true;
@@ -1097,6 +1120,14 @@ fn handle_search_input(byte: u8, state: &mut RuntimeState) -> bool {
             if let Some(buf) = &mut state.view.search_buffer {
                 buf.pop();
             }
+            state.view.filter.command_query = state
+                .view
+                .search_buffer
+                .as_deref()
+                .unwrap_or("")
+                .to_string();
+            rebuild_visible(state);
+            restore_or_clamp_selection(state);
             state.render_state.dirty = true;
             state.render_state.force_render = true;
         }
@@ -1104,6 +1135,14 @@ fn handle_search_input(byte: u8, state: &mut RuntimeState) -> bool {
             if let Some(buf) = &mut state.view.search_buffer {
                 buf.push(byte as char);
             }
+            state.view.filter.command_query = state
+                .view
+                .search_buffer
+                .as_deref()
+                .unwrap_or("")
+                .to_string();
+            rebuild_visible(state);
+            restore_or_clamp_selection(state);
             state.render_state.dirty = true;
             state.render_state.force_render = true;
         }
@@ -1145,7 +1184,11 @@ fn execute_delete_blocks(state: &mut RuntimeState, block_ids: Vec<BlockId>) {
     }
 
     // Clear expanded state if it pointed at a deleted block.
-    if state.view.expanded_block.map_or(false, |id| id_set.contains(&id)) {
+    if state
+        .view
+        .expanded_block
+        .map_or(false, |id| id_set.contains(&id))
+    {
         state.view.expanded_block = None;
     }
 
@@ -1376,6 +1419,7 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
         }
         // Search
         b'/' => {
+            state.view.pre_search_query = state.view.filter.command_query.clone();
             state.view.search_buffer = Some(String::new());
             state.render_state.dirty = true;
             state.render_state.force_render = true;
@@ -1729,6 +1773,7 @@ mod tests {
             state.shell.line_count(),
             BlockKind::NormalCommand,
         );
+        state.index.index_command(id, command);
         for line in lines {
             state.shell.append(format!("{line}\n").as_bytes(), Some(id));
             state.blocks.append_output(format!("{line}\n").as_bytes());
@@ -2080,6 +2125,71 @@ mod tests {
         // copy keys on empty block store should never panic.
         assert!(handle_block_view_byte(b'o', &mut state));
         assert!(handle_block_view_byte(b'y', &mut state));
+    }
+
+    #[test]
+    fn live_search_filters_while_typing() {
+        let mut state = runtime_state();
+        add_block(&mut state, "cargo test");
+        add_block(&mut state, "ls -la");
+        enter_block_view(&mut state);
+
+        // Open search bar
+        assert!(handle_block_view_byte(b'/', &mut state));
+        assert_eq!(state.view.filter.command_query, "");
+
+        // Type 'c' — visible should filter to "cargo test"
+        assert!(handle_search_input(b'c', &mut state));
+        assert_eq!(state.view.search_buffer.as_deref(), Some("c"));
+        assert_eq!(state.view.visible.len(&state.blocks), 1);
+
+        // Type 'a'
+        assert!(handle_search_input(b'a', &mut state));
+        assert_eq!(state.view.search_buffer.as_deref(), Some("ca"));
+        assert_eq!(state.view.visible.len(&state.blocks), 1);
+
+        // Type 'r'
+        assert!(handle_search_input(b'r', &mut state));
+        assert_eq!(state.view.search_buffer.as_deref(), Some("car"));
+        assert_eq!(state.view.visible.len(&state.blocks), 1);
+
+        // Type 'z' — no match
+        assert!(handle_search_input(b'z', &mut state));
+        assert_eq!(state.view.visible.len(&state.blocks), 0);
+
+        // Backspace to remove 'z' — back to "car"
+        assert!(handle_search_input(b'\x7f', &mut state));
+        assert_eq!(state.view.search_buffer.as_deref(), Some("car"));
+        assert_eq!(state.view.visible.len(&state.blocks), 1);
+    }
+
+    #[test]
+    fn esc_restores_pre_search_filter() {
+        let mut state = runtime_state();
+        add_block(&mut state, "cargo test");
+        add_block(&mut state, "ls -la");
+        enter_block_view(&mut state);
+
+        // Set an active filter via n/N (simulate by setting filter directly)
+        state.view.filter.command_query = "cargo".to_string();
+        rebuild_visible(&mut state);
+        assert_eq!(state.view.visible.len(&state.blocks), 1);
+
+        // Open search bar — saves pre_search_query, command_query unchanged
+        assert!(handle_block_view_byte(b'/', &mut state));
+        assert_eq!(state.view.pre_search_query, "cargo");
+        assert_eq!(state.view.filter.command_query, "cargo");
+
+        // Type 'z' — filter changes to empty
+        assert!(handle_search_input(b'z', &mut state));
+        assert_eq!(state.view.filter.command_query, "z");
+        assert_eq!(state.view.visible.len(&state.blocks), 0);
+
+        // Esc restores pre_search_query
+        assert!(handle_search_input(b'\x1b', &mut state));
+        assert_eq!(state.view.filter.command_query, "cargo");
+        assert!(state.view.search_buffer.is_none());
+        assert_eq!(state.view.visible.len(&state.blocks), 1);
     }
 
     #[test]

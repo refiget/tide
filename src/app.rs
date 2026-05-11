@@ -126,10 +126,16 @@ pub struct ConfirmState {
 
 impl ConfirmState {
     pub fn single(kind: ConfirmKind, id: BlockId) -> Self {
-        Self { kind, block_ids: vec![id] }
+        Self {
+            kind,
+            block_ids: vec![id],
+        }
     }
     pub fn multi(kind: ConfirmKind, ids: Vec<BlockId>) -> Self {
-        Self { kind, block_ids: ids }
+        Self {
+            kind,
+            block_ids: ids,
+        }
     }
 }
 
@@ -176,6 +182,8 @@ pub struct ViewState {
     pub filter: BlockFilter,
     pub visible: VisibleSource,
     pub search_buffer: Option<String>,
+    /// Saved filter.command_query before opening the search bar; restored on Esc.
+    pub pre_search_query: String,
     /// Non-None while the Help overlay is open.
     pub help: Option<HelpState>,
     /// Non-None while a confirmation dialog is open.
@@ -214,6 +222,7 @@ impl Default for ViewState {
             filter: BlockFilter::default(),
             visible: VisibleSource::default(),
             search_buffer: None,
+            pre_search_query: String::new(),
             help: None,
             confirm: None,
             visual_anchor: None,

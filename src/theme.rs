@@ -109,9 +109,9 @@ impl Theme {
     pub const VISUAL_LINE_BG: Color = CatppuccinFrappe::SURFACE1;
     // Nerd Font icon colors — each role gets a distinct Frappe hue.
     // Status icons (ok/fail/running) use STATUS_* colors for semantic meaning.
-    pub const ICON_SECTION_FG: Color = CatppuccinFrappe::MAUVE;    // 󰋼  section headers
-    pub const ICON_CMD_FG: Color = CatppuccinFrappe::BLUE;          // 󰘧  command · 󰆏 copy-cmd
-    pub const ICON_PATH_FG: Color = CatppuccinFrappe::TEAL;         // 󰉋  cwd · 󰉆 copy-out
-    pub const ICON_TIME_FG: Color = CatppuccinFrappe::YELLOW;       // 󰔟  duration
-    pub const ICON_ACTION_FG: Color = CatppuccinFrappe::LAVENDER;   // 󰘳  actions · 󰈚 y · 󰑓 rerun
+    pub const ICON_SECTION_FG: Color = CatppuccinFrappe::MAUVE; // 󰋼  section headers
+    pub const ICON_CMD_FG: Color = CatppuccinFrappe::BLUE; // 󰘧  command · 󰆏 copy-cmd
+    pub const ICON_PATH_FG: Color = CatppuccinFrappe::TEAL; // 󰉋  cwd · 󰉆 copy-out
+    pub const ICON_TIME_FG: Color = CatppuccinFrappe::YELLOW; // 󰔟  duration
+    pub const ICON_ACTION_FG: Color = CatppuccinFrappe::LAVENDER; // 󰘳  actions · 󰈚 y · 󰑓 rerun
 }

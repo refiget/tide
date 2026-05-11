@@ -322,10 +322,7 @@ impl CopyFormat {
 /// - Markdown / ShellTranscript: `\n\n`
 /// - Json: wrapped in a JSON array `[…]`
 pub fn format_blocks(blocks: &[&CommandBlock], part: CopyPart, fmt: CopyFormat) -> String {
-    let entries: Vec<String> = blocks
-        .iter()
-        .map(|b| format_one(b, part, fmt))
-        .collect();
+    let entries: Vec<String> = blocks.iter().map(|b| format_one(b, part, fmt)).collect();
 
     if entries.is_empty() {
         return String::new();
@@ -384,10 +381,7 @@ fn json_string(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if (c as u32) < 0x20 => {
-                let _ = std::fmt::Write::write_fmt(
-                    &mut out,
-                    format_args!("\\u{:04x}", c as u32),
-                );
+                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("\\u{:04x}", c as u32));
             }
             c => out.push(c),
         }
@@ -810,6 +804,9 @@ mod tests {
     fn single_record_json_is_not_wrapped_in_array() {
         let b = copy_block("ls", "a");
         let result = format_blocks(&[&b], CopyPart::Both, CopyFormat::Json);
-        assert!(!result.starts_with('['), "single record should not be a JSON array");
+        assert!(
+            !result.starts_with('['),
+            "single record should not be a JSON array"
+        );
     }
 }
