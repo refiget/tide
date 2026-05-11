@@ -2,272 +2,102 @@
 
 ## Project Identity
 
-Tide is a Rust project. The binary command is `tide`.
+Tide wraps real `zsh` in a PTY, captures shell output + lifecycle markers, and renders switchable display layers:
 
-Tide is a multi-mode shell wrapper / terminal application that runs on top of real `zsh`.
+- **Plain View** — transparent zsh passthrough
+- **Block View** — structured block metadata overlaid on shell history
+- **Detail View** — full-screen pager for one block (entered via `i`, NOT Enter)
 
-It is not a terminal emulator and not a replacement for the user's terminal or shell. Tide starts and wraps real `zsh` inside the user's existing terminal, then adds a controlled input layer and a layered rendering system above that shell.
+Tide is **not** a terminal emulator, zsh replacement, scrollback scraper, or AI-first product.
 
-Simple mental model:
+## Commands
 
-```text
-Tide gives zsh a layer system.
+| Action | Command |
+|--------|---------|
+| Build | `cargo build` |
+| Run | `cargo run` |
+| Type-check | `cargo check` |
+| Test all (~119 across 9 modules) | `cargo test` |
+| Test module | `cargo test -- compositor` |
+| Single test | `cargo test tail_offset_is_zero` |
+| Format check | `cargo fmt --check` |
+| Debug block capture | `TIDE_DEBUG_BLOCKS=1 cargo run` |
 
-Plain View  -> looks like ordinary zsh
-Block View  -> overlays structured block metadata on the same shell history
-Detail View -> full-screen pager for a single block
+Pre-commit (terminal behavior changes):
+```sh
+cargo fmt --check && cargo check && cargo test
 ```
 
-**Key distinction**: "Block expansion" (Enter in Block View) is a per-block inline toggle that stays in Block View. "Detail View" (`ViewKind::Detail`) is a separate full-screen pager mode entered via `i`.
+## Architecture (flat `src/`)
 
-Chinese positioning:
+All 12 modules declared in `main.rs` — no `mod.rs`/`lib.rs`. `app.rs` and `config.rs` open with `#![allow(dead_code)]` (forward-looking types).
 
-Tide 是一个运行在 zsh 之上的多模式 shell wrapper / terminal application。它不是 terminal emulator，也不是替代系统终端，而是在现有终端中启动并包裹 zsh，为 zsh 增加一层可控输入层和渲染层。
-
-## Current Priority
-
-The current phase is the minimal Block Layer loop. Normal mode is transparent passthrough; Block and Detail modes are reconstructed from captured sidecar state:
-
-```text
-Normal:
-zsh PTY output
-  -> Marker Parser
-      -> visible bytes -> Real Terminal
-      -> sidecar capture -> ShellBuffer + BlockStore
-
-Block / Detail:
-ShellBuffer + BlockStore + ViewState
-  -> Compositor
-  -> VisualLine
-  -> Renderer
-  -> Real Terminal
-```
-
-Do not start with OpenCode, AI, persistence, a full natural-language mode, or a complete multi-mode product. The first goal is to make Plain / Blocks / Detail work from the same captured shell history while keeping Normal mode indistinguishable from ordinary zsh.
-
-**Important**: Enter toggles block expansion (stays in `ViewKind::Blocks`). It does NOT enter Detail View. Detail View is a separate full-screen pager mode entered via `i`.
-
-## Product Boundaries
-
-Tide is:
-
-- a zsh PTY wrapper
-- a command lifecycle capture layer
-- a shell text buffer
-- a structured command block store
-- a compositor that turns shell text plus block state into visual lines
-- a renderer that draws those visual lines to the real terminal
-
-Tide is not:
-
-- a terminal emulator
-- a replacement for zsh
-- a replacement for the system terminal
-- a terminal scrollback scraper
-- a standalone block list application
-- a popup UI around shell output
-- an AI-first product
+| Module | Role |
+|--------|------|
+| `main.rs` | Entry: `Config::load()` → `pty::run_shell()` |
+| `app.rs` | `ViewKind`, `ViewState`, `CommandBlock`, `BlockViewport`, ... |
+| `pty.rs` | 3-thread runtime (output/input/resize), frame-limited render loop, keyboard dispatch |
+| `block.rs` | `BlockStore` — `Vec<BlockId>` timeline + `HashMap` lookup, retention cap |
+| `buffer.rs` | `ShellBuffer` — text storage, ANSI escape handling |
+| `compositor.rs` | `ShellBuffer + BlockStore + ViewState` → `VisualLayout`; viewport math, Detail pager |
+| `renderer.rs` | Crossterm drawing — borders, styled spans, Help overlay, `BlockSelectionStyle` |
+| `config.rs` | TOML config loading, `BlockViewConfig`, `BlockLayoutConfig` |
+| `format.rs` | `compact_command()`, `compact_cwd()`, `build_top_label()`, `CopyFormat`/`format_blocks()` |
+| `index.rs` | Token inverted index for command search (substring, AND) |
+| `ansi.rs` | `parse_ansi_lines()` — raw bytes → `StyledText` spans |
+| `theme.rs` | Catppuccin Frappe color constants |
+| `shell_hooks.rs` | `Osc777Parser` — strips OSC 777 markers, emits `ShellHookEvent` |
 
 ## Hard Rules
 
 - Do not implement Tide as a terminal emulator.
-- Do not read real terminal scrollback. Normal mode may passthrough visible PTY bytes, but Tide must capture its own sidecar history before Block View is entered.
-- Do not make Block View an independent list page.
-- Do not make Block UI a popup or modal.
-- Do not depend on zsh prompt regexes to detect command boundaries.
-- Do not require the user to switch to a fixed zsh theme.
-- Do not put `selected`, `expanded`, or current view state into block data.
-- Do not write block borders, metadata, or detail text into `ShellBuffer`.
-- Do not depend on a RawProgram whitelist to preserve `vim`, `yazi`, `fzf`, `less`, or similar behavior. Normal mode is transparent, so these programs naturally own the terminal while they run.
-- Do not try to capture or replay full-screen program internals in the first phase. If Tide has no linear captured text for a command, Block View should show a placeholder body line.
-- Do not make the first implementation depend on OpenCode, AI, or a database.
+- Do not read real terminal scrollback.
+- Do not make Block View an independent list page or popup.
+- Do not depend on zsh prompt regexes for command boundaries.
+- Do not put view state (`selected`, `expanded`) into `CommandBlock`.
+- Do not write block borders/metadata/detail text into `ShellBuffer`.
+- Do not use a RawProgram whitelist — Normal mode is transparent passthrough.
+- Do not capture full-screen program internals in the first phase.
+- Do not depend on OpenCode, AI, or a database in the first phase.
 
-## Layer Ownership
+## Key Terminology Distinction
 
-`ShellBuffer` owns only shell text:
+| Concept | Trigger | View | Scope |
+|---------|---------|------|-------|
+| Block expansion | `Enter` | `ViewKind::Blocks` (inline) | Per-block toggle |
+| Detail View | `i` | `ViewKind::Detail` (full-screen pager) | Single block |
 
-- original shell text lines
-- optional association from a shell line to a `BlockId`
-- no block borders
-- no block detail text
-- no selected or expanded state
+**Enter NEVER enters Detail View.** It toggles inline expansion within Block View.
 
-`BlockStore` owns only structured block data:
+## Key Design Decisions
 
-- command
-- cwd
-- stdout / stderr, or merged output in early versions
-- exit code
-- duration
-- status
-- start / end line information
+- **Normal mode is transparent passthrough** — full-screen TUI programs (vim, fzf, less, ssh, etc.) work without a whitelist. If no linear output is captured, Block View shows `"no captured text output"`.
+- **Command boundaries from zsh hooks** (`preexec`/`precmd` via OSC 777), not prompt regexes. Integration script at `shell/zsh-integration.zsh` — user sources from `.zshrc`, not injected by Tide. Without it, Tide runs in degraded mode (no block capture).
+- **Three-thread runtime** — output thread (PTY → capture + render), input thread (stdin → dispatch), resize thread (SIGWINCH). Shared state: `Arc<Mutex<RuntimeState>>`. Lock ordering: output locks `state → stdout`; input drops state before locking stdout (avoids deadlock on Ctrl-B).
+- **Alternate screen** — Block/Detail rendering uses alt screen buffer, isolated from main terminal. `Ctrl-B` enters (input drops state lock → locks stdout → alt screen → re-acquires state). `q`/`Esc` sets `needs_cleanup` flag (separate from `dirty`/`force_render` to avoid race between output thread writes and alt-screen cleanup).
+- **Frame-limited rendering** — 16ms `FRAME_DURATION` in `pty.rs`. Force render on view switches. `j`/`k` deltas accumulated via `InputAccumulator`, flushed at frame cadence.
+- **Block viewport** — scrolls by visual line (`line_offset`), selection moves by block. Anchors: `Top`, `Tail`, `Manual`.
+- **Default block preview** — `preview_lines` (4) of output, no metadata. **Expanded** — all output lines (capped at `expanded_lines` = 15) + detail lines (command, cwd, exit, duration, actions).
+- **Block selection style** — `BlockSelectionStyle` in `renderer.rs` centralises appearance for all 5 render functions; edit `::selected()`/`::normal()`. Selected borders: LAVENDER, round (╭╮╰╯). Normal: SURFACE2.
+- **BlockIndex** indexes command text only (substring token match, AND semantics), not output text.
+- **Output truncation** — `max_output_bytes_per_block` (1MB); `output_truncated` flag surfaces as `"· truncated"` in bottom border label.
+- **Config search order** — `config/tide.toml` (local override) → `$XDG_CONFIG_HOME/tide/config.toml` → `~/.config/tide/config.toml` → `Config::default()`.
+- **`tui_apps` / `raw_programs`** are config fields defined but not yet wired into runtime behavior.
 
-`ViewState` owns display state:
+## What Not To Build Now
 
-- current `ViewKind`
-- selected block
-- expanded block
-- scroll offset
-- block viewport state, including selected index, visual line offset, and anchor
-- `detail_line_cursor` — cursor position in Detail View pager
-- `filter` — `BlockFilter` (failed_only, command_query)
-- `visible` — `VisibleSource` (AllTimeline or Filtered ids)
-- `search_buffer` — active search input string
-- `help: Option<HelpState>` — non-None while the Help overlay is open; contains `cursor`, `scroll`, and `return_view` (the view to restore on close)
+- OpenCode/AI integration, natural-language command mode
+- Database/JSONL persistence
+- Regex/glob search (current: substring token match only)
+- Case-sensitive search, search history in search bar, indexing block output text
+- Full-screen program internals capture as `ShellLine` data
+- TUI handoff-return, ReturnPanel
 
-`Compositor` owns visual composition:
+## Read Before Changing Code
 
-- reads `ShellBuffer`
-- reads `BlockStore`
-- reads `ViewState`
-- emits `VisualLine`
-- inserts block top/bottom metadata lines
-- inserts detail lines for the expanded block
-- generates styled (ANSI-colored) body lines from `output_raw`
-
-`Renderer` owns terminal drawing:
-
-- takes `VisualLine`
-- writes to the real terminal via crossterm
-- `BlockSelectionStyle` struct centralises all selection visual parameters — edit `::selected()` / `::normal()` to change selection appearance across all 5 render functions at once
-- applies theme colors (Catppuccin Frappe) for borders, selection, cursor, footer, metadata
-- renders ANSI-styled spans via `StyledBlockBodyLine` / `StyledDetailBodyLine`
-- renders Help overlay (`render_help_overlay`) as a floating modal over the active view
-- does not mutate block data
-- does not parse command lifecycle
-
-## Views
-
-### Plain View
-
-Plain View / Normal mode is transparent passthrough.
-
-- Visible PTY bytes are written to the real terminal after Tide strips its own invisible markers
-- Tide captures shell text and block lifecycle data on the side
-- No block borders
-- No block metadata
-- No block detail lines
-- No top or bottom spacer lines
-- User experience should feel like ordinary zsh, including full-screen TUI programs
-
-### Block View
-
-Block View overlays Block Metadata Layer on the same shell history.
-
-- Every command execution maps to one `ExecutionBlock`
-- `BlockStore` history retention is separate from viewport visibility
-- Block View viewport scrolls by visual line (`BlockViewport.line_offset`); selection still moves by block
-- `BlockViewport` controls the visual-line viewport and whether the view is anchored to Top, Tail, or Manual
-- **Default (preview)**: each block shows `preview_lines` of output, no metadata
-- **Expanded** (`expanded_block == Some(id)`): block shows all output lines (capped at `expanded_lines`) + detail lines (command, cwd, exit, duration, actions)
-- `Enter` toggles the selected block between default and expanded — stays in Block View, does NOT enter Detail View
-- Top and bottom metadata lines are inserted around that block's output range
-- Metadata shows block id, command, status, exit code, and duration
-- The selected block is indicated by LAVENDER border color (╭╯ corners + │ sides); no body background fill. All blocks use round corners (╭╮╰╯).
-- Body lines are rendered from `output_raw` with ANSI color/style preservation (via `parse_ansi_lines`)
-- `j` / `k` or Up / Down moves selection
-- `g` jumps to the oldest block
-- `G` jumps to the newest block and resumes follow-tail
-- `f` toggles failed-only filter
-- `/` opens command search bar (substring token match, AND semantics)
-- `y` copies output, `Y` copies command, `r` reruns the command
-- `q` / `Esc` returns to Plain View
-- repeated `j` / `k` input should be coalesced and rendered at frame cadence
-- `auto_follow_on_reach_bottom` config controls whether `j` reaching the last block re-enters Tail anchor (default false)
-- view mode switches use `force_render` to guarantee immediate redraw (no stale UI)
-
-Block View is not a list page and not a popup. It is a new rendering layer over the same shell history.
-
-### Detail View (entered via `i` from Block View)
-
-Detail View is a full-screen pager mode for deep inspection of a single block. It is NOT entered by the Enter key (Enter does inline block expansion in Block View). Entry is via `i` from Block View.
-
-- Full screen, only one block visible at a time
-- Output scrollable via `j`/`k` with a highlighted line cursor; auto-scrolls when cursor leaves visible area
-- Shows styled (ANSI-colored) output with metadata (command, cwd, exit code, duration, actions, capture status, block kind)
-- Metadata has semantic coloring: status ok=green, failed=red, running=yellow; cwd=blue; actions keys in bold mauve
-- `yc` copy command, `yo` copy output, `yb` copy block
-- `g` jumps to output top, `G` jumps to output bottom
-- `r` reruns the command
-- `q` / `Esc` returns to Block View
-
-### Terminology Distinction
-
-| Concept | Trigger | View | Navigation | Scope |
-|---------|---------|------|------------|-------|
-| **Block expansion** | `Enter` | `ViewKind::Blocks` (inline) | `j`/`k` navigate blocks | Per-block toggle |
-| **Detail View** | `i` | `ViewKind::Detail` (full-screen pager) | `j`/`k` scroll output with line cursor | Single block, immersive |
-
-### Full-Screen Programs
-
-There is no first-phase RawProgram whitelist controlling terminal passthrough.
-
-Normal mode already forwards input and visible PTY output directly, so commands such as `vim`, `nvim`, `yazi`, `fzf`, `less`, `top`, `ssh`, and `lazygit` do not need special handling to remain usable.
-
-Tide still records their command lifecycle through zsh markers. If no linear text output is captured for such a command, Block View renders a placeholder body line such as:
-
-```text
-no captured text output
-```
-
-Future versions may add metadata that labels a block as interactive, but that metadata must not decide whether terminal passthrough is allowed.
-
-## Command Boundaries
-
-Do not infer command boundaries from prompt text.
-
-Use shell integration markers emitted by zsh hooks, such as:
-
-- `preexec` for block start
-- `precmd` for block end
-- `chpwd` for cwd changes
-
-Markers should be invisible to the user and stripped from visible shell output by the capture/parser layer.
-
-`preexec` starts the block and `precmd` ends the block. Do not rely on prompt regexes, alternate-screen detection, or command-name whitelists as the primary lifecycle boundary.
-
-## Module Layout
-
-```text
-src/
-  main.rs       Entry point
-  app.rs        Core types (BlockId, ViewKind, ViewState, HelpState, FooterSegment, CommandBlock, etc.)
-  pty.rs        PTY session, 3-thread runtime, input dispatch, navigation
-  block.rs      BlockStore — timeline + HashMap lookup, retention, output cap
-  buffer.rs     ShellBuffer — text storage with ANSI escape handling
-  compositor.rs Compositor + VisualLine enum — layout, viewport math, detail pager
-  renderer.rs   Terminal drawing via crossterm — BlockSelectionStyle, borders, framed text, Help overlay, styled spans
-  config.rs     TOML config loading, BlockViewConfig, BlockLayoutConfig
-  format.rs     Label formatting (compact_command, compact_cwd, build_top_label)
-  index.rs      BlockIndex — token inverted index for search, failed block index
-  ansi.rs       ANSI parser — parse_ansi_lines, StyledText, TextStyle
-  theme.rs      Catppuccin Frappe color constants
-  shell_hooks.rs Osc777Parser — shell marker stripping, lifecycle events
-```
-
-## Engineering Rules
-
-- Keep `main.rs` thin.
-- Keep PTY, parser, buffer, block store, compositor, renderer, and input mapping separate.
-- Prefer Rust `enum` plus `match` for state machines.
-- Avoid premature traits or generic abstractions.
-- Store block output as raw bytes first when possible; derive display text separately.
-- Keep the first in-memory block store small.
-- Keep Block Layer read-only until capture and rendering are stable.
-- Update `docs/architecture.md`, `docs/block-layer.md`, `docs/internal-api.md`, and `docs/manual-testing.md` when terminal behavior or block architecture changes.
-- Before committing terminal behavior changes, run:
-
-```sh
-cargo fmt --check
-cargo check
-cargo test
-```
-
-## Read First
-
-Before changing code, read:
-
-- [docs/architecture.md](docs/architecture.md)
-- [docs/block-layer.md](docs/block-layer.md)
-- [docs/internal-api.md](docs/internal-api.md)
-- [docs/manual-testing.md](docs/manual-testing.md)
+- [docs/architecture.md](docs/architecture.md) — data flow, non-goals, module descriptions
+- [docs/block-layer.md](docs/block-layer.md) — block data model, visual generation rules
+- [docs/internal-api.md](docs/internal-api.md) — every struct, method, ownership rules
+- [docs/zsh-integration.md](docs/zsh-integration.md) — marker protocol, user setup
+- [docs/config.md](docs/config.md) — user-facing config reference
+- [docs/manual-testing.md](docs/manual-testing.md) — interactive test checklist
