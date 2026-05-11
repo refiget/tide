@@ -26,6 +26,7 @@ pub enum VisualLine {
         selected: bool,
         in_visual: bool,
         label: crate::format::TopLabel,
+        match_query: String,
     },
     BlockBottomBorder {
         block_id: BlockId,
@@ -351,6 +352,7 @@ impl Compositor {
             selected,
             in_visual,
             label: format::build_top_label_parts(block, home, available_label_width),
+            match_query: view.filter.command_query.clone(),
         });
 
         if block.kind == BlockKind::RawProgram {

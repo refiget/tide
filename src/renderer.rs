@@ -268,11 +268,13 @@ fn render_line<W: Write>(
             selected,
             in_visual,
             label,
+            match_query,
         } => {
             let _ = block_id;
             render_top_border(
                 w,
                 label,
+                match_query,
                 &BlockSelectionStyle::from_state(*selected, *in_visual),
                 width,
                 block_view,
@@ -390,6 +392,7 @@ fn render_line<W: Write>(
 fn render_top_border<W: Write>(
     w: &mut W,
     label: &crate::format::TopLabel,
+    match_query: &str,
     style: &BlockSelectionStyle,
     width: usize,
     block_view: &BlockViewConfig,
@@ -416,7 +419,20 @@ fn render_top_border<W: Write>(
 
     if !label.command.is_empty() {
         segments.push((border_fg, "  ".to_string()));
-        segments.push((command_fg, label.command.clone()));
+        if !match_query.is_empty() {
+            let tokens = search_tokens(match_query);
+            let spans = highlight_spans(&label.command, &tokens);
+            for (highlighted, part) in spans {
+                let fg = if highlighted {
+                    Theme::SEARCH_MATCH_FG
+                } else {
+                    command_fg
+                };
+                segments.push((fg, part.to_string()));
+            }
+        } else {
+            segments.push((command_fg, label.command.clone()));
+        }
     }
 
     if let Some(ref cwd) = label.cwd {
@@ -1278,6 +1294,82 @@ fn render_confirm_overlay<W: Write>(
     Ok(())
 }
 
+fn search_tokens(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_lowercase())
+        .collect()
+}
+
+fn highlight_spans<'a>(text: &'a str, tokens: &[String]) -> Vec<(bool, &'a str)> {
+    if tokens.is_empty() || text.is_empty() {
+        return vec![(false, text)];
+    }
+
+    let text_lower = text.to_lowercase();
+
+    // Collect raw match intervals as byte ranges in text_lower
+    let mut raw: Vec<(usize, usize)> = Vec::new();
+    for token in tokens {
+        if token.is_empty() {
+            continue;
+        }
+        let mut pos = 0;
+        while let Some(rel) = text_lower[pos..].find(token.as_str()) {
+            let start = pos + rel;
+            let end = start + token.len();
+            raw.push((start, end));
+            pos = end;
+        }
+    }
+
+    if raw.is_empty() {
+        return vec![(false, text)];
+    }
+
+    // Sort and merge overlapping intervals
+    raw.sort_by_key(|(s, _)| *s);
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (s, e) in raw {
+        if let Some(last) = merged.last_mut() {
+            if s <= last.1 {
+                last.1 = last.1.max(e);
+                continue;
+            }
+        }
+        merged.push((s, e));
+    }
+
+    // Map byte positions from text_lower to original text via char counts
+    let orig: Vec<(usize, usize)> = merged
+        .into_iter()
+        .map(|(s, e)| {
+            let sc = text_lower[..s].chars().count();
+            let ec = text_lower[..e].chars().count();
+            let bs = text.char_indices().nth(sc).map(|(p, _)| p).unwrap_or(text.len());
+            let be = text.char_indices().nth(ec).map(|(p, _)| p).unwrap_or(text.len());
+            (bs, be)
+        })
+        .collect();
+
+    // Build spans by slicing the original text
+    let mut spans: Vec<(bool, &'a str)> = Vec::new();
+    let mut cursor = 0;
+    for (s, e) in &orig {
+        if *s > cursor {
+            spans.push((false, &text[cursor..*s]));
+        }
+        spans.push((true, &text[*s..*e]));
+        cursor = *e;
+    }
+    if cursor < text.len() {
+        spans.push((false, &text[cursor..]));
+    }
+
+    spans
+}
+
 #[cfg(test)]
 mod tests {
     use unicode_width::UnicodeWidthStr;
@@ -1298,6 +1390,30 @@ mod tests {
         assert_eq!(UnicodeWidthStr::width(line.as_str()), 40);
         assert!(line.starts_with('┌'));
         assert!(line.ends_with('┐'));
+    }
+
+    #[test]
+    fn highlight_spans_marks_matching_tokens() {
+        let spans = highlight_spans(
+            "cargo test --workspace",
+            &["cargo".to_string(), "test".to_string()],
+        );
+        assert!(spans.iter().any(|(hi, s)| *hi && *s == "cargo"));
+        assert!(spans.iter().any(|(hi, s)| *hi && *s == "test"));
+        assert!(spans.iter().any(|(hi, s)| !*hi && s.contains("--workspace")));
+    }
+
+    #[test]
+    fn highlight_spans_no_query_returns_single_span() {
+        let spans = highlight_spans("cargo test", &[]);
+        assert_eq!(spans.len(), 1);
+        assert!(!spans[0].0);
+    }
+
+    #[test]
+    fn highlight_spans_case_insensitive() {
+        let spans = highlight_spans("Cargo Test", &["cargo".to_string()]);
+        assert!(spans.iter().any(|(hi, _)| *hi));
     }
 }
 
