@@ -907,6 +907,10 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
     match state.view.view {
         ViewKind::Plain => None,
         ViewKind::RawProgram => None,
+        ViewKind::ReturnPanel => {
+            // Stub: will be wired in Step 5. Consume all input for now.
+            Some(bytes.len().min(3))
+        }
         ViewKind::Agent => Some(1),
         ViewKind::Blocks => match bytes {
             // While a confirm dialog is open, all input goes through its handler.
@@ -2961,7 +2965,7 @@ mod tests {
             handoff: false,
             snapshot: vec![],
             after_exit: vec![],
-            return_panel: crate::config::ReturnPanelTarget::None,
+            return_panel: crate::app::ReturnPanelTarget::None,
         };
         let mut apps = std::collections::BTreeMap::new();
         apps.insert("my-custom-app".into(), cfg);

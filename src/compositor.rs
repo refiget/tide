@@ -66,6 +66,22 @@ pub enum VisualLine {
         selected: bool,
         in_visual: bool,
     },
+    ReturnPanelTopBorder {
+        #[allow(dead_code)]
+        block_id: BlockId,
+        label: String,
+    },
+    ReturnPanelBodyLine {
+        #[allow(dead_code)]
+        block_id: BlockId,
+        text: String,
+        kind: crate::app::ReturnPanelLineKind,
+    },
+    ReturnPanelBottomBorder {
+        #[allow(dead_code)]
+        block_id: BlockId,
+        label: String,
+    },
     Footer {
         segments: Vec<FooterSegment>,
     },
@@ -196,6 +212,7 @@ impl Compositor {
                     _ => vec![],
                 }
             }
+            ViewKind::ReturnPanel => Vec::new(),
             ViewKind::Agent => Vec::new(),
         }
     }

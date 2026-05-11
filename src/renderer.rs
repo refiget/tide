@@ -463,6 +463,51 @@ fn render_line<W: Write>(
                 block_view,
             )?;
         }
+        VisualLine::ReturnPanelTopBorder { label, .. } => {
+            queue!(w, SetForegroundColor(Theme::DETAIL_BORDER_FG))?;
+            queue!(
+                w,
+                Print(with_margin(
+                    &titled_border('╭', '╮', label, block_width(width, block_view)),
+                    block_view,
+                ))
+            )?;
+            queue!(w, ResetColor)?;
+        }
+        VisualLine::ReturnPanelBodyLine { text, kind, .. } => {
+            use crate::app::ReturnPanelLineKind;
+            let bw = block_width(width, block_view);
+            let margin = block_view.horizontal_margin;
+            let padding = block_view.body_padding;
+            let inner_w = bw.saturating_sub(2);
+            let body = truncate_to_width(&format!("{}{}", " ".repeat(padding), text), inner_w);
+            let fill = inner_w.saturating_sub(UnicodeWidthStr::width(body.as_str()));
+
+            let fg = match kind {
+                ReturnPanelLineKind::Title => Theme::META_HEADER_FG,
+                ReturnPanelLineKind::Field => CatppuccinFrappe::TEXT,
+                ReturnPanelLineKind::Hint => Theme::FOOTER_FG,
+                _ => CatppuccinFrappe::SUBTEXT1,
+            };
+            queue!(w, SetForegroundColor(Theme::DETAIL_BORDER_FG))?;
+            queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
+            queue!(w, SetForegroundColor(fg))?;
+            queue!(w, Print(format!("{body}{}", " ".repeat(fill))))?;
+            queue!(w, SetForegroundColor(Theme::DETAIL_BORDER_FG))?;
+            queue!(w, Print("│"))?;
+            queue!(w, ResetColor)?;
+        }
+        VisualLine::ReturnPanelBottomBorder { label, .. } => {
+            queue!(w, SetForegroundColor(Theme::DETAIL_BORDER_FG))?;
+            queue!(
+                w,
+                Print(with_margin(
+                    &titled_border('╰', '╯', label, block_width(width, block_view)),
+                    block_view,
+                ))
+            )?;
+            queue!(w, ResetColor)?;
+        }
         VisualLine::Footer { segments } => {
             render_footer(w, segments, width)?;
         }

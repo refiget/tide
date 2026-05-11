@@ -95,6 +95,7 @@ pub enum ViewKind {
     Blocks,
     Detail,
     Help,
+    ReturnPanel,
     Agent,
     RawProgram,
 }
@@ -239,6 +240,8 @@ pub struct ViewState {
     pub visual_anchor: Option<BlockId>,
     /// Anchor line for Detail View visual selection (v mode). None = not in visual mode.
     pub detail_visual_anchor: Option<usize>,
+    /// Non-None while the Return Panel overlay is showing.
+    pub return_panel: Option<ReturnPanelState>,
 }
 
 #[derive(Debug, Clone)]
@@ -274,6 +277,7 @@ impl Default for ViewState {
             confirm: None,
             visual_anchor: None,
             detail_visual_anchor: None,
+            return_panel: None,
         }
     }
 }
@@ -312,6 +316,10 @@ pub struct RenderState {
     /// Command text pending paste to PTY after alt-screen cleanup (Rerun).
     /// Set by the r key handler, consumed by the cleanup handler.
     pub pending_paste: Option<String>,
+    /// Whether Tide is currently inside its own alternate screen buffer.
+    pub in_tide_alt_screen: bool,
+    /// Actions to execute on the main screen before entering Tide alt screen.
+    pub pending_terminal_actions: Vec<TerminalAction>,
 }
 
 impl Default for RenderState {
@@ -324,6 +332,8 @@ impl Default for RenderState {
             flash_message: None,
             last_rendered_rows: 0,
             pending_paste: None,
+            in_tide_alt_screen: false,
+            pending_terminal_actions: Vec::new(),
         }
     }
 }
@@ -623,6 +633,60 @@ impl Default for TuiRuntimeState {
     fn default() -> Self {
         Self::Idle
     }
+}
+
+// ─── Return Panel ──────────────────────────────────────────────────────────
+
+/// Target view after dismissing the Return Panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReturnPanelTarget {
+    #[default]
+    None,
+    Plain,
+    Blocks,
+    Detail,
+}
+
+/// State carried while the Return Panel overlay is showing.
+#[derive(Debug, Clone)]
+pub struct ReturnPanelState {
+    pub block_id: BlockId,
+    pub target: ReturnPanelTarget,
+    pub clear_main_screen_before_show: bool,
+}
+
+/// Kind of a line in the Return Panel body, used for semantic coloring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReturnPanelLineKind {
+    Empty,
+    Title,
+    Field,
+    Separator,
+    Hint,
+}
+
+/// Side-effect action that must run on the main screen
+/// (never inside Tide's alternate screen).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalAction {
+    ClearMainScreen,
+}
+
+/// Enter Return Panel view with the given state.
+pub fn enter_return_panel(view: &mut ViewState, panel: ReturnPanelState) {
+    view.return_panel = Some(panel);
+    view.view = ViewKind::ReturnPanel;
+}
+
+/// Clear Return Panel state and reset view to Plain.
+/// Returns the previous state, if any.
+pub fn clear_return_panel(view: &mut ViewState) -> Option<ReturnPanelState> {
+    let panel = view.return_panel.take();
+    if panel.is_some() {
+        view.view = ViewKind::Plain;
+    }
+    panel
 }
 
 impl FooterSegment {

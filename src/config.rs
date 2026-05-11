@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::app::{BlockViewAction, DetailViewAction};
+use crate::app::{BlockViewAction, DetailViewAction, ReturnPanelTarget};
 use crate::format::CopyFormat;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -425,16 +425,6 @@ pub struct TuiAppConfig {
     pub after_exit: Vec<String>,
     #[serde(default)]
     pub return_panel: ReturnPanelTarget,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReturnPanelTarget {
-    #[default]
-    None,
-    Plain,
-    Blocks,
-    Detail,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
