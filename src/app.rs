@@ -147,6 +147,10 @@ pub struct HelpState {
     pub scroll: usize,
     /// The view that was active when Help was opened; restored on close.
     pub return_view: ViewKind,
+    /// Set to true after the underlying view has been rendered once with
+    /// selection suppressed. While false, render() does a full underlying
+    /// render + overlay. Once true, only the overlay is redrawn (no flicker).
+    pub underlying_rendered: bool,
 }
 
 impl HelpState {
@@ -155,6 +159,7 @@ impl HelpState {
             cursor: 0,
             scroll: 0,
             return_view,
+            underlying_rendered: false,
         }
     }
 }

@@ -119,6 +119,11 @@ pub fn leave_block_render<W: Write>(w: &mut W) -> io::Result<()> {
     execute!(w, LeaveAlternateScreen, ResetColor, Show)
 }
 
+/// Returns `(rendered_rows, drew_underlying)`.
+/// `drew_underlying` is true when the underlying Block/Detail view was
+/// re-rendered this frame (as opposed to reusing the previous frame's pixels).
+/// The caller uses this to mark `HelpState::underlying_rendered = true` so
+/// subsequent Help navigations can skip the underlying re-render (no flicker).
 pub fn render<W: Write>(
     w: &mut W,
     visual_lines: &[VisualLine],
@@ -129,15 +134,20 @@ pub fn render<W: Write>(
     rows: u16,
     cols: u16,
     last_rendered_rows: usize,
-) -> io::Result<usize> {
-    // Help overlay: only redraw the floating box, leave the underlying view untouched.
-    // Re-rendering the full underlying view on every j/k causes visible flicker in tmux
-    // because the clear+redraw is not atomic from the terminal's perspective.
+) -> io::Result<(usize, bool)> {
     if matches!(view.view, ViewKind::Help) {
-        queue!(w, Hide)?;
-        render_help_overlay(w, view, cols, rows)?;
-        w.flush()?;
-        return Ok(last_rendered_rows);
+        let already_clean = view.help.as_ref().map_or(false, |h| h.underlying_rendered);
+        if already_clean {
+            // Underlying view already rendered with suppressed highlights.
+            // Only redraw the floating Help box to avoid full-screen flicker on j/k.
+            queue!(w, Hide)?;
+            render_help_overlay(w, view, cols, rows)?;
+            w.flush()?;
+            return Ok((last_rendered_rows, false));
+        }
+        // First render since Help opened: fall through to render the underlying
+        // view (compositor has already suppressed selection via unsel), then
+        // draw the overlay on top — all in one flush, so no flicker.
     }
 
     let height = rows as usize;
@@ -154,6 +164,14 @@ pub fn render<W: Write>(
     // Clear tail lines from previous frame that are no longer covered.
     for row in rendered..last_rendered_rows {
         queue!(w, MoveTo(0, row as u16), Clear(ClearType::CurrentLine))?;
+    }
+
+    if matches!(view.view, ViewKind::Help) {
+        // Draw overlay on top of freshly-rendered underlying view (single flush).
+        queue!(w, Hide)?;
+        render_help_overlay(w, view, cols, rows)?;
+        w.flush()?;
+        return Ok((rendered, true));
     }
 
     if matches!(view.view, ViewKind::Plain) {
@@ -185,7 +203,7 @@ pub fn render<W: Write>(
     }
 
     w.flush()?;
-    Ok(rendered)
+    Ok((rendered, false))
 }
 
 fn viewport_start(lines: &[VisualLine], view: &crate::app::ViewState, height: usize) -> usize {

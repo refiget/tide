@@ -9,6 +9,8 @@ use std::{
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::format::CopyFormat;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -200,6 +202,8 @@ pub struct BlockViewConfig {
     pub body_padding: usize,
     #[serde(default = "default_show_footer")]
     pub show_footer: bool,
+    #[serde(default)]
+    pub copy_format: CopyFormat,
 }
 
 impl Default for BlockViewConfig {
@@ -215,6 +219,7 @@ impl Default for BlockViewConfig {
             horizontal_margin: default_horizontal_margin(),
             body_padding: default_body_padding(),
             show_footer: default_show_footer(),
+            copy_format: CopyFormat::Plaintext,
         }
     }
 }
@@ -347,7 +352,8 @@ fn default_return_panel() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, build_runtime_config};
+    use super::{BlockViewConfig, Config, build_runtime_config};
+    use crate::format::CopyFormat;
 
     #[test]
     fn runtime_config_uses_block_layout_defaults() {
@@ -366,6 +372,19 @@ mod tests {
         assert_eq!(runtime.block_view.body_padding, 1);
         assert!(runtime.block_view.show_footer);
         assert_eq!(runtime.max_blocks, Some(1000));
+    }
+
+    #[test]
+    fn copy_format_defaults_to_plaintext() {
+        let cfg = BlockViewConfig::default();
+        assert_eq!(cfg.copy_format, CopyFormat::Plaintext);
+    }
+
+    #[test]
+    fn copy_format_deserializes_from_toml() {
+        let toml = r#"copy_format = "markdown""#;
+        let cfg: BlockViewConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.copy_format, CopyFormat::Markdown);
     }
 
     #[test]

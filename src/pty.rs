@@ -356,6 +356,10 @@ pub fn run_shell(config: &Config) -> Result<()> {
                     ensure_selected_visible(&mut state);
                     state.render_state.dirty = true;
                     state.render_state.force_render = true;
+                    // Force Help to re-render its underlying view at the new size.
+                    if let Some(h) = &mut state.view.help {
+                        h.underlying_rendered = false;
+                    }
                 }
                 not_plain
             } else {
@@ -485,7 +489,7 @@ fn perform_block_action(state: &mut RuntimeState, action: BlockAction) {
         BlockAction::CopyBlock => CopyPart::Both,
         _ => return,
     };
-    let fmt = CopyFormat::Plaintext;
+    let fmt = state.config.block_view.copy_format;
     let text = format_blocks(&[block], part, fmt);
 
     if write_to_clipboard(&text) {
@@ -525,7 +529,7 @@ fn copy_blocks(state: &mut RuntimeState, part: CopyPart) {
     if ids.is_empty() {
         return;
     }
-    let fmt = CopyFormat::Plaintext;
+    let fmt = state.config.block_view.copy_format;
     let blocks: Vec<&_> = ids
         .iter()
         .filter_map(|&id| state.blocks.block(id))
@@ -634,7 +638,7 @@ fn render_runtime(
     let mut stdout = stdout
         .lock()
         .map_err(|_| io::Error::other("stdout lock poisoned"))?;
-    let rendered = renderer::render(
+    let (rendered, drew_underlying) = renderer::render(
         &mut *stdout,
         &visual_lines,
         &view,
@@ -651,6 +655,13 @@ fn render_runtime(
             .lock()
             .map_err(|_| io::Error::other("runtime state lock poisoned"))?;
         state.render_state.last_rendered_rows = rendered;
+        // Mark underlying view as cleanly rendered so subsequent Help
+        // navigations can skip it (avoiding full-screen flicker on j/k).
+        if drew_underlying {
+            if let Some(h) = &mut state.view.help {
+                h.underlying_rendered = true;
+            }
+        }
     }
 
     Ok(())
@@ -777,11 +788,12 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
             }
             [b'o', ..] => {
                 // Copy output — respects visual line selection
+                let fmt = state.config.block_view.copy_format;
                 let text = detail_copy_output(&state);
                 if let Some(text) = text {
                     if write_to_clipboard(&text) {
                         state.render_state.flash_message = Some((
-                            copy_flash(1, CopyPart::Output, CopyFormat::Plaintext),
+                            copy_flash(1, CopyPart::Output, fmt),
                             Instant::now(),
                         ));
                     }
@@ -793,6 +805,7 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
             }
             [b'y', ..] => {
                 // Copy command + output (or command + visual selection)
+                let fmt = state.config.block_view.copy_format;
                 let out = detail_copy_output(&state).unwrap_or_default();
                 let cmd = state
                     .view
@@ -800,7 +813,6 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                     .and_then(|id| state.blocks.block(id))
                     .map(|b| b.command.clone())
                     .unwrap_or_default();
-                // Reuse Plaintext Both format: cmd\n\nout
                 let text = format_blocks(
                     &[&crate::app::CommandBlock {
                         command: cmd,
@@ -808,11 +820,11 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                         ..crate::app::CommandBlock::default()
                     }],
                     CopyPart::Both,
-                    CopyFormat::Plaintext,
+                    fmt,
                 );
                 if write_to_clipboard(&text) {
                     state.render_state.flash_message = Some((
-                        copy_flash(1, CopyPart::Both, CopyFormat::Plaintext),
+                        copy_flash(1, CopyPart::Both, fmt),
                         Instant::now(),
                     ));
                 }
@@ -935,7 +947,7 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                 }
             };
 
-            let visible = n.min((state.rows as usize).saturating_sub(4));
+            let visible = n.min((state.rows as usize).saturating_sub(5));
 
             let close_help = |state: &mut RuntimeState| {
                 let rv = state

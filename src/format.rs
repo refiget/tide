@@ -294,7 +294,8 @@ pub enum CopyPart {
 }
 
 /// Serialization format for copied block content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CopyFormat {
     #[default]
     Plaintext,

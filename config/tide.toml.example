@@ -27,6 +27,8 @@ auto_follow_on_reach_bottom = false
 horizontal_margin = 1
 body_padding = 1
 show_footer = true
+# Clipboard serialization format: plaintext | markdown | shell_transcript | json
+copy_format = "plaintext"
 
 [block_layout]
 horizontal_padding = 1
