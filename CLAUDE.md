@@ -153,17 +153,23 @@ All state: `Arc<Mutex<RuntimeState>>`. Lock ordering: output thread locks `(stat
 - `Blocks` → `j`/`k`/Up/Down → accumulated delta, rendered at frame cadence
 - `Blocks` → `g` → `Top` anchor (force render)
 - `Blocks` → `G` → `Tail` anchor (force render)
+- `Blocks` → `Ctrl-u`/`Ctrl-d` → scroll half screen
+- `Blocks` → `Ctrl-b`/`Ctrl-f` → scroll full screen
 - `Blocks` → `Enter` → toggle `expanded_block` (inline expand/collapse, stays in Blocks, force render)
 - `Blocks` → `i` → `Detail` (full-screen pager, force render)
 - `Blocks` → `f` → toggle failed-only filter (rebuild visible, force render)
 - `Blocks` → `/` → open search bar → type query → `Enter` apply, `Esc` cancel
-- `Blocks` → `y`/`Y` → copy output/command to clipboard (with flash message)
+- `Blocks` → `n`/`N` → next/prev search result
+- `Blocks` → `c`/`o`/`y` → copy command/output/both (with flash message)
+- `Blocks` → `v` → toggle visual selection mode
+- `Blocks` → `d` → delete block(s) with confirm dialog
 - `Blocks` → `r` → rerun (exit to Plain, paste command to PTY)
 - `Blocks` → `?` → `Help` overlay (underlying Blocks view rendered behind; `j`/`k`/`g`/`G` scroll list, `?`/`q`/`Esc` close)
 - `Blocks` → `q`/`Esc` → `Plain` (reset to default ViewState, force render)
 - `Detail` → `j`/`k` → move cursor line (auto-scrolls)
 - `Detail` → `g`/`G` → jump to top/bottom
 - `Detail` → `c`/`o`/`y` → copy command/output/both
+- `Detail` → `v`/`V` → toggle visual line selection
 - `Detail` → `r` → rerun (exit to Plain, paste command to PTY)
 - `Detail` → bare `\x1b` or `q` → `Blocks` (force render); multi-byte escape sequences (arrow keys etc.) are consumed without triggering exit
 - `Detail` → `?` → `Help` overlay (underlying Detail view rendered behind; same navigation as Blocks Help)
@@ -193,14 +199,15 @@ See `config/tide.toml.example` for all available options.
 ## Config Defaults
 
 - `history.max_blocks = 1000`
-- `block_view.preview_lines = 4`
+- `block_view.auto_follow_on_reach_bottom = false`
+- `block_view.block_gap = 0`
+- `block_view.body_padding = 1`
+- `block_view.copy_format = "plaintext"`
 - `block_view.expanded_lines = 15`
 - `block_view.follow_tail = true`
-- `block_view.block_gap = 0`
-- `block_view.scroll_margin_lines = 2`
-- `block_view.auto_follow_on_reach_bottom = false`
 - `block_view.horizontal_margin = 1`
-- `block_view.body_padding = 1`
+- `block_view.preview_lines = 4`
+- `block_view.scroll_margin_lines = 2`
 - `block_view.show_footer = true`
 - `block_layout.horizontal_padding = 1`
 - `block_layout.show_padding_in_plain = true`

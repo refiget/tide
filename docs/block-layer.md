@@ -128,7 +128,6 @@ Block View overlays block metadata on the same shell history.
 - `BlockViewConfig.horizontal_margin` keeps borders away from terminal edges.
 - `BlockViewConfig.body_padding` controls inner body padding.
 - `BlockViewConfig.show_footer` reserves a compact shortcut footer.
-- `BlockViewConfig.selected_body_reverse` should stay `false` by default so selected output remains readable.
 
 Compositor first builds a complete `VisualLayout`:
 
@@ -189,12 +188,8 @@ Detail lines should include:
 
 - command
 - cwd
-- exit code
+- status (merged with exit code)
 - duration
-- status
-- stdout summary
-- stderr summary
-- actions
 
 Detail View is inline. It is not a popup.
 
@@ -225,31 +220,28 @@ If a block has no captured body lines, Block View should show a placeholder:
 
 ```text
 % › yazi
-┌─ #8 · yazi ─────────────────────────────────────┐
+┌─ [8] · yazi ─────────────────────────────────────┐
 │ no captured text output                          │
-└─ #8 · ok · exit 0 · 1m32s ──────────────────────┘
+└─ [8] · 󰄬 ok · 1m32s ────────────────────────────┘
 ```
 
 Selected example:
 
 ```text
 % › vim src/main.rs
-╭─ #12 · vim src/main.rs ─────────────────────────╮
-│ no captured text output                          │
-╰─ #12 · ok · exit 0 · 2m14s ─────────────────────╯
+╭─ [12] · vim src/main.rs ──────────────────────────╮
+│ no captured text output                            │
+╰─ [12] · 󰄬 ok · 2m14s ────────────────────────────╯
 ```
 
 Detail View for a block without captured text still shows execution metadata:
 
 ```text
-Detail
-command: yazi
-cwd: ~/Projects/demo
-exit code: 0
-duration: 1m32s
-status: ok
-actions:
-explain | fix | rerun | copy
+󰋼 Detail
+󰘧 command: yazi
+󰉋 cwd: ~/Projects/demo
+󰄬 status: ok
+󰔟 duration: 1m32s
 ```
 
 ## Selection And Expansion State
@@ -258,10 +250,20 @@ Selection and expansion are view state, not block data.
 
 Store these in `ViewState`:
 
+- `view: ViewKind`
 - `selected_block: Option<BlockId>`
 - `expanded_block: Option<BlockId>`
-- `view: ViewKind`
 - `scroll_offset: usize` legacy top-level field
+- `block_viewport: BlockViewport`
+- `detail_line_cursor: usize`
+- `filter: BlockFilter`
+- `visible: VisibleSource`
+- `search_buffer: Option<String>`
+- `pre_search_query: String`
+- `help: Option<HelpState>`
+- `confirm: Option<ConfirmState>`
+- `visual_anchor: Option<BlockId>`
+- `detail_visual_anchor: Option<usize>`
 
 Store block viewport state in `BlockViewport`:
 
@@ -287,35 +289,33 @@ api_tracker  Documents  Downloads  Projects
 
 ```text
 % › ls
-┌─ #1 · ls ───────────────────────────────────────┐
-│ api_tracker  Documents  Downloads  Projects     │
-└─ #1 · ok · exit 0 · 28ms ───────────────────────┘
+┌─ [1] · ls ───────────────────────────────────────┐
+│ api_tracker  Documents  Downloads  Projects       │
+└─ [1] · 󰄬 ok · 28ms ──────────────────────────────┘
 ```
 
 ### Selected Block View
 
 ```text
 % › cargo build
-╭─ #2 · cargo build ──────────────────────────────╮
+╭─ [2] · cargo build ──────────────────────────────╮
 │ error[E0432]: unresolved import `foo`            │
-╰─ #2 · failed · exit 101 · 2.3s ─────────────────╯
+╰─ [2] · 󰅙 fail · exit 101 · 2.3s ────────────────╯
 ```
 
 ### Detail View
 
 ```text
 % › cargo build
-╭─ #2 · cargo build ──────────────────────────────╮
+╭─ [2] · cargo build ──────────────────────────────╮
 │ error[E0432]: unresolved import `foo`            │
-│                                                  │
-│ Detail                                           │
-│ cwd: ~/Projects/demo                             │
-│ exit code: 101                                   │
-│ duration: 2.3s                                   │
-│ status: failed                                   │
-│                                                  │
-│ actions: explain | fix | rerun | copy            │
-╰─ #2 · failed · exit 101 · 2.3s ─────────────────╯
+│                                                    │
+│ 󰋼 Detail ──────────────────────────────────────── │
+│ 󰘧 command: cargo build                            │
+│ 󰉋 cwd: ~/Projects/demo                            │
+│ 󰅙 status: fail · exit 101                         │
+│ 󰔟 duration: 2.3s                                   │
+╰─ [2] · 󰅙 fail · exit 101 · 2.3s ────────────────╯
 ```
 
 ## Current Interaction Contract
@@ -332,8 +332,21 @@ Block View:
 - `k` / Up selects previous block
 - `G` jumps to the newest block and restores follow-tail
 - `g` jumps to the oldest block and disables follow-tail
-- `Enter` enters Detail View
-- `q` / `Esc` returns to Plain View
+- `Enter` expands / collapses the selected block
+- `i` enters Detail View for the selected block
+- `c` copies the command text
+- `o` copies the output text
+- `y` copies both command and output text
+- `v` toggles visual line selection mode (anchors at cursor block)
+- `d` deletes the selected block(s) with a confirmation dialog
+- `r` reruns the command (single block) or shows confirmation (multi-block visual range)
+- `f` toggles the failed-only filter
+- `/` opens the search bar for live substring filtering
+- `n` / `N` jumps to the next / previous search result
+- `?` opens the Help overlay
+- `Esc` / `q` when in visual mode exits visual mode first; second press leaves Block View
+- `Ctrl-u` / `Ctrl-d` scrolls half a screen up / down
+- `Ctrl-b` / `Ctrl-f` scrolls a full screen up / down
 
 Fast repeated `j` / `k` input is accumulated via `InputAccumulator.pending_block_delta` and flushed at frame cadence (16ms `FRAME_DURATION`). The accumulated delta is clamped to `[-limit, limit]` where `limit = min(blocks.len(), 500)` to prevent unbounded growth. Navigation at block boundaries is a no-op only when there is no pending delta; accumulated delta is clamped on flush.
 
@@ -343,4 +356,39 @@ View mode switches (enter Block View, return to Plain, enter/exit Detail, g/G ju
 
 Detail View:
 
+- `j` / `k` scroll the output lines
+- `g` / `G` jump to top / bottom
+- `c` copies the command text
+- `o` copies output text (respects visual line selection when active)
+- `y` copies both command and output
+- `v` / `V` toggles visual line selection
+- `r` reruns the command
+- `?` opens the Help overlay
 - `q` / `Esc` returns to Block View
+
+## Clipboard Copy
+
+The copy system uses `CopyPart` and `CopyFormat` from `format.rs`:
+
+```rust
+pub enum CopyPart { Command, Output, Both }
+
+pub enum CopyFormat { Plaintext, Markdown, ShellTranscript, Json }
+
+pub fn format_blocks(blocks: &[&CommandBlock], part: CopyPart, fmt: CopyFormat) -> String;
+```
+
+- `c` copies command text via `CopyPart::Command`
+- `o` copies output text via `CopyPart::Output`
+- `y` copies both via `CopyPart::Both`
+- In Block View, visual range copies all blocks in the selection
+- In Detail View, `o` respects `detail_visual_anchor` — copies only the selected range of output lines
+- `CopyFormat` is configurable via `[block_view] copy_format = "markdown"` in `tide.toml`
+
+## Footer
+
+Block View footer shows `Keybindings: ?` by default. During a live search it shows the search buffer with `/` prefix and apply/cancel hints. When a filter is active it shows the filter tags. Flash messages (e.g. `"copied command"`) temporarily replace the footer for ~1.5 seconds.
+
+Detail View footer shows `cursor/total` when output exceeds the visible area, followed by `Keybindings: ?`.
+
+The footer is rendered from `FooterSegment` values (Label, Key, Plain, Spacer, Sep). `show_footer` config controls whether it is reserved.

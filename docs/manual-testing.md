@@ -230,7 +230,7 @@ printf 'line 1\nline 2\n'
 - `false` 应显示为失败状态，top border 有 `✗`，bottom metadata 显示 `failed · <exit> · <duration>`。
 - 当前选中 block 使用 `╭╮╰╯` 或高亮边框显示，但 body 文本不应整块反色。
 - block 左右有外边距，右边框对齐，不贴终端边缘。
-- 底部显示简短 footer：`j/k move  Enter detail  g/G top/bottom  q quit`。
+- 底部显示 footer：`Keybindings: ?`。
 
 ### 2. Block View 选择
 
@@ -251,9 +251,9 @@ Up
 - 选中 block 的 top/bottom metadata line 高亮变化。
 - 选中屏幕外的历史 block 时，视口应跟随选中项移动，类似 tmux copy-mode 的历史浏览体验。
 
-### 3. Detail View 内联展开
+### 3. Block 内联展开
 
-在 Block View 内按：
+在 Block View 内选中一条 block 后按：
 
 ```text
 Enter
@@ -263,10 +263,90 @@ Enter
 
 - 不出现弹窗。
 - 当前选中 block 的输出之后、bottom metadata line 之前插入 Detail 信息。
-- Detail 信息包含 command、cwd、exit code、duration、status、stdout/stderr 摘要和 actions。
-- 按 `q` 或 `Esc` 返回 Block View。
+- Detail 信息包含 command、cwd、exit code、duration、status。
+- 再次按 `Enter` 折叠展开的 block。
+- 展开的 block 最多显示 `expanded_lines` 行 (默认 15)。
 
-### 4. 返回 Plain View（alternate screen 恢复）
+### 4. 进入 Detail View
+
+在 Block View 内选中一条 block 后按：
+
+```text
+i
+```
+
+预期：
+
+- 进入全屏 Detail View（仍在 alternate screen 内）。
+- 显示完整的 command、cwd、status、duration、actions 以及全部输出文本。
+- 输出文本带有行光标，支持滚动。
+- 底部 footer 显示行号和 `Keybindings: ?`。
+
+### 5. Detail View 操作
+
+在 Detail View 内测试：
+
+```text
+j
+k
+g
+G
+```
+
+预期：
+
+- `j` 光标向下移动一行。
+- `k` 光标向上移动一行。
+- `g` 跳到输出第一行。
+- `G` 跳到输出最后一行。
+- 输出行超出屏幕高度时，光标滚动带动 viewport。
+
+然后测试复制：
+
+```text
+c    — 复制 command
+o    — 复制 output
+y    — 复制 command + output
+```
+
+预期：
+
+- 复制到系统剪贴板。
+- footer 显示 flash 提示（如 `copied command`）。
+
+然后测试 visual 行选择：
+
+```text
+v
+```
+
+- `v` 从当前光标行开始 visual selection。
+- 再次按 `v` 或按 `V` 取消 selection。
+- 按 `o` 复制选中的输出行（只复制选中区域）。
+
+然后测试 rerun：
+
+```text
+r
+```
+
+预期：
+
+- 退出 alternate screen，command 被粘贴到 shell 中自动执行。
+
+最后退出 Detail View：
+
+```text
+q
+Esc
+```
+
+预期：
+
+- 回到 Block View。
+- 如果按 `q`/`Esc` 时已处在最后一个 view，也应正确处理。
+
+### 6. 返回 Plain View（alternate screen 恢复）
 
 在 Block View 内按：
 
@@ -290,7 +370,7 @@ q
 - 其它 shell 功能（zsh-autosuggestions, zsh-syntax-highlighting, fzf-tab 等）不受破坏。
 - 退出后 TUI 应用（vim/nvim/fzf/less）不受影响。
 
-### 5. 历史保留和 viewport
+### 7. 历史保留和 viewport
 
 在 Tide 内连续运行多条简单命令：
 
@@ -325,14 +405,132 @@ echo 12
 - 未展开 block 最多显示 `preview_lines` 行，并在超出时提示还有多少行。
 - `Enter` 后当前 block 才展开 Detail，并最多显示 `expanded_lines` 行。
 
-### 6. 强制重绘验证
+### 8. 复制操作
+
+在 Block View 内选中一个 block 后测试：
+
+```text
+c    — 复制 command
+o    — 复制 output
+y    — 复制 command + output
+```
+
+预期：
+
+- 复制内容到系统剪贴板。
+- footer 显示 flash 提示（如 `copied command`、`copied output`、`copied block`）。
+- 支持配置 `copy_format`（plaintext / markdown / shell_transcript / json）。
+
+### 9. 重跑命令
+
+在 Block View 内选中一个 block 后按：
+
+```text
+r
+```
+
+预期：
+
+- 退出 alternate screen，command 被粘贴到 shell 中自动执行。
+- shell prompt 后出现完整的 command 文本。
+
+### 10. 删除 block
+
+在 Block View 内选中一个 block 后按：
+
+```text
+d
+```
+
+预期：
+
+- 弹出确认弹窗：`Delete block [<id>]? This cannot be undone. [Y]es (N)o`
+- 按 `y` 或 `Enter` 确认删除，block 从 store 移除，选中相邻 block。
+- 按 `n` 或非确认键取消删除，block 保持不变。
+
+### 11. Visual 多选模式
+
+在 Block View 内：
+
+1. 选中一个 block，按 `v` 进入 visual mode。
+2. 使用 `j`/`k` 扩展或收缩选择范围。
+3. 按 `c`/`o`/`y` 复制所有选中 block。
+4. 按 `d` 删除所有选中 block（弹出确认弹窗）。
+5. 按 `r` 重跑第一个选中 block（多 block 弹出确认弹窗）。
+6. 按 `v` 退出 visual mode。
+
+预期：
+
+- visual 选中范围使用 YELLOW 边框高亮（与普通选中边框颜色不同）。
+- 复制/删除/重跑操作作用于 visual 范围内的所有 block。
+- 操作完成后自动退出 visual mode。
+
+### 12. 搜索
+
+在 Block View 内按：
+
+```text
+/
+```
+
+预期：
+
+- footer 变为搜索栏，显示 `/▌`。
+- 输入文本实时过滤，只显示匹配的 block。
+- command 中的匹配 token 在 top border 中高亮（SEARCH_MATCH_FG）。
+
+输入部分文本后按 `Enter`：
+
+- 搜索确认，footer 显示当前搜索词 + `Keybindings: ?`。
+
+按 `n` / `N`：
+
+- `n` 跳到下一个匹配 block（循环）。
+- `N` 跳到上一个匹配 block（循环）。
+
+搜索时按 `Esc`：
+
+- 取消搜索，恢复到搜索前的 filter 状态。
+
+### 13. 失败过滤器
+
+在 Block View 内按：
+
+```text
+f
+```
+
+预期：
+
+- footer 显示 `failed` 标签。
+- 只显示 exit code 非零的 block。
+- 再次按 `f` 关闭过滤器。
+
+### 14. Help Overlay
+
+在 Block View 或 Detail View 内按：
+
+```text
+?
+```
+
+预期：
+
+- 弹出 Help 浮窗，居中显示，标题为 `Keybindings`。
+- 显示当前 view 的完整快捷键列表。
+- 支持 `j`/`k` 导航列表，`g`/`G` 跳转首尾。
+- 按 `q`、`?` 或 `Esc` 关闭 Help。
+- 关闭后光标位置和 viewport 保持不变。
+
+### 15. 强制重绘验证
 
 目标：View 模式切换后，屏幕应立刻更新，不留残留 UI。
 
 1. 在 Plain View 下运行几条命令后按 `Ctrl-B` 进入 Block View。
 2. 在 Block View 中按 `j`、`k` 选择不同 block。
-3. 按 `Enter` 进入 Detail View。
-4. 按 `q` 或 `Esc` 返回 Block View，再按 `q` 或 `Esc` 返回 Plain View。
+3. 按 `Enter` 展开 block。
+4. 按 `i` 进入 Detail View。
+5. 按 `q` 或 `Esc` 返回 Block View，再按 `q` 或 `Esc` 返回 Plain View。
 
 预期：
 
@@ -342,7 +540,7 @@ echo 12
 - 从 Detail 返回 Block View 时，不再显示 Detail 行。
 - 退出 Block View 时不应出现白屏闪烁——clear 和所有绘制命令在同一个 `flush()` 中原子化到达终端。
 
-### 7. auto_follow_on_reach_bottom 行为验证
+### 16. auto_follow_on_reach_bottom 行为验证
 
 目标：`auto_follow_on_reach_bottom = false`（默认）时，`j` 到达最后一条 block 后不应切到 Tail anchor；新命令出现时 viewport 应保持在原位。
 
@@ -366,7 +564,7 @@ echo 12
 - `j` 到达最后一条 block 时 anchor 变成 Tail。
 - 新命令出现时 viewport 自动跟随。
 
-### 8. 输入累积和帧率限制验证
+### 17. 输入累积和帧率限制验证
 
 目标：快速重复按 `j`/`k` 时，输入被累积，仅在帧间隔到达时刷新屏幕。
 
@@ -381,10 +579,27 @@ echo 12
 - 高速移动时，viewport 应连续按 visual line 变化，不应每次强制跳到某个完整 block 顶部。
 - selected block 应保持完整可见；上下相邻 block 可以被截断显示。
 
-### 9. 当前雏形限制
+### 18. Copy Format 配置
 
-- Block View / Detail View 暂时只读，只支持选择和查看。
-- 暂不支持复制、重跑、保存、删除、AI 解释等操作。
+1. 在 `config/tide.toml` 或 `~/.config/tide/config.toml` 中设置：
+
+```toml
+[block_view]
+copy_format = "markdown"
+```
+
+2. 启动 Tide，运行一条简单命令并进入 Block View。
+3. 按 `c`、`o`、`y` 复制。
+
+预期：
+
+- 复制内容按 Markdown 格式（如 command 被 `` ` `` 包裹，output 被 ` ``` ` 包裹）。
+- footer flash 提示包含格式名称，如 `copied command · markdown`。
+
+支持的格式：`plaintext`（默认）、`markdown`、`shell_transcript`、`json`。
+
+### 19. 当前雏形限制
+
 - Block output 只保存在当前 Tide 进程内，退出 Tide 后丢弃。
 - 暂不接入数据库或文件日志。
 - Normal / Plain View 当前应为透明 passthrough；Block / Detail View 才使用 Tide renderer 重绘捕获历史。
@@ -495,7 +710,19 @@ man tmux
 - 简单全屏 TUI 仍然能以透明转发方式工作。
 - `Ctrl-B` 能进入 Block View。
 - Block View 能在同一 shell 历史上通过 viewport 浏览命令 block。
-- `Enter` 能内联展开当前 block 的 Detail View。
+- `j`/`k` 能在 Block View 导航 block，`g`/`G` 能跳到首尾。
+- `Enter` 能内联展开/折叠当前 block 的 Detail。
+- `i` 能进入全屏 Detail View。
+- Detail View 中 `j`/`k` 能滚动输出行，`g`/`G` 能跳到首尾。
+- `c`/`o`/`y` 能在 Block View 和 Detail View 复制（command / output / both）。
+- `r` 能在 Block View 和 Detail View 重跑命令。
+- `d` 能在 Block View 删除 block（带确认弹窗）。
+- `v` 能在 Block View 进入 visual 多选模式，扩展选择后复制/删除/重跑。
+- `v`/`V` 能在 Detail View 进行 visual 行选择，复制选中行。
+- `/` 能在 Block View 搜索，`n`/`N` 能导航匹配结果。
+- `f` 能在 Block View 切换失败过滤器。
+- `?` 能在 Block View 和 Detail View 打开 Help 浮窗，支持 `j`/`k` 导航。
 - `Esc` 或 `q` 能从 Detail View 回到 Block View，再从 Block View 回到 Plain View。
+- flash 消息（copied, no matches 等）显示在 footer 并在约 1.5 秒后消失。
 - `vim` / `nvim` / `yazi` / `fzf` / `less` 等全屏程序运行期间应 passthrough，退出后仍回到 Normal View。
 - 修改 hook / parser 后，`cargo test` 中的 parser 测试全部通过。

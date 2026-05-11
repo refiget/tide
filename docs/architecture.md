@@ -10,7 +10,7 @@ The key idea is that Tide gives zsh a layer system:
 
 - Plain / Normal View is ordinary zsh passthrough.
 - Block View overlays structured command metadata on the same shell history.
-- Detail View expands the selected block inline.
+- Detail View is a full-screen pager for a single block's output and metadata.
 
 ## Non-Goals
 
@@ -54,7 +54,7 @@ Responsibilities in this flow:
 - Sidecar capture stores best-effort plain text in `ShellBuffer`.
 - `ShellBuffer` stores shell text lines.
 - `BlockStore` stores structured command execution data.
-- `Compositor` combines shell text, block data, and view state into visual lines for Block / Detail views.
+- `Compositor` combines shell text, block data, and view state into visual lines for Block / Detail / Help views.
 - `Renderer` draws visual lines only when Tide is in a reconstructed view.
 
 ## Module Layout
@@ -64,22 +64,39 @@ Current source layout (flat `src/` modules):
 ```text
 src/
   main.rs          — thin entry point, loads config, starts PTY session
-  app.rs           — ViewState, BlockViewport, ViewAnchor, InputAccumulator,
-                     RenderState, AppEvent, CommandBlock, BlockKind, BlockStatus
+  app.rs           — ViewState, ViewKind, InputMode, BlockViewport, ViewAnchor,
+                     InputAccumulator, RenderState, AppEvent, CommandBlock,
+                     BlockKind, BlockStatus, BlockAction, BlockFilter,
+                     VisibleSource, HelpState, ConfirmState, ConfirmKind,
+                     FooterSegment, BlockViewAction (22 variants),
+                     DetailViewAction (15 variants)
   pty.rs           — PTY session, marker parser integration, input/output threads,
-                     frame-rate-limited render loop, viewport math, navigation
+                     frame-rate-limited render loop, viewport math, navigation,
+                     keyboard dispatch, copy/rerun/delete/help/confirm logic
   block.rs         — BlockStore (timeline + HashMap), block lifecycle, duration formatting
   buffer.rs        — ShellBuffer, ShellLine, ANSI escape sequence handling
-  compositor.rs    — VisualLine enum, compositor (ShellBuffer + BlockStore + ViewState → VisualLine),
-                     visible range computation, tail scroll offset, block height estimation
-  renderer.rs      — terminal render function, border drawing, framed text, truncation
+  compositor.rs    — VisualLine enum, Compositor (ShellBuffer + BlockStore + ViewState → VisualLine),
+                     visible range computation, tail scroll offset, block height estimation,
+                     Detail View pager (build_detail_lines), footer segments
+  renderer.rs      — terminal render function, border drawing, framed text, truncation,
+                     Help overlay (render_help_overlay), Confirm overlay (render_confirm_overlay),
+                     BlockSelectionStyle, BLOCK_HELP_ENTRIES / DETAIL_HELP_ENTRIES,
+                     enter_block_render / leave_block_render
   shell_hooks.rs   — Osc777Parser, ShellHookEvent, ParsedPtyPart, zsh install script
-  config.rs        — Config loading (TOML), BlockViewConfig, BlockLayoutConfig, RuntimeConfig
+  config.rs        — Config loading (TOML), BlockViewConfig, BlockLayoutConfig, RuntimeConfig,
+                     keymap resolution (build_resolved_block_keymap, build_resolved_detail_keymap)
+  format.rs        — compact_command, compact_cwd, TopLabel, build_top_label_parts,
+                     build_top_label, CopyFormat, CopyPart, format_blocks
+  index.rs         — BlockIndex, token inverted index for command search (substring, AND),
+                     failed block tracking
+  ansi.rs          — parse_ansi_lines, StyledText, StyledSpan, TextStyle,
+                     styled_width, truncate_styled_to_width, styled_to_plain
+  theme.rs         — Catppuccin Frappe color constants, Theme role-aliased colors
 ```
 
 ### app.rs
 
-Owns top-level app state types: `ViewKind`, `InputMode`, `ViewState`, `BlockViewport`, `ViewAnchor`, `InputAccumulator`, `RenderState`, `AppEvent`, `CommandBlock`, `BlockKind`, `BlockStatus`, `BlockAction`.
+Owns top-level app state types: `ViewKind`, `InputMode`, `ViewState`, `BlockViewport`, `ViewAnchor`, `InputAccumulator`, `RenderState`, `AppEvent`, `CommandBlock`, `BlockKind`, `BlockStatus`, `BlockAction`, `BlockFilter`, `VisibleSource`, `HelpState`, `ConfirmState`, `ConfirmKind`, `FooterSegment`, `BlockViewAction` (22 variants), `DetailViewAction` (15 variants).
 
 ### pty.rs
 
@@ -94,9 +111,11 @@ Block View uses a visual-line viewport: selection moves by block, but the viewpo
 - `q`/`Esc` in Block View → `handle_block_view_byte` sets `needs_cleanup = true` (not `dirty`/`force_render`, to avoid rendering Plain view through the renderer). The input thread's post-byte-loop handler leaves the alt screen (`leave_block_render`) and resets cleanup flags. PTY output after cleanup goes to the restored main screen normally.
 - Lock ordering: output thread always locks `(state) → (stdout)`. The input thread's Ctrl-B handler explicitly drops the state guard before locking stdout, then re-acquires state — never holding both simultaneously.
 
+Input handler dispatches through configurable keymaps (`resolved_block_keymap`, `resolved_detail_keymap`) for single-byte actions. Esc sequences (`\x1b[A`, `\x1b[B`) are hardcoded.
+
 ### block.rs
 
-Provides `BlockStore` with a `Vec<BlockId>` timeline and `HashMap<BlockId, CommandBlock>` lookup. Controls retention via `max_blocks`. Methods: `start_command`, `append_output`, `finish_command`, `block`, `block_id_at`, `len`.
+Provides `BlockStore` with a `Vec<BlockId>` timeline and `HashMap<BlockId, CommandBlock>` lookup. Controls retention via `max_blocks`. Methods: `start_command`, `append_output`, `finish_command`, `block`, `block_mut`, `block_id_at`, `len`, `remove`, `set_cwd`. Enforces `max_output_bytes_per_block` with `output_truncated` flag.
 
 ### buffer.rs
 
@@ -104,11 +123,25 @@ Owns shell text storage via `ShellBuffer`. Supports `append` with ANSI escape se
 
 ### compositor.rs
 
-Core of Block/Detail View rendering. `build_visual_layout` produces a complete `VisualLayout` with `VisualLine` values and per-block spans; `build_visual_lines` slices that layout by `BlockViewport.line_offset` and content height. This is the single source of truth for viewport math and allows partial non-selected blocks at the top or bottom while keeping the selected block fully visible when possible.
+Core of Block/Detail/Help View rendering. `build_visual_layout` produces a complete `VisualLayout` with `VisualLine` values and per-block spans; `build_visual_lines` slices that layout by `BlockViewport.line_offset` and content height. This is the single source of truth for viewport math and allows partial non-selected blocks at the top or bottom while keeping the selected block fully visible when possible.
+
+Detail View mode: `build_detail_lines` produces a full-screen pager layout for the expanded block: top border, scrollable styled output lines with line cursor and visual selection, metadata lines, bottom border, and footer. Uses `detail_line_cursor` and `detail_visual_anchor` for navigation within output.
+
+Help View mode: delegates to Block or Detail layout with selection suppressed (`unsel`), then the renderer overlays the help keybindings dialog.
+
+See [block-layer.md](block-layer.md) for the block data model and visual generation rules.
 
 ### renderer.rs
 
-Provides `render()` that draws `&[VisualLine]` to the terminal. Handles border characters (selected: `╭ ╮ ╰ ╯`, unselected: `┌ ┐ └ ┘`), framed text, titled borders, footer, cursor positioning, and unicode-width-aware truncation.
+Provides `render()` that draws `&[VisualLine]` to the terminal. Handles border characters (selected: `╭ ╮ ╰ ╯`, unselected: `┌ ┐ └ ┘`), framed text, titled borders, footer, cursor positioning, unicode-width-aware truncation, styled text rendering, and search match highlighting.
+
+Uses `BlockSelectionStyle` to centralise selection appearance: `selected()` uses LAVENDER borders, `normal()` uses SURFACE2, `visual()` uses YELLOW borders. Extended to all 5 render paths (top border, body, detail line, bottom border, styled body lines).
+
+Renders the **Help overlay** (`render_help_overlay`): a centered floating dialog showing keybinding entries from `BLOCK_HELP_ENTRIES` or `DETAIL_HELP_ENTRIES` with scroll, cursor highlight, and page counter.
+
+Renders the **Confirm overlay** (`render_confirm_overlay`): a centered dialog for destructive operations (delete block(s), rerun multiple blocks) showing the action description, hint text, and [Y]es/(N)o actions.
+
+Optimises flicker by tracking `HelpState::underlying_rendered`: on first Help frame both underlying view and overlay are rendered in a single flush; subsequent navigations redraw only the overlay.
 
 Also exposes `enter_block_render()` / `leave_block_render()` for alternate screen lifecycle:
 - `enter_block_render` — switches to the alternate screen buffer and hides the cursor. Called when entering Block View (Ctrl-B).
@@ -120,7 +153,23 @@ Owns zsh hook definitions (`install_script()`), the `Osc777Parser` that strips i
 
 ### config.rs
 
-Loads TOML config from `~/.config/tide/config.toml` or `config/tide.toml`. Provides `BlockViewConfig`, `BlockLayoutConfig`, `RuntimeConfig`, and defaults. See [config.md](config.md).
+Loads TOML config from `~/.config/tide/config.toml` or `config/tide.toml`. Provides `BlockViewConfig`, `BlockLayoutConfig`, `RuntimeConfig`, keymap resolution, and defaults. See [config.md](config.md).
+
+### format.rs
+
+Provides `compact_command()` and `compact_cwd()` for truncating long text in top border labels. `build_top_label_parts()` and `build_top_label()` produce the structured and flat top border strings. `CopyPart` / `CopyFormat` / `format_blocks()` handle clipboard serialization in plaintext, markdown, shell transcript, and JSON formats.
+
+### index.rs
+
+`BlockIndex` maintains a token inverted index of command text. Supports substring token match with AND semantics. Also tracks failed blocks for the failed-only filter. Used by pty.rs to rebuild `VisibleSource::Filtered` on search/filter changes.
+
+### ansi.rs
+
+`parse_ansi_lines()` converts raw bytes into `Vec<StyledText>` with per-line `StyledSpan` sequences. `styled_to_plain()` extracts plain text. `styled_width()` / `truncate_styled_to_width()` handle display-width-aware truncation for styled content.
+
+### theme.rs
+
+Catppuccin Frappe color constants plus `Theme` role-aliased semantic colors used across all rendering (borders, status, metadata, help, icons, cursor, visual selection, search matches).
 
 ## Input Modes vs Display Layers
 
@@ -140,6 +189,7 @@ Input behavior and display rendering are related but separate concepts.
 - `Plain`
 - `Blocks`
 - `Detail`
+- `Help`
 - `Agent`, future
 - `RawProgram`, future/reserved
 
@@ -157,6 +207,10 @@ Block View:
 Detail View:
   InputMode::DetailNav
   ViewKind::Detail
+
+Help overlay:
+  InputMode::BlockNav / DetailNav
+  ViewKind::Help
 
 Full-screen programs in Normal mode:
   InputMode::Shell
@@ -230,20 +284,36 @@ Current implementation is the minimal Block Layer loop with the following in pla
 - Rendering Block View with metadata borders (id, command, status, exit code, duration)
 - Controlling visible block history through `BlockViewport` (`selected_index`, `line_offset`, `anchor`), separate from `BlockStore` retention (`max_blocks`)
 - Truncating collapsed blocks with `preview_lines` and expanded blocks with `expanded_lines`
-- Rendering Detail View by inserting detail lines inside the selected block before the bottom border
+- Rendering Detail View as a full-screen pager with styled output, line cursor, visual selection, and metadata footer
+- Rendering Detail View by inserting detail lines inside the selected block before the bottom border (inline mode)
 - Navigation: `j`/`k` (accumulated and flushed at frame cadence), `g`, `G`, `Enter`, `q`, `Esc`, Up/Down arrows
+- Copy operations: `c` (copy command), `o` (copy output), `y` (copy both) — copies to clipboard with flash message
+- Visual mode: `v` to select a range of blocks (anchor → cursor), actions apply to range
+- Delete: `d` with confirmation dialog (Y/N), single or multi-block
+- Rerun: `r` pastes command into shell after alt-screen cleanup, with confirmation for multi-block
+- Search: `/` opens search bar with live filter-as-you-type, `n`/`N` cycles next/prev results, Esc restores pre-search filter
+- Scroll: `Ctrl-u` / `Ctrl-d` (half screen), `Ctrl-b` / `Ctrl-f` (full screen)
+- Help overlay: `?` opens a centered keybinding reference dialog with scroll and cursor
+- Confirm dialog: centered overlay for destructive operations (delete, rerun multi)
 - Viewport anchoring: `Tail` (follow newest), `Top` (oldest), `Manual` (preserve position)
 - Force render on view mode switches to prevent stale screen artifacts
 - Delta accumulation clamping to prevent unbounded growth
 - Config-gated `auto_follow_on_reach_bottom` for controlling `j`→Tail anchor behavior
 - Block store retention limits, alternate-screen detection for capture suspension
 - Frame-rate-limited rendering (16ms FRAME_DURATION)
+- Output truncation (`max_output_bytes_per_block`, 1MB) with `output_truncated` flag in bottom border
+- ANSI/VT styling capture via `ansi.rs` with styled text rendering for Block body and Detail View
+- Configurable keymap overrides for Block View and Detail View actions
+- Copy format support: plaintext, markdown, shell transcript, JSON — with multi-block serialization
+- Visual range for Detail View output lines (`V`/`v` toggle anchor → cursor)
+- Footer bar with flash messages, search buffer display, filter tags, and keybinding hint
+- Styled top border with command, cwd, status marker, and search match highlighting
 - **Alternate screen for Block/Detail views**: entering Block View (Ctrl-B) enters the alternate screen buffer via `EnterAlternateScreen`; leaving (q/Esc) leaves it. Block/Detail rendering never touches the main terminal display. On exit, SGR and cursor are reset on the restored main screen, and zsh integration provides an optional `^X^R` debug binding for manual `zle reset-prompt` if needed.
 
 Next-stage items (not yet implemented):
 
 - Return Panel
-- Block actions (copy, rerun, delete)
+- TUI app return-panel rendering
 - Persistence
 - AI-assisted explanations
 
@@ -255,7 +325,6 @@ After the Block Layer loop is stable, Tide can grow in these directions:
 - optional interactive block metadata
 - TUI handoff-return sessions
 - return panels
-- block actions such as copy, rerun, delete, collapse, and expand
 - optional persistence
 - optional AI-assisted block explanation and fix suggestions
 - optional natural-language command composition

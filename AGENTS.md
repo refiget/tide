@@ -40,7 +40,7 @@ All 12 modules declared in `main.rs` — no `mod.rs`/`lib.rs`. `app.rs` and `con
 | `block.rs` | `BlockStore` — `Vec<BlockId>` timeline + `HashMap` lookup, retention cap |
 | `buffer.rs` | `ShellBuffer` — text storage, ANSI escape handling |
 | `compositor.rs` | `ShellBuffer + BlockStore + ViewState` → `VisualLayout`; viewport math, Detail pager |
-| `renderer.rs` | Crossterm drawing — borders, styled spans, Help overlay, `BlockSelectionStyle` |
+| `renderer.rs` | Crossterm drawing — borders, styled spans, Help overlay, Confirm overlay, `BlockSelectionStyle` |
 | `config.rs` | TOML config loading, `BlockViewConfig`, `BlockLayoutConfig`, `KeymapConfig`, keymap resolution |
 | `format.rs` | `compact_command()`, `compact_cwd()`, `build_top_label()`, `CopyFormat`/`CopyPart`/`format_blocks()` |
 | `index.rs` | Token inverted index for command search (substring, AND) |
