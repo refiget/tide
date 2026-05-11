@@ -925,6 +925,7 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                     .filter(|cmd| !cmd.is_empty());
                 if let Some(cmd) = command {
                     state.view = ViewState::default();
+                    state.input_accumulator.pending_block_delta = 0;
                     state.render_state.needs_cleanup = true;
                     state.render_state.pending_paste = Some(cmd);
                 }
@@ -2190,6 +2191,136 @@ mod tests {
         assert_eq!(state.view.filter.command_query, "cargo");
         assert!(state.view.search_buffer.is_none());
         assert_eq!(state.view.visible.len(&state.blocks), 1);
+    }
+
+    // ─── Rerun flow tests ────────────────────────────────────────────────
+
+    #[test]
+    fn rerun_single_block_sets_pending_paste() {
+        let mut state = runtime_state();
+        add_block(&mut state, "echo hello");
+        enter_block_view(&mut state);
+
+        assert!(handle_block_view_byte(b'r', &mut state));
+
+        assert!(state.render_state.needs_cleanup);
+        assert_eq!(
+            state.render_state.pending_paste.as_deref(),
+            Some("echo hello")
+        );
+        assert!(matches!(state.view.view, ViewKind::Plain));
+        assert_eq!(state.input_accumulator.pending_block_delta, 0);
+    }
+
+    #[test]
+    fn rerun_empty_command_does_nothing() {
+        let mut state = runtime_state();
+        add_block(&mut state, "");
+        enter_block_view(&mut state);
+
+        state.render_state.needs_cleanup = false;
+        state.render_state.pending_paste = None;
+
+        assert!(handle_block_view_byte(b'r', &mut state));
+
+        assert!(state.render_state.pending_paste.is_none());
+        assert!(!state.render_state.needs_cleanup);
+    }
+
+    #[test]
+    fn rerun_visual_multi_shows_confirm() {
+        let mut state = runtime_state();
+        add_block(&mut state, "echo one");
+        add_block(&mut state, "echo two");
+        add_block(&mut state, "echo three");
+        enter_block_view(&mut state);
+
+        // Enter visual mode on first block (index 0)
+        select_block_index(&mut state, 0, ViewAnchor::Manual);
+        state.view.visual_anchor = state.view.selected_block;
+
+        // Navigate to block at index 2, extending visual selection to [0, 1, 2]
+        select_block_index(&mut state, 2, ViewAnchor::Manual);
+
+        // r opens confirm with RerunBlocks
+        assert!(handle_block_view_byte(b'r', &mut state));
+        let cs = state.view.confirm.as_ref().unwrap();
+        assert_eq!(cs.kind, ConfirmKind::RerunBlocks);
+        assert_eq!(cs.block_ids.len(), 3);
+    }
+
+    #[test]
+    fn rerun_visual_confirm_reruns_first_block() {
+        let mut state = runtime_state();
+        add_block(&mut state, "echo one");
+        add_block(&mut state, "echo two");
+        add_block(&mut state, "echo three");
+        enter_block_view(&mut state);
+
+        // Visual select all three blocks
+        select_block_index(&mut state, 0, ViewAnchor::Manual);
+        state.view.visual_anchor = state.view.selected_block;
+        select_block_index(&mut state, 2, ViewAnchor::Manual);
+
+        // r opens confirm
+        assert!(handle_block_view_byte(b'r', &mut state));
+        assert!(state.view.confirm.is_some());
+
+        // y confirms — reruns first block only
+        assert!(handle_block_view_byte(b'y', &mut state));
+        assert!(state.view.confirm.is_none());
+        assert_eq!(
+            state.render_state.pending_paste.as_deref(),
+            Some("echo one")
+        );
+        assert!(state.render_state.needs_cleanup);
+        assert!(state.view.visual_anchor.is_none());
+        assert!(matches!(state.view.view, ViewKind::Plain));
+    }
+
+    #[test]
+    fn rerun_visual_cancel_leaves_state_intact() {
+        let mut state = runtime_state();
+        add_block(&mut state, "echo one");
+        add_block(&mut state, "echo two");
+        add_block(&mut state, "echo three");
+        enter_block_view(&mut state);
+
+        // Visual select all three blocks
+        select_block_index(&mut state, 0, ViewAnchor::Manual);
+        state.view.visual_anchor = state.view.selected_block;
+        select_block_index(&mut state, 2, ViewAnchor::Manual);
+
+        // r opens confirm
+        assert!(handle_block_view_byte(b'r', &mut state));
+        assert!(state.view.confirm.is_some());
+
+        // n cancels
+        assert!(handle_block_view_byte(b'n', &mut state));
+        assert!(state.view.confirm.is_none());
+        assert!(state.render_state.pending_paste.is_none());
+        assert!(!state.render_state.needs_cleanup);
+        assert_eq!(state.blocks.len(), 3);
+    }
+
+    #[test]
+    fn rerun_from_detail_view_sets_pending_paste() {
+        let state = Arc::new(Mutex::new(runtime_state()));
+        {
+            let mut s = state.lock().unwrap();
+            add_block(&mut s, "cargo build");
+            enter_block_view(&mut s);
+            s.view.view = ViewKind::Detail;
+            s.view.expanded_block = s.view.selected_block;
+        }
+
+        assert_eq!(handle_view_key_sequence(b"r", &state), Some(1));
+
+        let s = state.lock().unwrap();
+        assert_eq!(s.render_state.pending_paste.as_deref(), Some("cargo build"));
+        assert!(s.render_state.needs_cleanup);
+        assert!(matches!(s.view.view, ViewKind::Plain));
+        assert_eq!(s.input_accumulator.pending_block_delta, 0);
     }
 
     // ─── Delete flow tests ───────────────────────────────────────────────
