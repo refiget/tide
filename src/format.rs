@@ -283,6 +283,118 @@ fn truncate_label(s: &str, max_width: usize) -> String {
     result
 }
 
+// ─── CopyFormat ──────────────────────────────────────────────────────────────
+
+/// Which part of a block to include in a copy operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyPart {
+    Command,
+    Output,
+    Both,
+}
+
+/// Serialization format for copied block content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CopyFormat {
+    #[default]
+    Plaintext,
+    Markdown,
+    ShellTranscript,
+    Json,
+}
+
+impl CopyFormat {
+    pub fn name(self) -> &'static str {
+        match self {
+            CopyFormat::Plaintext => "plaintext",
+            CopyFormat::Markdown => "markdown",
+            CopyFormat::ShellTranscript => "transcript",
+            CopyFormat::Json => "json",
+        }
+    }
+}
+
+/// Serialize one or more blocks into a string ready for the clipboard.
+///
+/// Multiple blocks are joined with a per-format separator:
+/// - Plaintext: `\n\n---\n\n`
+/// - Markdown / ShellTranscript: `\n\n`
+/// - Json: wrapped in a JSON array `[…]`
+pub fn format_blocks(blocks: &[&CommandBlock], part: CopyPart, fmt: CopyFormat) -> String {
+    let entries: Vec<String> = blocks
+        .iter()
+        .map(|b| format_one(b, part, fmt))
+        .collect();
+
+    if entries.is_empty() {
+        return String::new();
+    }
+
+    match fmt {
+        CopyFormat::Json if entries.len() > 1 => {
+            format!("[{}]", entries.join(","))
+        }
+        CopyFormat::Plaintext => entries.join("\n\n---\n\n"),
+        CopyFormat::Markdown | CopyFormat::ShellTranscript | CopyFormat::Json => {
+            entries.join("\n\n")
+        }
+    }
+}
+
+fn format_one(block: &CommandBlock, part: CopyPart, fmt: CopyFormat) -> String {
+    let cmd = &block.command;
+    let out = &block.output_text;
+    match fmt {
+        CopyFormat::Plaintext => match part {
+            CopyPart::Command => cmd.clone(),
+            CopyPart::Output => out.clone(),
+            CopyPart::Both => format!("{cmd}\n\n{out}"),
+        },
+        CopyFormat::Markdown => match part {
+            CopyPart::Command => format!("`{cmd}`"),
+            CopyPart::Output => format!("```\n{out}\n```"),
+            CopyPart::Both => format!("## `{cmd}`\n\n```\n{out}\n```"),
+        },
+        CopyFormat::ShellTranscript => match part {
+            CopyPart::Command => format!("$ {cmd}"),
+            CopyPart::Output => out.clone(),
+            CopyPart::Both => format!("$ {cmd}\n{out}"),
+        },
+        CopyFormat::Json => match part {
+            CopyPart::Command => format!("{{\"command\":{}}}", json_string(cmd)),
+            CopyPart::Output => format!("{{\"output\":{}}}", json_string(out)),
+            CopyPart::Both => format!(
+                "{{\"command\":{},\"output\":{}}}",
+                json_string(cmd),
+                json_string(out)
+            ),
+        },
+    }
+}
+
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = std::fmt::Write::write_fmt(
+                    &mut out,
+                    format_args!("\\u{:04x}", c as u32),
+                );
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 // ─── tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -510,5 +622,193 @@ mod tests {
             let lw = UnicodeWidthStr::width(label.as_str());
             assert!(lw <= width, "width {lw} > {width} for label: {label:?}");
         }
+    }
+
+    // ── format_blocks ────────────────────────────────────────────────────────
+
+    fn copy_block(command: &str, output: &str) -> CommandBlock {
+        CommandBlock {
+            command: command.to_string(),
+            output_text: output.to_string(),
+            ..CommandBlock::default()
+        }
+    }
+
+    // -- Plaintext --
+
+    #[test]
+    fn plaintext_command_only() {
+        let b = copy_block("ls -la", "file1\nfile2");
+        assert_eq!(
+            format_blocks(&[&b], CopyPart::Command, CopyFormat::Plaintext),
+            "ls -la"
+        );
+    }
+
+    #[test]
+    fn plaintext_output_only() {
+        let b = copy_block("ls -la", "file1\nfile2");
+        assert_eq!(
+            format_blocks(&[&b], CopyPart::Output, CopyFormat::Plaintext),
+            "file1\nfile2"
+        );
+    }
+
+    #[test]
+    fn plaintext_both() {
+        let b = copy_block("ls -la", "file1\nfile2");
+        assert_eq!(
+            format_blocks(&[&b], CopyPart::Both, CopyFormat::Plaintext),
+            "ls -la\n\nfile1\nfile2"
+        );
+    }
+
+    #[test]
+    fn plaintext_multi_record_separator() {
+        let b1 = copy_block("ls", "a");
+        let b2 = copy_block("pwd", "/home");
+        let result = format_blocks(&[&b1, &b2], CopyPart::Both, CopyFormat::Plaintext);
+        assert_eq!(result, "ls\n\na\n\n---\n\npwd\n\n/home");
+    }
+
+    // -- Markdown --
+
+    #[test]
+    fn markdown_command_only() {
+        let b = copy_block("cargo test", "ok");
+        assert_eq!(
+            format_blocks(&[&b], CopyPart::Command, CopyFormat::Markdown),
+            "`cargo test`"
+        );
+    }
+
+    #[test]
+    fn markdown_output_only() {
+        let b = copy_block("cargo test", "ok");
+        assert_eq!(
+            format_blocks(&[&b], CopyPart::Output, CopyFormat::Markdown),
+            "```\nok\n```"
+        );
+    }
+
+    #[test]
+    fn markdown_both() {
+        let b = copy_block("cargo test", "ok");
+        assert_eq!(
+            format_blocks(&[&b], CopyPart::Both, CopyFormat::Markdown),
+            "## `cargo test`\n\n```\nok\n```"
+        );
+    }
+
+    #[test]
+    fn markdown_multi_record_separator() {
+        let b1 = copy_block("ls", "a");
+        let b2 = copy_block("pwd", "/home");
+        let result = format_blocks(&[&b1, &b2], CopyPart::Both, CopyFormat::Markdown);
+        assert_eq!(
+            result,
+            "## `ls`\n\n```\na\n```\n\n## `pwd`\n\n```\n/home\n```"
+        );
+    }
+
+    // -- ShellTranscript --
+
+    #[test]
+    fn transcript_command_only() {
+        let b = copy_block("echo hi", "hi");
+        assert_eq!(
+            format_blocks(&[&b], CopyPart::Command, CopyFormat::ShellTranscript),
+            "$ echo hi"
+        );
+    }
+
+    #[test]
+    fn transcript_output_only() {
+        let b = copy_block("echo hi", "hi");
+        assert_eq!(
+            format_blocks(&[&b], CopyPart::Output, CopyFormat::ShellTranscript),
+            "hi"
+        );
+    }
+
+    #[test]
+    fn transcript_both() {
+        let b = copy_block("echo hi", "hi");
+        assert_eq!(
+            format_blocks(&[&b], CopyPart::Both, CopyFormat::ShellTranscript),
+            "$ echo hi\nhi"
+        );
+    }
+
+    #[test]
+    fn transcript_multi_record() {
+        let b1 = copy_block("ls", "a");
+        let b2 = copy_block("pwd", "/home");
+        let result = format_blocks(&[&b1, &b2], CopyPart::Both, CopyFormat::ShellTranscript);
+        assert_eq!(result, "$ ls\na\n\n$ pwd\n/home");
+    }
+
+    // -- Json --
+
+    #[test]
+    fn json_single_both() {
+        let b = copy_block("ls", "a\nb");
+        assert_eq!(
+            format_blocks(&[&b], CopyPart::Both, CopyFormat::Json),
+            r#"{"command":"ls","output":"a\nb"}"#
+        );
+    }
+
+    #[test]
+    fn json_command_only() {
+        let b = copy_block("ls", "a");
+        assert_eq!(
+            format_blocks(&[&b], CopyPart::Command, CopyFormat::Json),
+            r#"{"command":"ls"}"#
+        );
+    }
+
+    #[test]
+    fn json_output_only() {
+        let b = copy_block("ls", "a");
+        assert_eq!(
+            format_blocks(&[&b], CopyPart::Output, CopyFormat::Json),
+            r#"{"output":"a"}"#
+        );
+    }
+
+    #[test]
+    fn json_multi_record_array() {
+        let b1 = copy_block("ls", "a");
+        let b2 = copy_block("pwd", "/");
+        let result = format_blocks(&[&b1, &b2], CopyPart::Both, CopyFormat::Json);
+        assert_eq!(
+            result,
+            r#"[{"command":"ls","output":"a"},{"command":"pwd","output":"/"}]"#
+        );
+    }
+
+    #[test]
+    fn json_escapes_special_chars() {
+        let b = copy_block("echo \"hi\"", "line1\nline2\ttab");
+        let result = format_blocks(&[&b], CopyPart::Both, CopyFormat::Json);
+        assert!(result.contains(r#"\"hi\""#), "quotes should be escaped");
+        assert!(result.contains(r#"\n"#), "newlines should be escaped");
+        assert!(result.contains(r#"\t"#), "tabs should be escaped");
+    }
+
+    // -- edge cases --
+
+    #[test]
+    fn empty_block_list_returns_empty() {
+        let result = format_blocks(&[], CopyPart::Both, CopyFormat::Plaintext);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn single_record_json_is_not_wrapped_in_array() {
+        let b = copy_block("ls", "a");
+        let result = format_blocks(&[&b], CopyPart::Both, CopyFormat::Json);
+        assert!(!result.starts_with('['), "single record should not be a JSON array");
     }
 }

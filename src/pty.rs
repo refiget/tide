@@ -22,6 +22,7 @@ use crate::{
     buffer::ShellBuffer,
     compositor::Compositor,
     config::{Config, RuntimeConfig, build_runtime_config},
+    format::{CopyFormat, CopyPart, format_blocks},
     renderer::{self, BLOCK_HELP_ENTRIES, DETAIL_HELP_ENTRIES},
     shell_hooks::{Osc777Parser, ParsedPtyPart, ShellHookEvent},
 };
@@ -249,9 +250,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
 
                         if byte == 0x02 {
                             if let Ok(state) = input_state.lock() {
-                                if matches!(state.view.view, ViewKind::Plain)
-                                    && state.blocks.active_block_id().is_none()
-                                {
+                                if matches!(state.view.view, ViewKind::Plain) {
                                     // Enter alternate screen for Block View.
                                     // Lock ordering: drop state before locking stdout
                                     // (output thread locks state -> stdout, must not invert).
@@ -268,9 +267,8 @@ pub fn run_shell(config: &Config) -> Result<()> {
                                         &input_stdout,
                                         false,
                                     );
-                                } else if writer.write_all(&[byte]).is_err() {
-                                    return;
                                 }
+                                // Always consume Ctrl-B — never forward to the PTY.
                                 index += 1;
                                 continue;
                             }
@@ -481,20 +479,17 @@ fn perform_block_action(state: &mut RuntimeState, action: BlockAction) {
         return;
     };
 
-    let text = match action {
-        BlockAction::CopyOutput => block.output_text.clone(),
-        BlockAction::CopyCommand => block.command.clone(),
-        BlockAction::CopyBlock => format!("{}\n\n{}", block.command, block.output_text),
+    let part = match action {
+        BlockAction::CopyOutput => CopyPart::Output,
+        BlockAction::CopyCommand => CopyPart::Command,
+        BlockAction::CopyBlock => CopyPart::Both,
         _ => return,
     };
+    let fmt = CopyFormat::Plaintext;
+    let text = format_blocks(&[block], part, fmt);
 
     if write_to_clipboard(&text) {
-        let msg = match action {
-            BlockAction::CopyOutput => "copied output".to_string(),
-            BlockAction::CopyCommand => "copied command".to_string(),
-            BlockAction::CopyBlock => "copied block".to_string(),
-            _ => unreachable!(),
-        };
+        let msg = copy_flash(1, part, fmt);
         state.render_state.flash_message = Some((msg, Instant::now()));
         state.render_state.dirty = true;
         state.render_state.force_render = true;
@@ -525,39 +520,42 @@ fn exit_visual_mode(state: &mut RuntimeState) {
     state.view.visual_anchor = None;
 }
 
-enum CopyMode {
-    Command,
-    Output,
-    Both,
-}
-
-fn copy_blocks(state: &mut RuntimeState, mode: CopyMode) {
+fn copy_blocks(state: &mut RuntimeState, part: CopyPart) {
     let ids = visual_range_ids(state);
     if ids.is_empty() {
         return;
     }
-    let separator = "\n\n---\n\n";
-    let text: String = ids
+    let fmt = CopyFormat::Plaintext;
+    let blocks: Vec<&_> = ids
         .iter()
         .filter_map(|&id| state.blocks.block(id))
-        .map(|b| match mode {
-            CopyMode::Command => b.command.clone(),
-            CopyMode::Output => b.output_text.clone(),
-            CopyMode::Both => format!("{}\n\n{}", b.command, b.output_text),
-        })
-        .collect::<Vec<_>>()
-        .join(separator);
-    let msg = match mode {
-        CopyMode::Command => "copied command",
-        CopyMode::Output => "copied output",
-        CopyMode::Both => "copied block",
-    };
+        .collect();
+    let text = format_blocks(&blocks, part, fmt);
     if write_to_clipboard(&text) {
-        state.render_state.flash_message = Some((msg.to_string(), Instant::now()));
+        let msg = copy_flash(blocks.len(), part, fmt);
+        state.render_state.flash_message = Some((msg, Instant::now()));
         state.render_state.dirty = true;
         state.render_state.force_render = true;
     }
     exit_visual_mode(state);
+}
+
+fn copy_flash(count: usize, part: CopyPart, fmt: CopyFormat) -> String {
+    let what = match part {
+        CopyPart::Command => if count == 1 { "command" } else { "commands" },
+        CopyPart::Output => if count == 1 { "output" } else { "outputs" },
+        CopyPart::Both => if count == 1 { "block" } else { "blocks" },
+    };
+    let prefix = if count == 1 {
+        format!("copied {what}")
+    } else {
+        format!("copied {count} {what}")
+    };
+    if fmt == CopyFormat::Plaintext {
+        prefix
+    } else {
+        format!("{prefix} · {}", fmt.name())
+    }
 }
 
 /// For Detail View: copy output respecting visual line selection.
@@ -782,8 +780,10 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                 let text = detail_copy_output(&state);
                 if let Some(text) = text {
                     if write_to_clipboard(&text) {
-                        state.render_state.flash_message =
-                            Some(("copied output".to_string(), Instant::now()));
+                        state.render_state.flash_message = Some((
+                            copy_flash(1, CopyPart::Output, CopyFormat::Plaintext),
+                            Instant::now(),
+                        ));
                     }
                 }
                 state.view.detail_visual_anchor = None;
@@ -800,10 +800,21 @@ fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> O
                     .and_then(|id| state.blocks.block(id))
                     .map(|b| b.command.clone())
                     .unwrap_or_default();
-                let text = format!("{cmd}\n\n{out}");
+                // Reuse Plaintext Both format: cmd\n\nout
+                let text = format_blocks(
+                    &[&crate::app::CommandBlock {
+                        command: cmd,
+                        output_text: out,
+                        ..crate::app::CommandBlock::default()
+                    }],
+                    CopyPart::Both,
+                    CopyFormat::Plaintext,
+                );
                 if write_to_clipboard(&text) {
-                    state.render_state.flash_message =
-                        Some(("copied block".to_string(), Instant::now()));
+                    state.render_state.flash_message = Some((
+                        copy_flash(1, CopyPart::Both, CopyFormat::Plaintext),
+                        Instant::now(),
+                    ));
                 }
                 state.view.detail_visual_anchor = None;
                 state.render_state.dirty = true;
@@ -1289,19 +1300,19 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
         }
         // Copy: c = command, o = output, y = both
         b'c' => {
-            copy_blocks(state, CopyMode::Command);
+            copy_blocks(state, CopyPart::Command);
             state.render_state.dirty = true;
             state.render_state.force_render = true;
             true
         }
         b'o' => {
-            copy_blocks(state, CopyMode::Output);
+            copy_blocks(state, CopyPart::Output);
             state.render_state.dirty = true;
             state.render_state.force_render = true;
             true
         }
         b'y' => {
-            copy_blocks(state, CopyMode::Both);
+            copy_blocks(state, CopyPart::Both);
             state.render_state.dirty = true;
             state.render_state.force_render = true;
             true

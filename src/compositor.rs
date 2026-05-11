@@ -720,12 +720,12 @@ fn detail_lines(
         .exit_code
         .map(|code| code.to_string())
         .unwrap_or_else(|| "-".to_string());
-    let status = match block.status {
-        crate::app::BlockStatus::Running => "running",
-        crate::app::BlockStatus::Success => "ok",
-        crate::app::BlockStatus::Failed => "failed",
-        crate::app::BlockStatus::Interrupted => "cancelled",
-        crate::app::BlockStatus::Unknown => "unknown",
+    let status_value = match block.status {
+        crate::app::BlockStatus::Running => "running".to_string(),
+        crate::app::BlockStatus::Success => "ok".to_string(),
+        crate::app::BlockStatus::Failed => format!("fail · exit {exit}"),
+        crate::app::BlockStatus::Interrupted => "cancelled".to_string(),
+        crate::app::BlockStatus::Unknown => "unknown".to_string(),
     };
 
     let mut lines = vec![
@@ -733,9 +733,8 @@ fn detail_lines(
         "Detail".to_string(),
         format!("command: {}", block.command),
         format!("cwd: {}", block.cwd.display()),
-        format!("exit code: {exit}"),
+        format!("status: {status_value}"),
         format!("duration: {}", format_duration_ms(block.duration_ms)),
-        format!("status: {status}"),
         String::new(),
     ];
 
@@ -748,10 +747,7 @@ fn detail_lines(
         lines.extend([
             "type: interactive program".to_string(),
             "capture: no linear text output was captured for this block.".to_string(),
-            "actions:  c copy command   o copy output   y copy both   r rerun".to_string(),
         ]);
-    } else {
-        lines.push("actions:  c copy command   o copy output   y copy both   r rerun".to_string());
     }
 
     lines
@@ -766,34 +762,46 @@ fn detail_lines(
         .collect()
 }
 
-fn bottom_label(block: &CommandBlock) -> String {
-    let status = match block.status {
-        crate::app::BlockStatus::Running => "running",
-        crate::app::BlockStatus::Success => "ok",
-        crate::app::BlockStatus::Failed => "failed",
-        crate::app::BlockStatus::Interrupted => "cancelled",
-        crate::app::BlockStatus::Unknown => "unknown",
-    };
-    let exit = block
-        .exit_code
-        .map(|code| code.to_string())
-        .unwrap_or_else(|| "-".to_string());
+fn format_ago(t: std::time::SystemTime) -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(t)
+        .unwrap_or_default()
+        .as_secs();
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else {
+        format!("{}h ago", secs / 3600)
+    }
+}
 
-    let status = if block.kind == BlockKind::RawProgram {
-        "raw"
-    } else {
-        status
-    };
-    let truncated = if block.output_truncated {
-        " · truncated"
-    } else {
-        ""
-    };
-    format!(
-        "{status} · {exit} · {}{}",
-        format_duration_ms(block.duration_ms),
-        truncated
-    )
+fn bottom_label(block: &CommandBlock) -> String {
+    if block.kind == BlockKind::RawProgram {
+        return format!("raw · {}", format_duration_ms(block.duration_ms));
+    }
+    let truncated = if block.output_truncated { " · truncated" } else { "" };
+    let ago = block
+        .finished_at
+        .map(format_ago)
+        .map(|s| format!(" · {s}"))
+        .unwrap_or_default();
+    let dur = format_duration_ms(block.duration_ms);
+    match block.status {
+        crate::app::BlockStatus::Running => format!("󰔟 running · {dur}{truncated}"),
+        crate::app::BlockStatus::Success => format!("󰄬 ok · {dur}{truncated}{ago}"),
+        crate::app::BlockStatus::Failed => {
+            let exit = block
+                .exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            format!("󰅙 fail · exit {exit} · {dur}{truncated}{ago}")
+        }
+        crate::app::BlockStatus::Interrupted => {
+            format!("󰅙 cancelled · {dur}{truncated}{ago}")
+        }
+        crate::app::BlockStatus::Unknown => format!("? unknown · {dur}{truncated}{ago}"),
+    }
 }
 
 fn footer_segments(
@@ -1310,7 +1318,7 @@ mod tests {
     }
 
     #[test]
-    fn detail_actions_shows_copy_keys() {
+    fn detail_shows_command_and_status() {
         let (mut shell, mut store, mut view, config) = fixture();
         let id = add_block(&mut shell, &mut store, "echo hello", &["hello"]);
         view.view = ViewKind::Detail;
@@ -1325,16 +1333,13 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let actions_line = detail_texts.iter().find(|t| t.contains("actions:"));
-        assert!(actions_line.is_some(), "detail should contain actions line");
-        let actions = actions_line.unwrap();
         assert!(
-            actions.contains("o copy output"),
-            "actions should show o copy output, got: {actions}"
+            detail_texts.iter().any(|t| t.contains("command:")),
+            "detail should contain command line"
         );
         assert!(
-            actions.contains("c copy command"),
-            "actions should show c copy command, got: {actions}"
+            detail_texts.iter().any(|t| t.contains("status:")),
+            "detail should contain status line"
         );
     }
 

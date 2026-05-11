@@ -130,6 +130,16 @@ pub fn render<W: Write>(
     cols: u16,
     last_rendered_rows: usize,
 ) -> io::Result<usize> {
+    // Help overlay: only redraw the floating box, leave the underlying view untouched.
+    // Re-rendering the full underlying view on every j/k causes visible flicker in tmux
+    // because the clear+redraw is not atomic from the terminal's perspective.
+    if matches!(view.view, ViewKind::Help) {
+        queue!(w, Hide)?;
+        render_help_overlay(w, view, cols, rows)?;
+        w.flush()?;
+        return Ok(last_rendered_rows);
+    }
+
     let height = rows as usize;
     let start = viewport_start(visual_lines, view, height);
 
@@ -168,10 +178,6 @@ pub fn render<W: Write>(
         queue!(w, MoveTo(cursor_col as u16, cursor_row as u16), Show)?;
     } else {
         queue!(w, Hide)?;
-    }
-
-    if matches!(view.view, ViewKind::Help) {
-        render_help_overlay(w, view, cols, rows)?;
     }
 
     if view.confirm.is_some() {
@@ -506,10 +512,18 @@ fn render_block_detail_line<W: Write>(
     let padding = block_view.body_padding;
     let pad_str = " ".repeat(padding);
 
+    // Nerd Font icons in this terminal render as 1 cell (standard unicode_width value).
+    const NERD_W: usize = 1;
+    // Fixed display width for the icon + label column in metadata rows.
+    // icon(1) + space(1) + "duration"(8) + pad(2) = 12
+    const DETAIL_LABEL_COL: usize = 12;
+
     if text == "Detail" {
         let content_w = inner_w.saturating_sub(padding);
-        let label = truncate_to_width(text, content_w);
-        let fill = content_w.saturating_sub(UnicodeWidthStr::width(label.as_str()));
+        // "󰋼 Detail " occupies NERD_W + " Detail " = 2 + 8 = 10 display cells
+        let header_text = " Detail "; // space + label + trailing space
+        let header_w = NERD_W + UnicodeWidthStr::width(header_text);
+        let fill = content_w.saturating_sub(header_w);
 
         if let Some(bg) = bg {
             queue!(w, SetBackgroundColor(bg))?;
@@ -518,14 +532,16 @@ fn render_block_detail_line<W: Write>(
         queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
         queue!(w, Print(&pad_str))?;
         queue!(w, SetAttribute(Attribute::Bold))?;
-        queue!(w, SetForegroundColor(Theme::META_HEADER_FG))?;
-        queue!(w, Print(&label))?;
+        queue!(w, SetForegroundColor(Theme::ICON_SECTION_FG))?;
+        queue!(w, Print("󰋼"))?;
         queue!(w, SetAttribute(Attribute::Reset))?;
         if let Some(bg) = bg {
             queue!(w, SetBackgroundColor(bg))?;
         }
-        queue!(w, Print(" ".repeat(fill)))?;
+        queue!(w, SetForegroundColor(Theme::META_HEADER_FG))?;
+        queue!(w, Print(header_text))?;
         queue!(w, SetForegroundColor(border_fg))?;
+        queue!(w, Print("─".repeat(fill)))?;
         queue!(w, Print("│"))?;
         if bg.is_some() {
             queue!(w, Print(" ".repeat(width.saturating_sub(bw + margin))))?;
@@ -536,48 +552,100 @@ fn render_block_detail_line<W: Write>(
 
     if let Some((label, value)) = text.split_once(": ") {
         let content_w = inner_w.saturating_sub(padding);
-        let label_colon = format!("{label}: ");
-        let label_w = UnicodeWidthStr::width(label_colon.as_str()).min(content_w);
-        let value_w = content_w.saturating_sub(label_w);
-        let label_display = truncate_to_width(&label_colon, label_w);
-        let value_display = truncate_to_width(value, value_w);
-        let fill_base = content_w
-            .saturating_sub(UnicodeWidthStr::width(label_display.as_str()))
-            .saturating_sub(UnicodeWidthStr::width(value_display.as_str()));
+        // Determine icon and colors for known metadata fields.
+        let field_icon: &str = match label {
+            "command" => "󰘧",
+            "cwd" => "󰉋",
+            "status" => {
+                if value.starts_with("ok") { "󰄬" }
+                else if value.starts_with("fail") { "󰅙" }
+                else { "󰔟" }
+            }
+            "duration" => "󰔟",
+            "actions" => "󰘳",
+            _ => "",
+        };
+
+        let icon_fg = match label {
+            "status" => {
+                if value.starts_with("ok") { Theme::STATUS_OK_FG }
+                else if value.starts_with("fail") { Theme::STATUS_FAILED_FG }
+                else { Theme::STATUS_RUNNING_FG }
+            }
+            "command" => Theme::ICON_CMD_FG,
+            "cwd"     => Theme::ICON_PATH_FG,
+            "duration" => Theme::ICON_TIME_FG,
+            "actions" => Theme::ICON_ACTION_FG,
+            _ => Theme::META_LABEL_FG,
+        };
+
+        let value_fg: Option<Color> = match label {
+            "status" => {
+                if value.starts_with("ok") { Some(Theme::STATUS_OK_FG) }
+                else if value.starts_with("fail") { Some(Theme::STATUS_FAILED_FG) }
+                else { Some(Theme::STATUS_RUNNING_FG) }
+            }
+            "cwd" => Some(Theme::META_PATH_FG),
+            "duration" => Some(Theme::STATUS_RUNNING_FG),
+            "capture" | "type" => Some(Theme::STATUS_RUNNING_FG),
+            _ => None,
+        };
 
         if label == "actions" {
-            if let Some(bg) = bg {
-                queue!(w, SetBackgroundColor(bg))?;
-            }
+            // Fixed label column + icon-prefixed action items with 2-space separators.
+            let label_text_w = UnicodeWidthStr::width(label);
+            let label_pad = DETAIL_LABEL_COL.saturating_sub(NERD_W + 1 + label_text_w);
+            let actions = parse_actions(value);
+
+            if let Some(bg) = bg { queue!(w, SetBackgroundColor(bg))?; }
             queue!(w, SetForegroundColor(border_fg))?;
             queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
             queue!(w, Print(&pad_str))?;
+            queue!(w, SetForegroundColor(Theme::ICON_ACTION_FG))?;
+            queue!(w, Print(field_icon))?;
             queue!(w, SetForegroundColor(Theme::META_LABEL_FG))?;
-            queue!(w, Print(&label_display))?;
+            queue!(w, Print(format!(" {label}{}", " ".repeat(label_pad))))?;
 
-            let mut used_w = UnicodeWidthStr::width(label_display.as_str());
-            let actions = parse_actions(value);
+            let mut used_w = DETAIL_LABEL_COL;
+            let mut first = true;
             for (key, action_text) in &actions {
-                let seg = format!("{key} {action_text}");
-                let seg_w = UnicodeWidthStr::width(seg.as_str());
-                let remaining = content_w.saturating_sub(used_w);
-                if seg_w > remaining {
-                    break;
-                }
-                if used_w > 0 {
-                    queue!(w, Print("   "))?;
+                let action_icon: &str = match key.as_str() {
+                    "c" => "󰆏",
+                    "o" => "󰉆",
+                    "y" => "󰈚",
+                    "r" => "󰑓",
+                    _ => "",
+                };
+                let aicon_w: usize = if action_icon.is_empty() { 0 } else { NERD_W + 1 };
+                let key_w = UnicodeWidthStr::width(key.as_str());
+                let text_w = UnicodeWidthStr::width(action_text.as_str());
+                let seg_w = aicon_w + key_w + 1 + text_w;
+                let sep_w: usize = if first { 0 } else { 2 };
+                if used_w + sep_w + seg_w > content_w { break; }
+
+                if !first { queue!(w, Print("  "))?; used_w += 2; }
+                first = false;
+
+                if !action_icon.is_empty() {
+                    let aicon_fg = match key.as_str() {
+                        "c" => Theme::ICON_CMD_FG,
+                        "o" => Theme::ICON_PATH_FG,
+                        _   => Theme::ICON_ACTION_FG,  // y, r
+                    };
+                    queue!(w, SetForegroundColor(aicon_fg))?;
+                    queue!(w, Print(action_icon))?;
+                    queue!(w, Print(" "))?;
+                    used_w += NERD_W + 1;
                 }
                 queue!(w, SetAttribute(Attribute::Bold))?;
                 queue!(w, SetForegroundColor(Theme::META_ACTION_KEY_FG))?;
                 queue!(w, Print(key))?;
                 queue!(w, SetAttribute(Attribute::Reset))?;
-                if let Some(bg) = bg {
-                    queue!(w, SetBackgroundColor(bg))?;
-                }
+                if let Some(bg) = bg { queue!(w, SetBackgroundColor(bg))?; }
                 queue!(w, SetForegroundColor(Theme::META_ACTION_TEXT_FG))?;
                 queue!(w, Print(" "))?;
                 queue!(w, Print(action_text))?;
-                used_w += seg_w + 3;
+                used_w += key_w + 1 + text_w;
             }
 
             let remaining = content_w.saturating_sub(used_w);
@@ -591,31 +659,51 @@ fn render_block_detail_line<W: Write>(
             return Ok(());
         }
 
-        let value_fg = match label {
-            "status" => match value {
-                "ok" => Some(Theme::STATUS_OK_FG),
-                "failed" => Some(Theme::STATUS_FAILED_FG),
-                "running" => Some(Theme::STATUS_RUNNING_FG),
-                _ => None,
-            },
-            "cwd" => Some(Theme::META_PATH_FG),
-            "exit code" => {
-                if value == "0" {
-                    Some(Theme::STATUS_OK_FG)
-                } else if value == "-" {
-                    None
-                } else {
-                    Some(Theme::STATUS_FAILED_FG)
-                }
-            }
-            "duration" => Some(Theme::STATUS_RUNNING_FG),
-            "capture" | "type" => Some(Theme::STATUS_RUNNING_FG),
-            _ => None,
-        };
+        if !field_icon.is_empty() {
+            // Known metadata field: fixed icon + label column, then value.
+            let label_text_w = UnicodeWidthStr::width(label);
+            let label_pad = DETAIL_LABEL_COL.saturating_sub(NERD_W + 1 + label_text_w);
+            let value_w = content_w.saturating_sub(DETAIL_LABEL_COL);
+            let value_display = truncate_to_width(value, value_w);
+            let value_display_w = UnicodeWidthStr::width(value_display.as_str());
+            let fill = content_w.saturating_sub(DETAIL_LABEL_COL + value_display_w);
 
-        if let Some(bg) = bg {
-            queue!(w, SetBackgroundColor(bg))?;
+            if let Some(bg) = bg { queue!(w, SetBackgroundColor(bg))?; }
+            queue!(w, SetForegroundColor(border_fg))?;
+            queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
+            queue!(w, Print(&pad_str))?;
+            queue!(w, SetForegroundColor(icon_fg))?;
+            queue!(w, Print(field_icon))?;
+            queue!(w, SetForegroundColor(Theme::META_LABEL_FG))?;
+            queue!(w, Print(format!(" {label}{}", " ".repeat(label_pad))))?;
+            if let Some(fg) = value_fg {
+                queue!(w, SetForegroundColor(fg))?;
+            } else {
+                queue!(w, ResetColor)?;
+                if let Some(bg) = bg { queue!(w, SetBackgroundColor(bg))?; }
+            }
+            queue!(w, Print(&value_display))?;
+            queue!(w, Print(" ".repeat(fill)))?;
+            queue!(w, SetForegroundColor(border_fg))?;
+            queue!(w, Print("│"))?;
+            if bg.is_some() {
+                queue!(w, Print(" ".repeat(width.saturating_sub(bw + margin))))?;
+            }
+            queue!(w, ResetColor)?;
+            return Ok(());
         }
+
+        // Fallback: generic label: value rendering for unknown/plain fields.
+        let label_colon = format!("{label}: ");
+        let label_w = UnicodeWidthStr::width(label_colon.as_str()).min(content_w);
+        let value_w = content_w.saturating_sub(label_w);
+        let label_display = truncate_to_width(&label_colon, label_w);
+        let value_display = truncate_to_width(value, value_w);
+        let fill_base = content_w
+            .saturating_sub(UnicodeWidthStr::width(label_display.as_str()))
+            .saturating_sub(UnicodeWidthStr::width(value_display.as_str()));
+
+        if let Some(bg) = bg { queue!(w, SetBackgroundColor(bg))?; }
         queue!(w, SetForegroundColor(border_fg))?;
         queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
         queue!(w, Print(&pad_str))?;
@@ -625,9 +713,7 @@ fn render_block_detail_line<W: Write>(
             queue!(w, SetForegroundColor(fg))?;
         } else {
             queue!(w, ResetColor)?;
-            if let Some(bg) = bg {
-                queue!(w, SetBackgroundColor(bg))?;
-            }
+            if let Some(bg) = bg { queue!(w, SetBackgroundColor(bg))?; }
         }
         queue!(w, Print(&value_display))?;
         queue!(w, Print(" ".repeat(fill_base)))?;
@@ -946,7 +1032,7 @@ fn render_help_overlay<W: Write>(
 
     let box_w = 56_usize.min(cols as usize - 4).max(20);
     let inner_w = box_w - 2;
-    let key_area = 13_usize;
+    let key_area = 20_usize;
     let desc_w = inner_w.saturating_sub(key_area);
 
     let visible_rows = n.min((rows as usize).saturating_sub(5));
@@ -984,7 +1070,10 @@ fn render_help_overlay<W: Write>(
             queue!(w, SetBackgroundColor(Theme::HELP_SEL_BG))?;
         }
 
-        let key_str = format!("  {:>9}  ", entry.key);
+        let key_inner = key_area - 4;
+        let key_truncated = truncate_to_width(entry.key, key_inner);
+        let key_pad = key_inner.saturating_sub(UnicodeWidthStr::width(key_truncated.as_str()));
+        let key_str = format!("  {}{}  ", " ".repeat(key_pad), key_truncated);
         let key_fg = if is_sel {
             Theme::HELP_SEL_FG
         } else {
