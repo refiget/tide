@@ -1193,6 +1193,127 @@ mod tests {
         );
     }
 
+    // ─── Block gap tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn block_gap_zero_emits_no_empty_lines() {
+        let (mut shell, mut store, mut view, config) = fixture();
+        add_block(&mut shell, &mut store, "echo", &["hello"]);
+        tail_view(&mut view, &store);
+
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
+
+        let empty_count = layout
+            .lines
+            .iter()
+            .filter(|l| matches!(l, VisualLine::Empty))
+            .count();
+        assert_eq!(empty_count, 0);
+    }
+
+    #[test]
+    fn block_gap_one_emits_one_empty_line_per_block() {
+        let (mut shell, mut store, mut view, mut config) = fixture();
+        config.block_gap = 1;
+        add_block(&mut shell, &mut store, "a", &["a1"]);
+        add_block(&mut shell, &mut store, "b", &["b1"]);
+        tail_view(&mut view, &store);
+
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
+
+        // Count Empty lines
+        let empty_indices: Vec<usize> = layout
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| matches!(l, VisualLine::Empty))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(empty_indices.len(), 2, "one gap line per block");
+
+        // Each Empty line must be immediately after a BlockBottomBorder
+        for &idx in &empty_indices {
+            assert!(idx > 0, "Empty line at {idx} should not be at position 0");
+            assert!(
+                matches!(layout.lines[idx - 1], VisualLine::BlockBottomBorder { .. }),
+                "Empty line at {idx} should follow BlockBottomBorder"
+            );
+        }
+    }
+
+    #[test]
+    fn block_gap_two_emits_two_empty_lines_per_block() {
+        let (mut shell, mut store, mut view, mut config) = fixture();
+        config.block_gap = 2;
+        add_block(&mut shell, &mut store, "echo", &["hello"]);
+        tail_view(&mut view, &store);
+
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
+
+        // Collect consecutive Empty lines at the end of the block
+        let empty_runs: Vec<&VisualLine> = layout
+            .lines
+            .iter()
+            .skip_while(|l| !matches!(l, VisualLine::BlockBottomBorder { .. }))
+            .skip(1)
+            .collect();
+        assert_eq!(empty_runs.len(), 2, "gap=2 produces 2 Empty lines");
+        assert!(
+            empty_runs.iter().all(|l| matches!(l, VisualLine::Empty)),
+            "both gap lines must be VisualLine::Empty"
+        );
+    }
+
+    #[test]
+    fn block_gap_increases_total_height() {
+        let (mut shell, mut store, mut view, mut config) = fixture();
+        add_block(&mut shell, &mut store, "a", &["a1"]);
+        add_block(&mut shell, &mut store, "b", &["b1"]);
+        tail_view(&mut view, &store);
+
+        // Baseline: height with gap=0
+        config.block_gap = 0;
+        let layout0 = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
+        let base_height = layout0.total_height;
+
+        // With gap=1: adds 1 per block
+        config.block_gap = 1;
+        let layout1 = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
+        assert_eq!(layout1.total_height, base_height + 2);
+    }
+
+    #[test]
+    fn block_gap_empty_lines_belong_to_preceding_block_span() {
+        let (mut shell, mut store, mut view, mut config) = fixture();
+        config.block_gap = 1;
+        add_block(&mut shell, &mut store, "a", &["a1"]);
+        add_block(&mut shell, &mut store, "b", &["b1"]);
+        tail_view(&mut view, &store);
+
+        let layout = Compositor::build_visual_layout(&shell, &store, &view, 80, &config, None);
+
+        // Find the first BlockBottomBorder (end of block 0)
+        let bottom_border_idx = layout
+            .lines
+            .iter()
+            .position(|l| matches!(l, VisualLine::BlockBottomBorder { .. }))
+            .expect("should have at least one bottom border");
+
+        // The gap Empty line immediately follows this bottom border
+        let gap_idx = bottom_border_idx + 1;
+        assert!(
+            matches!(layout.lines[gap_idx], VisualLine::Empty),
+            "gap line at index {gap_idx} should be VisualLine::Empty"
+        );
+
+        // block_index_at_line on the gap should return block 0, not block 1
+        assert_eq!(
+            layout.block_index_at_line(gap_idx),
+            Some(0),
+            "gap after block 0 should belong to block 0's span"
+        );
+    }
+
     // --- Short-content alignment tests ---
 
     fn short_fixture() -> (ShellBuffer, BlockStore, ViewState, BlockViewConfig) {
