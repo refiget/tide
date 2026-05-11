@@ -582,6 +582,49 @@ pub const DEFAULT_TUI_COMMANDS: &[&str] = &[
     "ctop",
 ];
 
+// ─── Alt-Screen Lifecycle ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AltScreenEvent {
+    Enter,
+    Exit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureMode {
+    Normal,
+    SuspendedForTui,
+}
+
+/// States for the TUI full-screen lifecycle state machine.
+///
+/// Transitions:
+///   Idle → preexec matched TUI → Pending
+///   Pending → alt-screen enter → InAltScreen
+///   Pending → precmd no alt-screen → Idle (normal command)
+///   InAltScreen → alt-screen exit → ExitedAltScreen
+///   ExitedAltScreen → precmd → Idle (finalized)
+#[derive(Debug, Clone)]
+pub enum TuiRuntimeState {
+    Idle,
+    Pending {
+        app_match: TuiAppMatch,
+        command: String,
+    },
+    InAltScreen {
+        block_id: BlockId,
+    },
+    ExitedAltScreen {
+        block_id: BlockId,
+    },
+}
+
+impl Default for TuiRuntimeState {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
 impl FooterSegment {
     pub fn flatten(segments: &[FooterSegment]) -> String {
         segments

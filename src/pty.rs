@@ -15,9 +15,10 @@ use signal_hook::{consts::signal::SIGWINCH, iterator::Signals};
 
 use crate::{
     app::{
-        BlockAction, BlockId, BlockKind, BlockStatus, BlockViewAction, ConfirmKind, ConfirmState,
-        DEFAULT_TUI_COMMANDS, DetailViewAction, HelpState, InputAccumulator, RenderState,
-        TuiAppMatch, TuiAppMatchSource, ViewAnchor, ViewKind, ViewState, VisibleSource,
+        AltScreenEvent, BlockAction, BlockId, BlockKind, BlockStatus, BlockViewAction, CaptureMode,
+        ConfirmKind, ConfirmState, DEFAULT_TUI_COMMANDS, DetailViewAction, HelpState,
+        InputAccumulator, RenderState, TuiAppMatch, TuiAppMatchSource, TuiRuntimeState, ViewAnchor,
+        ViewKind, ViewState, VisibleSource,
     },
     block::BlockStore,
     buffer::ShellBuffer,
@@ -35,15 +36,12 @@ struct RuntimeState {
     input_accumulator: InputAccumulator,
     render_state: RenderState,
     config: RuntimeConfig,
-    capture_suspended: bool,
+    capture_mode: CaptureMode,
     rows: u16,
     cols: u16,
     index: crate::index::BlockIndex,
-    /// Set during preexec when the command matches a known TUI app.
-    pending_tui_app: Option<TuiAppMatch>,
-    /// Set when alt-screen enter is detected for a known TUI app.
-    #[allow(dead_code)]
-    active_tui_session: Option<BlockId>,
+    /// TUI full-screen lifecycle state machine.
+    tui_state: TuiRuntimeState,
 }
 
 const FRAME_DURATION: Duration = Duration::from_millis(16);
@@ -102,12 +100,11 @@ pub fn run_shell(config: &Config) -> Result<()> {
         input_accumulator: InputAccumulator::default(),
         render_state: RenderState::default(),
         config: runtime_config,
-        capture_suspended: false,
+        capture_mode: CaptureMode::Normal,
         rows,
         cols,
         index: crate::index::BlockIndex::new(),
-        pending_tui_app: None,
-        active_tui_session: None,
+        tui_state: TuiRuntimeState::Idle,
     }));
     let stdout = Arc::new(Mutex::new(io::stdout()));
     let debug_blocks = std::env::var_os("TIDE_DEBUG_BLOCKS").is_some();
@@ -132,16 +129,18 @@ pub fn run_shell(config: &Config) -> Result<()> {
                         match part {
                             ParsedPtyPart::Visible(visible) => {
                                 let view = if let Ok(mut state) = output_state.lock() {
-                                    let active_block_id = state.blocks.active_block_id();
-                                    if active_block_id.is_some()
-                                        && contains_alternate_screen_switch(&visible)
-                                        {
-                                            handle_alt_screen_enter(
-                                                &mut state,
-                                                active_block_id.unwrap(),
-                                            );
+                                    // Process alt-screen events (enter/exit).
+                                    for event in detect_alt_screen_events(&visible) {
+                                        match event {
+                                            AltScreenEvent::Enter => {
+                                                on_alt_screen_enter(&mut state)
+                                            }
+                                            AltScreenEvent::Exit => on_alt_screen_exit(&mut state),
                                         }
-                                    if !state.capture_suspended {
+                                    }
+
+                                    let active_block_id = state.blocks.active_block_id();
+                                    if matches!(state.capture_mode, CaptureMode::Normal) {
                                         state.blocks.append_output(&visible);
                                         state.shell.append(&visible, active_block_id);
                                     }
@@ -186,11 +185,16 @@ pub fn run_shell(config: &Config) -> Result<()> {
         let remaining = parser.flush_visible();
         if !remaining.is_empty() {
             let (view, has_overlay) = if let Ok(mut state) = output_state.lock() {
-                let active_block_id = state.blocks.active_block_id();
-                if active_block_id.is_some() && contains_alternate_screen_switch(&remaining) {
-                    handle_alt_screen_enter(&mut state, active_block_id.unwrap());
+                // Process alt-screen events in remaining bytes.
+                for event in detect_alt_screen_events(&remaining) {
+                    match event {
+                        AltScreenEvent::Enter => on_alt_screen_enter(&mut state),
+                        AltScreenEvent::Exit => on_alt_screen_exit(&mut state),
+                    }
                 }
-                if !state.capture_suspended {
+
+                let active_block_id = state.blocks.active_block_id();
+                if matches!(state.capture_mode, CaptureMode::Normal) {
                     state.shell.append(&remaining, active_block_id);
                 }
                 let has_overlay =
@@ -501,7 +505,7 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
     match event {
         ShellHookEvent::Preexec { command } => {
             let start_line = state.shell.line_count();
-            state.capture_suspended = false;
+            state.capture_mode = CaptureMode::Normal;
             let block_id =
                 state
                     .blocks
@@ -509,27 +513,44 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             state.index.index_command(block_id, &command);
 
             // Detect known TUI apps for later handoff / return panel.
-            state.pending_tui_app = detect_tui_app(
+            if let Some(app_match) = detect_tui_app(
                 &command,
                 &state.config.tui_extra_commands,
                 &state.config.tui_apps,
-            );
+            ) {
+                state.tui_state = TuiRuntimeState::Pending { app_match, command };
+            }
 
             sync_block_viewport_after_history_change(state);
         }
         ShellHookEvent::Precmd { exit_code, cwd } => {
             let finished_cwd = cwd;
-            if let Some(cwd) = finished_cwd.clone() {
-                state.blocks.set_cwd(cwd);
+            if let Some(ref cwd) = finished_cwd {
+                state.blocks.set_cwd(cwd.clone());
             }
+
+            // Finalize TUI lifecycle state. precmd means the shell command
+            // has truly ended (exit code + lifecycle boundary).
+            match std::mem::take(&mut state.tui_state) {
+                TuiRuntimeState::ExitedAltScreen { .. } => {
+                    // TUI app exited alt-screen earlier; now the command is done.
+                }
+                TuiRuntimeState::Pending { .. } => {
+                    // preexec matched a TUI app but it never entered alt-screen.
+                    // Treat as a normal command (NormalCommand block already created).
+                }
+                TuiRuntimeState::InAltScreen { .. } => {
+                    // Alt-screen was entered but we never saw the exit.
+                    // Unusual (crash?); restore capture and finalize.
+                }
+                TuiRuntimeState::Idle => {}
+            }
+            // tui_state is now Idle via std::mem::take + Default impl.
+            state.capture_mode = CaptureMode::Normal;
+
             let active_id = state.blocks.active_block_id();
             let end_line = state.shell.line_count().saturating_sub(1);
             state.blocks.finish_command(exit_code, end_line);
-            state.capture_suspended = false;
-            // Clear TUI state — the session has ended and precmd is the final
-            // lifecycle event for this command.
-            state.pending_tui_app = None;
-            state.active_tui_session = None;
             sync_block_viewport_after_history_change(state);
             if let Some(block_id) = active_id {
                 if let Some(block) = state.blocks.block(block_id) {
@@ -1882,29 +1903,56 @@ fn content_height(state: &RuntimeState) -> usize {
     (state.rows as usize).saturating_sub(usize::from(state.config.block_view.show_footer))
 }
 
-fn handle_alt_screen_enter(state: &mut RuntimeState, block_id: BlockId) {
-    state.capture_suspended = true;
-    let is_known_tui = state.pending_tui_app.is_some();
-    if let Some(block) = state.blocks.block_mut(block_id) {
-        if is_known_tui {
-            block.kind = BlockKind::TuiSession;
-            state.active_tui_session = Some(block_id);
-        } else {
-            block.kind = BlockKind::RawProgram;
+fn detect_alt_screen_events(bytes: &[u8]) -> Vec<AltScreenEvent> {
+    let patterns: &[(&[u8], AltScreenEvent)] = &[
+        (b"\x1b[?1049h", AltScreenEvent::Enter),
+        (b"\x1b[?1049l", AltScreenEvent::Exit),
+        (b"\x1b[?1047h", AltScreenEvent::Enter),
+        (b"\x1b[?1047l", AltScreenEvent::Exit),
+        (b"\x1b[?47h", AltScreenEvent::Enter),
+        (b"\x1b[?47l", AltScreenEvent::Exit),
+    ];
+    let mut found: Vec<(usize, AltScreenEvent)> = Vec::new();
+    for i in 0..bytes.len() {
+        for (pat, ev) in patterns {
+            if bytes[i..].starts_with(pat) {
+                found.push((i, *ev));
+            }
         }
+    }
+    found.sort_by_key(|(i, _)| *i);
+    found.into_iter().map(|(_, ev)| ev).collect()
+}
+
+fn on_alt_screen_enter(state: &mut RuntimeState) {
+    // Check if preexec identified this as a known TUI app.
+    let is_known_tui = matches!(state.tui_state, TuiRuntimeState::Pending { .. });
+    // The block was already created by preexec as NormalCommand.
+    // Promote it to TuiSession or RawProgram based on detection.
+    if let Some(id) = state.blocks.active_block_id() {
+        if let Some(block) = state.blocks.block_mut(id) {
+            block.kind = if is_known_tui {
+                BlockKind::TuiSession
+            } else {
+                BlockKind::RawProgram
+            };
+        }
+        state.capture_mode = CaptureMode::SuspendedForTui;
+        state.tui_state = TuiRuntimeState::InAltScreen { block_id: id };
+    } else {
+        // No active block — shouldn't happen, but be defensive.
+        state.capture_mode = CaptureMode::SuspendedForTui;
+        state.tui_state = TuiRuntimeState::Idle;
     }
 }
 
-fn contains_alternate_screen_switch(bytes: &[u8]) -> bool {
-    bytes
-        .windows(b"\x1b[?1049h".len())
-        .any(|window| window == b"\x1b[?1049h")
-        || bytes
-            .windows(b"\x1b[?1047h".len())
-            .any(|window| window == b"\x1b[?1047h")
-        || bytes
-            .windows(b"\x1b[?1048h".len())
-            .any(|window| window == b"\x1b[?1048h")
+fn on_alt_screen_exit(state: &mut RuntimeState) {
+    let prev = std::mem::take(&mut state.tui_state);
+    state.capture_mode = CaptureMode::Normal;
+    state.tui_state = match prev {
+        TuiRuntimeState::InAltScreen { block_id } => TuiRuntimeState::ExitedAltScreen { block_id },
+        _ => TuiRuntimeState::Idle,
+    };
 }
 
 fn current_pty_size() -> PtySize {
@@ -1942,12 +1990,11 @@ mod tests {
             input_accumulator: InputAccumulator::default(),
             render_state: RenderState::default(),
             config: runtime_config,
-            capture_suspended: false,
+            capture_mode: CaptureMode::Normal,
             rows: 24,
             cols: 80,
             index: crate::index::BlockIndex::new(),
-            pending_tui_app: None,
-            active_tui_session: None,
+            tui_state: TuiRuntimeState::Idle,
         }
     }
 
@@ -2844,22 +2891,10 @@ mod tests {
 
     #[test]
     fn extract_command_prefixes() {
-        assert_eq!(
-            extract_command_name("command nvim"),
-            Some("nvim".into())
-        );
-        assert_eq!(
-            extract_command_name("noglob nvim"),
-            Some("nvim".into())
-        );
-        assert_eq!(
-            extract_command_name("builtin echo"),
-            Some("echo".into())
-        );
-        assert_eq!(
-            extract_command_name("time nvim"),
-            Some("nvim".into())
-        );
+        assert_eq!(extract_command_name("command nvim"), Some("nvim".into()));
+        assert_eq!(extract_command_name("noglob nvim"), Some("nvim".into()));
+        assert_eq!(extract_command_name("builtin echo"), Some("echo".into()));
+        assert_eq!(extract_command_name("time nvim"), Some("nvim".into()));
     }
 
     #[test]
@@ -2879,10 +2914,7 @@ mod tests {
 
     #[test]
     fn extract_basename_strips_path() {
-        assert_eq!(
-            extract_command_name("/usr/bin/nvim"),
-            Some("nvim".into())
-        );
+        assert_eq!(extract_command_name("/usr/bin/nvim"), Some("nvim".into()));
     }
 
     // ─── detect_tui_app tests ────────────────────────────────────────────
@@ -2916,7 +2948,10 @@ mod tests {
         let result = detect_tui_app("myapp", &["myapp".into()], &empty_tui_apps());
         assert!(result.is_some());
         assert_eq!(result.as_ref().unwrap().command_name, "myapp");
-        assert_eq!(result.as_ref().unwrap().source, TuiAppMatchSource::UserConfig);
+        assert_eq!(
+            result.as_ref().unwrap().source,
+            TuiAppMatchSource::UserConfig
+        );
     }
 
     #[test]
@@ -2933,7 +2968,10 @@ mod tests {
         let result = detect_tui_app("custom-tui", &[], &apps);
         assert!(result.is_some());
         assert_eq!(result.as_ref().unwrap().app_name, "my-custom-app");
-        assert_eq!(result.as_ref().unwrap().source, TuiAppMatchSource::UserConfig);
+        assert_eq!(
+            result.as_ref().unwrap().source,
+            TuiAppMatchSource::UserConfig
+        );
     }
 
     #[test]
