@@ -480,22 +480,33 @@ fn render_line<W: Write>(
             let margin = block_view.horizontal_margin;
             let padding = block_view.body_padding;
             let inner_w = bw.saturating_sub(2);
-            let body = truncate_to_width(&format!("{}{}", " ".repeat(padding), text), inner_w);
-            let fill = inner_w.saturating_sub(UnicodeWidthStr::width(body.as_str()));
 
-            let fg = match kind {
-                ReturnPanelLineKind::Title => Theme::META_HEADER_FG,
-                ReturnPanelLineKind::Field => CatppuccinFrappe::TEXT,
-                ReturnPanelLineKind::Hint => Theme::FOOTER_FG,
-                _ => CatppuccinFrappe::SUBTEXT1,
-            };
-            queue!(w, SetForegroundColor(Theme::DETAIL_BORDER_FG))?;
-            queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
-            queue!(w, SetForegroundColor(fg))?;
-            queue!(w, Print(format!("{body}{}", " ".repeat(fill))))?;
-            queue!(w, SetForegroundColor(Theme::DETAIL_BORDER_FG))?;
-            queue!(w, Print("│"))?;
-            queue!(w, ResetColor)?;
+            if *kind == ReturnPanelLineKind::Separator {
+                let sep = format!("{}", "─".repeat(inner_w.saturating_sub(padding * 2)));
+                queue!(w, SetForegroundColor(Theme::DETAIL_BORDER_FG))?;
+                queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
+                queue!(w, SetForegroundColor(CatppuccinFrappe::SURFACE2))?;
+                queue!(w, Print(format!(" {sep} ")))?;
+                queue!(w, SetForegroundColor(Theme::DETAIL_BORDER_FG))?;
+                queue!(w, Print("│"))?;
+                queue!(w, ResetColor)?;
+            } else {
+                let body = truncate_to_width(&format!("{}{}", " ".repeat(padding), text), inner_w);
+                let fill = inner_w.saturating_sub(UnicodeWidthStr::width(body.as_str()));
+                let fg = match kind {
+                    ReturnPanelLineKind::Title => Theme::META_HEADER_FG,
+                    ReturnPanelLineKind::Field => CatppuccinFrappe::TEXT,
+                    ReturnPanelLineKind::Hint => Theme::FOOTER_FG,
+                    _ => CatppuccinFrappe::SUBTEXT1,
+                };
+                queue!(w, SetForegroundColor(Theme::DETAIL_BORDER_FG))?;
+                queue!(w, Print(format!("{}│", " ".repeat(margin))))?;
+                queue!(w, SetForegroundColor(fg))?;
+                queue!(w, Print(format!("{body}{}", " ".repeat(fill))))?;
+                queue!(w, SetForegroundColor(Theme::DETAIL_BORDER_FG))?;
+                queue!(w, Print("│"))?;
+                queue!(w, ResetColor)?;
+            }
         }
         VisualLine::ReturnPanelBottomBorder { label, .. } => {
             queue!(w, SetForegroundColor(Theme::DETAIL_BORDER_FG))?;

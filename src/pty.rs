@@ -1929,8 +1929,13 @@ fn detect_alt_screen_events(bytes: &[u8]) -> Vec<AltScreenEvent> {
 }
 
 fn on_alt_screen_enter(state: &mut RuntimeState) {
-    // Check if preexec identified this as a known TUI app.
-    let is_known_tui = matches!(state.tui_state, TuiRuntimeState::Pending { .. });
+    // Extract app_name from Pending state (immutable borrow scope).
+    let (is_known_tui, app_name) = {
+        match &state.tui_state {
+            TuiRuntimeState::Pending { app_match, .. } => (true, Some(app_match.app_name.clone())),
+            _ => (false, None),
+        }
+    };
     // The block was already created by preexec as NormalCommand.
     // Promote it to TuiSession or RawProgram based on detection.
     if let Some(id) = state.blocks.active_block_id() {
@@ -1940,6 +1945,9 @@ fn on_alt_screen_enter(state: &mut RuntimeState) {
             } else {
                 BlockKind::RawProgram
             };
+            if let Some(name) = app_name {
+                block.app_name = Some(name);
+            }
         }
         state.capture_mode = CaptureMode::SuspendedForTui;
         state.tui_state = TuiRuntimeState::InAltScreen { block_id: id };

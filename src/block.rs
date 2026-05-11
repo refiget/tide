@@ -64,6 +64,7 @@ impl BlockStore {
                 output_raw: Vec::new(),
                 output_text: String::new(),
                 output_truncated: false,
+                app_name: None,
                 kind,
                 status: BlockStatus::Running,
                 git_context: None,
@@ -181,6 +182,10 @@ impl BlockStore {
             .iter()
             .position(|candidate| *candidate == id)?;
         self.timeline.get(index + 1).copied()
+    }
+
+    pub fn position_of(&self, id: BlockId) -> Option<usize> {
+        self.timeline.iter().position(|candidate| *candidate == id)
     }
 
     #[allow(dead_code)]

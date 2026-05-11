@@ -1,7 +1,10 @@
 use std::path::Path;
 
 use crate::{
-    app::{BlockId, BlockKind, CommandBlock, FooterSegment, ViewAnchor, ViewKind, ViewState},
+    app::{
+        BlockId, BlockKind, CommandBlock, FooterSegment, ReturnPanelLineKind, ViewAnchor, ViewKind,
+        ViewState,
+    },
     block::{BlockStore, format_duration_ms},
     buffer::ShellBuffer,
     config::{BlockLayoutConfig, BlockViewConfig},
@@ -212,7 +215,9 @@ impl Compositor {
                     _ => vec![],
                 }
             }
-            ViewKind::ReturnPanel => Vec::new(),
+            ViewKind::ReturnPanel => {
+                Self::build_return_panel_lines(blocks, view, _width, height, block_view)
+            }
             ViewKind::Agent => Vec::new(),
         }
     }
@@ -668,6 +673,46 @@ impl Compositor {
         result
     }
 
+    fn build_return_panel_lines(
+        blocks: &BlockStore,
+        view: &ViewState,
+        width: u16,
+        height: u16,
+        block_view: &BlockViewConfig,
+    ) -> Vec<VisualLine> {
+        let Some(panel) = view.return_panel.as_ref() else {
+            return build_return_panel_fallback(
+                BlockId(0),
+                width,
+                height,
+                block_view,
+                "Return from TUI session",
+                "Session data unavailable",
+            );
+        };
+        let Some(block) = blocks.block(panel.block_id) else {
+            return build_return_panel_fallback(
+                panel.block_id,
+                width,
+                height,
+                block_view,
+                "Return from TUI session",
+                "The session block is no longer available",
+            );
+        };
+        if !matches!(block.kind, BlockKind::TuiSession) {
+            return build_return_panel_fallback(
+                panel.block_id,
+                width,
+                height,
+                block_view,
+                "Return from TUI session",
+                "The selected block is not a TUI session",
+            );
+        }
+        build_return_panel_content(block, panel.block_id, blocks, width, height, block_view)
+    }
+
     #[allow(dead_code)]
     fn visual_height_for_block_from_lines(
         shell_lines: &[crate::buffer::ShellLine],
@@ -691,6 +736,154 @@ impl Compositor {
         )
         .len()
     }
+}
+
+// ─── Return Panel helpers ──────────────────────────────────────────────────
+
+fn rp_line(block_id: BlockId, kind: ReturnPanelLineKind, text: impl Into<String>) -> VisualLine {
+    VisualLine::ReturnPanelBodyLine {
+        block_id,
+        kind,
+        text: text.into(),
+    }
+}
+
+fn build_return_panel_content(
+    block: &CommandBlock,
+    block_id: BlockId,
+    blocks: &BlockStore,
+    width: u16,
+    height: u16,
+    block_view: &BlockViewConfig,
+) -> Vec<VisualLine> {
+    let app_name = block.app_name.as_deref().unwrap_or("TUI session");
+    let title = format!("Return from {app_name}");
+    let status = match block.exit_code {
+        Some(0) => "ok".to_string(),
+        Some(code) => format!("exit {code}"),
+        None => "done".to_string(),
+    };
+    let dur = format_duration_ms(block.duration_ms);
+    let bottom_label = format!("{status} · {dur}");
+
+    let mut lines = vec![
+        VisualLine::ReturnPanelTopBorder {
+            block_id,
+            label: title.clone(),
+        },
+        rp_line(block_id, ReturnPanelLineKind::Empty, ""),
+        rp_line(block_id, ReturnPanelLineKind::Title, title),
+        rp_line(block_id, ReturnPanelLineKind::Empty, ""),
+        rp_line(
+            block_id,
+            ReturnPanelLineKind::Field,
+            format!("command:   {}", block.command),
+        ),
+        rp_line(
+            block_id,
+            ReturnPanelLineKind::Field,
+            format!(
+                "exit code: {}",
+                block.exit_code.map_or("unknown".into(), |c| c.to_string())
+            ),
+        ),
+        rp_line(
+            block_id,
+            ReturnPanelLineKind::Field,
+            format!("duration:  {}", dur),
+        ),
+        rp_line(block_id, ReturnPanelLineKind::Empty, ""),
+        rp_line(block_id, ReturnPanelLineKind::Separator, ""),
+        rp_line(
+            block_id,
+            ReturnPanelLineKind::Hint,
+            "Press Enter to continue",
+        ),
+        rp_line(block_id, ReturnPanelLineKind::Empty, ""),
+        VisualLine::ReturnPanelBottomBorder {
+            block_id,
+            label: bottom_label,
+        },
+        build_return_panel_footer(blocks, block_id),
+    ];
+    center_return_panel_lines(lines, height as usize)
+}
+
+fn build_return_panel_fallback(
+    block_id: BlockId,
+    width: u16,
+    height: u16,
+    block_view: &BlockViewConfig,
+    title: &str,
+    message: &str,
+) -> Vec<VisualLine> {
+    let mut lines = vec![
+        VisualLine::ReturnPanelTopBorder {
+            block_id,
+            label: title.to_string(),
+        },
+        rp_line(block_id, ReturnPanelLineKind::Empty, ""),
+        rp_line(block_id, ReturnPanelLineKind::Title, title.to_string()),
+        rp_line(block_id, ReturnPanelLineKind::Empty, ""),
+        rp_line(block_id, ReturnPanelLineKind::Field, message.to_string()),
+        rp_line(block_id, ReturnPanelLineKind::Empty, ""),
+        rp_line(
+            block_id,
+            ReturnPanelLineKind::Hint,
+            "Press Enter to continue",
+        ),
+        rp_line(block_id, ReturnPanelLineKind::Empty, ""),
+        VisualLine::ReturnPanelBottomBorder {
+            block_id,
+            label: "unavailable".to_string(),
+        },
+        VisualLine::Footer {
+            segments: vec![FooterSegment::Label(
+                "Block unavailable  Enter: continue".into(),
+            )],
+        },
+    ];
+    center_return_panel_lines(lines, height as usize)
+}
+
+fn build_return_panel_footer(blocks: &BlockStore, block_id: BlockId) -> VisualLine {
+    let label = match blocks.position_of(block_id) {
+        Some(index) => {
+            format!("Block #{}/{}  Enter: continue", index + 1, blocks.len())
+        }
+        None => "Block unavailable  Enter: continue".to_string(),
+    };
+    VisualLine::Footer {
+        segments: vec![FooterSegment::Label(label)],
+    }
+}
+
+fn center_return_panel_lines(mut lines: Vec<VisualLine>, height: usize) -> Vec<VisualLine> {
+    let content_height = height.saturating_sub(1);
+    let footer = if lines
+        .last()
+        .is_some_and(|l| matches!(l, VisualLine::Footer { .. }))
+    {
+        lines.pop()
+    } else {
+        None
+    };
+    if lines.len() >= content_height {
+        if let Some(f) = footer {
+            lines.push(f);
+        }
+        return lines;
+    }
+    let top_padding = (content_height - lines.len()) / 2;
+    let mut padded: Vec<VisualLine> = std::iter::repeat_n(VisualLine::Empty, top_padding).collect();
+    padded.extend(lines);
+    while padded.len() < content_height {
+        padded.push(VisualLine::Empty);
+    }
+    if let Some(f) = footer {
+        padded.push(f);
+    }
+    padded
 }
 
 fn get_block_styled_output_lines(block: &CommandBlock) -> Vec<crate::ansi::StyledText> {

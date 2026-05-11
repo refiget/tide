@@ -410,6 +410,8 @@ pub struct CommandBlock {
     pub start_line: usize,
     pub end_line: usize,
     pub output_truncated: bool,
+    /// App name when this block represents a known TUI session (e.g. "lazygit").
+    pub app_name: Option<String>,
 }
 
 impl Default for CommandBlock {
@@ -431,6 +433,7 @@ impl Default for CommandBlock {
             start_line: 0,
             end_line: 0,
             output_truncated: false,
+            app_name: None,
         }
     }
 }
