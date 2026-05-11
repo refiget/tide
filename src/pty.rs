@@ -2192,6 +2192,142 @@ mod tests {
         assert_eq!(state.view.visible.len(&state.blocks), 1);
     }
 
+    // ─── Delete flow tests ───────────────────────────────────────────────
+
+    #[test]
+    fn delete_single_block_via_confirm() {
+        let mut state = runtime_state();
+        add_block(&mut state, "echo one");
+        add_block(&mut state, "echo two");
+        add_block(&mut state, "echo three");
+        enter_block_view(&mut state);
+
+        // Select middle block
+        select_block_index(&mut state, 1, ViewAnchor::Manual);
+        let deleted_id = state.view.selected_block.unwrap();
+
+        // Press d — opens confirm dialog
+        assert!(handle_block_view_byte(b'd', &mut state));
+        let cs = state.view.confirm.as_ref().unwrap();
+        assert_eq!(cs.kind, ConfirmKind::DeleteBlock);
+        assert_eq!(cs.block_ids, vec![deleted_id]);
+
+        // Press y to confirm
+        state.render_state.dirty = false;
+        state.render_state.force_render = false;
+        assert!(handle_block_view_byte(b'y', &mut state));
+        assert!(state.view.confirm.is_none());
+
+        // Block removed from store
+        assert_eq!(state.blocks.len(), 2);
+        assert!(state.blocks.block(deleted_id).is_none());
+
+        // Selection moves to neighbor (next block after deleted one)
+        let remaining: Vec<BlockId> = state.blocks.timeline.iter().copied().collect();
+        assert_ne!(remaining, vec![deleted_id]);
+        assert!(state.view.selected_block.is_some());
+        assert_ne!(state.view.selected_block, Some(deleted_id));
+    }
+
+    #[test]
+    fn delete_cancel_leaves_block_intact() {
+        let mut state = runtime_state();
+        add_block(&mut state, "echo one");
+        let original_len = state.blocks.len();
+        enter_block_view(&mut state);
+        let original_id = state.view.selected_block.unwrap();
+
+        // Press d — opens confirm
+        assert!(handle_block_view_byte(b'd', &mut state));
+        assert!(state.view.confirm.is_some());
+
+        // Press n to cancel (any non-confirm key works)
+        assert!(handle_block_view_byte(b'n', &mut state));
+        assert!(state.view.confirm.is_none());
+
+        // Block store untouched
+        assert_eq!(state.blocks.len(), original_len);
+        assert!(state.blocks.block(original_id).is_some());
+    }
+
+    #[test]
+    fn delete_last_block_leaves_empty_store() {
+        let mut state = runtime_state();
+        add_block(&mut state, "echo one");
+        enter_block_view(&mut state);
+
+        // d + y to confirm
+        assert!(handle_block_view_byte(b'd', &mut state));
+        assert!(handle_block_view_byte(b'y', &mut state));
+
+        assert_eq!(state.blocks.len(), 0);
+        assert!(state.view.selected_block.is_none());
+        assert_eq!(state.view.block_viewport.selected_index, 0);
+    }
+
+    #[test]
+    fn delete_clears_expanded_block() {
+        let mut state = runtime_state();
+        add_block(&mut state, "echo one");
+        add_block(&mut state, "echo two");
+        enter_block_view(&mut state);
+
+        // Enter expands the selected block (tail selects the last one = BlockId 2)
+        assert!(handle_block_view_byte(b'\r', &mut state));
+        assert_eq!(state.view.expanded_block, state.view.selected_block);
+        let deleted_id = state.view.selected_block.unwrap();
+
+        // d + y to delete the expanded block
+        assert!(handle_block_view_byte(b'd', &mut state));
+        assert!(handle_block_view_byte(b'y', &mut state));
+
+        assert_eq!(state.blocks.len(), 1);
+        assert!(state.view.expanded_block.is_none());
+        assert!(state.view.selected_block.is_some());
+        assert_ne!(state.view.selected_block, Some(deleted_id));
+    }
+
+    #[test]
+    fn delete_visual_selection_removes_multiple() {
+        let mut state = runtime_state();
+        add_block(&mut state, "echo one"); // BlockId 1
+        add_block(&mut state, "echo two"); // BlockId 2
+        add_block(&mut state, "echo three"); // BlockId 3
+        add_block(&mut state, "echo four"); // BlockId 4
+        enter_block_view(&mut state);
+
+        // Start visual mode on first block (index 0)
+        select_block_index(&mut state, 0, ViewAnchor::Manual);
+        state.view.visual_anchor = state.view.selected_block;
+
+        // Navigate to block at index 2, extending visual selection to [0, 1, 2]
+        select_block_index(&mut state, 2, ViewAnchor::Manual);
+        assert!(state.view.visual_anchor.is_some());
+
+        // d + y removes blocks 0-2 (3 blocks)
+        assert!(handle_block_view_byte(b'd', &mut state));
+        let cs = state.view.confirm.as_ref().unwrap();
+        assert_eq!(cs.kind, ConfirmKind::DeleteBlocks);
+        assert_eq!(cs.block_ids.len(), 3);
+        let deleted_ids = cs.block_ids.clone();
+
+        assert!(handle_block_view_byte(b'y', &mut state));
+        assert!(state.view.confirm.is_none());
+
+        // Only block at index 3 remains
+        assert_eq!(state.blocks.len(), 1);
+        for id in &deleted_ids {
+            assert!(state.blocks.block(*id).is_none());
+        }
+
+        // Visual mode exited
+        assert!(state.view.visual_anchor.is_none());
+
+        // Selection moved to surviving neighbor
+        assert!(state.view.selected_block.is_some());
+        assert!(!deleted_ids.contains(&state.view.selected_block.unwrap()));
+    }
+
     #[test]
     fn detail_j_scrolls_cursor_down() {
         let state = Arc::new(Mutex::new(runtime_state()));
