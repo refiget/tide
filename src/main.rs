@@ -1,6 +1,7 @@
 mod ansi;
 mod app;
 mod block;
+mod block_export;
 mod buffer;
 mod compositor;
 mod config;
