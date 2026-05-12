@@ -34,6 +34,8 @@ pub struct Config {
     pub tui: TuiConfig,
     #[serde(default)]
     pub keymap: KeymapConfig,
+    #[serde(default)]
+    pub opencode_share: OpencodeShareConfig,
 }
 
 impl Config {
@@ -91,6 +93,7 @@ impl Default for Config {
             tui_apps: BTreeMap::new(),
             tui: TuiConfig::default(),
             keymap: KeymapConfig::default(),
+            opencode_share: OpencodeShareConfig::default(),
         }
     }
 }
@@ -114,6 +117,8 @@ pub struct RuntimeConfig {
     pub tui_extra_commands: Vec<String>,
     /// Per-app TUI configuration from `[tui.apps]` or `[tui_apps]`.
     pub tui_apps: BTreeMap<String, TuiAppConfig>,
+    /// Shared opencode registry privacy controls.
+    pub opencode_share: OpencodeShareConfig,
 }
 
 fn deserialize_block_action(s: &str) -> Option<BlockViewAction> {
@@ -266,7 +271,41 @@ pub fn build_runtime_config(config: Config) -> RuntimeConfig {
         resolved_detail_keymap: build_resolved_detail_keymap(&config.keymap.detail),
         tui_extra_commands: config.tui.extra_commands,
         tui_apps: merged_apps,
+        opencode_share: config.opencode_share,
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpencodeShareConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub cwd: ShareCwdMode,
+    #[serde(default = "default_true")]
+    pub command: bool,
+}
+
+impl Default for OpencodeShareConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cwd: ShareCwdMode::Basename,
+            command: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ShareCwdMode {
+    Full,
+    #[default]
+    Basename,
+    None,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]

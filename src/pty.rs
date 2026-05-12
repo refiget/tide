@@ -18,7 +18,7 @@ use signal_hook::{consts::signal::SIGWINCH, iterator::Signals};
 
 use crate::{
     app::{
-        BlockAction, BlockId, BlockKind, BlockStatus, BlockViewAction, ConfirmKind, ConfirmState,
+        BlockAction, BlockActionScope, BlockId, BlockKind, BlockOrigin, BlockStatus, BlockViewAction, ConfirmKind, ConfirmState,
         DEFAULT_TUI_COMMANDS, DetailViewAction, HelpState, InputAccumulator, RenderState,
         ReturnPanelTarget, TuiAppMatch, TuiAppMatchSource, TuiRuntimeState, ViewAnchor, ViewKind,
         ViewState, VisibleSource,
@@ -560,6 +560,26 @@ fn tmux_current_tty() -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+fn tmux_current_pane_id() -> Option<String> {
+    std::env::var("TMUX_PANE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn tmux_current_window_id() -> Option<String> {
+    let pane_id = tmux_current_pane_id()?;
+    let out = Command::new("tmux")
+        .args(["display-message", "-p", "-t", &pane_id, "#{window_id}"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
 fn tty_has_opencode_process(tty_path: &str) -> bool {
     let tty = tty_path.strip_prefix("/dev/").unwrap_or(tty_path);
     let out = Command::new("ps")
@@ -586,6 +606,9 @@ fn tty_has_opencode_process(tty_path: &str) -> bool {
 }
 
 fn register_running_opencode_block(state: &mut RuntimeState, id: BlockId, command: &str) {
+    if !state.config.opencode_share.enabled {
+        return;
+    }
     if state.opencode_by_block.contains_key(&id) {
         return;
     }
@@ -595,18 +618,32 @@ fn register_running_opencode_block(state: &mut RuntimeState, id: BlockId, comman
     let Some(target) = tmux_current_target() else {
         return;
     };
+    let pane_id = tmux_current_pane_id().unwrap_or_default();
+    let window_id = tmux_current_window_id().unwrap_or_default();
     let project = block
         .cwd
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "opencode".to_string());
+    let share_command = if state.config.opencode_share.command {
+        command.to_string()
+    } else {
+        "opencode".to_string()
+    };
+    let share_cwd = match state.config.opencode_share.cwd {
+        crate::config::ShareCwdMode::Full => block.cwd.display().to_string(),
+        crate::config::ShareCwdMode::Basename => project.clone(),
+        crate::config::ShareCwdMode::None => String::new(),
+    };
     if let Ok(alias) = crate::opencode_registry::register_running(
         &state.tide_id,
         id.0,
-        command,
-        &block.cwd.display().to_string(),
+        &share_command,
+        &share_cwd,
         &project,
         &target,
+        &pane_id,
+        &window_id,
     ) {
         state.opencode_by_block.insert(id, alias);
     }
@@ -638,6 +675,7 @@ fn is_running_opencode_block(state: &RuntimeState, id: BlockId) -> bool {
         .block(id)
         .map(|b| {
             b.status == BlockStatus::Running
+                && b.origin == BlockOrigin::Shared
                 && b
                     .app_name
                     .as_deref()
@@ -653,6 +691,10 @@ fn is_shared_opencode_block(block: &crate::app::CommandBlock) -> Option<String> 
         .as_deref()
         .and_then(|a| a.strip_prefix("opencode_alias:"))
         .map(|s| s.to_string())
+}
+
+fn block_allows_standard_actions(block: &crate::app::CommandBlock) -> bool {
+    block.origin == BlockOrigin::Local && block.actions == BlockActionScope::Full
 }
 
 fn synthetic_opencode_block_id(alias: &str) -> BlockId {
@@ -704,6 +746,27 @@ fn tmux_target_exists(target: &str) -> bool {
 }
 
 fn tmux_jump_and_zoom(target: &str) -> bool {
+    if target.starts_with('%') {
+        if Command::new("tmux")
+            .args(["select-pane", "-t", target])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            let zoomed = Command::new("tmux")
+                .args(["display-message", "-p", "-t", target, "#{window_zoomed_flag}"])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            if zoomed == "0" {
+                let _ = Command::new("tmux").args(["resize-pane", "-Z", "-t", target]).status();
+            }
+            return true;
+        }
+        return false;
+    }
+
     let Some((session, rest)) = target.split_once(':') else {
         return false;
     };
@@ -781,23 +844,17 @@ fn try_global_jump_back(state: &mut RuntimeState) -> bool {
     let Some(current) = tmux_current_target() else {
         return false;
     };
-    let Ok(Some(last)) = crate::opencode_registry::read_last_jump() else {
+    let Ok(Some(last)) = crate::opencode_registry::pop_jump_for_target(&current) else {
         return false;
     };
     if !tmux_target_exists(&last.from_tmux_target) {
-        let _ = crate::opencode_registry::clear_last_jump();
-        return false;
-    }
-    if last.to_tmux_target != current {
         return false;
     }
     if last.from_tmux_target == last.to_tmux_target {
-        let _ = crate::opencode_registry::clear_last_jump();
         return false;
     }
     if tmux_jump_and_zoom(&last.from_tmux_target) {
         let _ = tmux_set_zoom_state(&last.from_tmux_target, last.from_zoomed);
-        let _ = crate::opencode_registry::clear_last_jump();
         state.render_state.flash_message = Some(("jumped back".to_string(), Instant::now()));
         return true;
     }
@@ -805,7 +862,10 @@ fn try_global_jump_back(state: &mut RuntimeState) -> bool {
 }
 
 fn sync_shared_opencode_blocks(state: &mut RuntimeState) {
-    let Ok(records) = crate::opencode_registry::list_running() else {
+    if !state.config.opencode_share.enabled {
+        return;
+    }
+    let Ok(records) = crate::opencode_registry::list_all() else {
         return;
     };
 
@@ -828,6 +888,20 @@ fn sync_shared_opencode_blocks(state: &mut RuntimeState) {
     }
 
     for rec in records {
+        if rec.status == crate::opencode_registry::OpencodeStatus::Exited {
+            continue;
+        }
+        if rec.status == crate::opencode_registry::OpencodeStatus::Running
+            && !tmux_target_exists(&rec.tmux_target)
+        {
+            let _ = crate::opencode_registry::mark_stale(&rec.alias);
+        }
+
+        let display_status = if tmux_target_exists(&rec.tmux_target) {
+            BlockStatus::Running
+        } else {
+            BlockStatus::Unknown
+        };
         let id = synthetic_opencode_block_id(&rec.alias);
         let cwd = std::path::PathBuf::from(&rec.cwd);
         let project = if rec.project_name.is_empty() {
@@ -845,9 +919,12 @@ fn sync_shared_opencode_blocks(state: &mut RuntimeState) {
                 id,
                 command: format!("[{}] opencode {}", rec.alias, project),
                 cwd,
-                status: BlockStatus::Running,
+                status: display_status,
                 kind: BlockKind::SystemEvent,
                 app_name: Some(format!("opencode_alias:{}", rec.alias)),
+                origin: BlockOrigin::Shared,
+                synthetic: true,
+                actions: BlockActionScope::JumpOnly,
                 ..crate::app::CommandBlock::default()
             },
         );
@@ -1072,6 +1149,12 @@ fn perform_block_action(state: &mut RuntimeState, action: BlockAction) {
     let Some(block) = state.blocks.block(block_id) else {
         return;
     };
+    if !block_allows_standard_actions(block) {
+        state.render_state.flash_message = Some(("shared block: jump only".to_string(), Instant::now()));
+        state.render_state.dirty = true;
+        state.render_state.force_render = true;
+        return;
+    }
 
     let part = match action {
         BlockAction::CopyOutput => CopyPart::Output,
@@ -1123,7 +1206,12 @@ fn copy_blocks(state: &mut RuntimeState, part: CopyPart) {
     let blocks: Vec<&_> = ids
         .iter()
         .filter_map(|&id| state.blocks.block(id))
+        .filter(|b| block_allows_standard_actions(b))
         .collect();
+    if blocks.is_empty() {
+        state.render_state.flash_message = Some(("shared block: jump only".to_string(), Instant::now()));
+        return;
+    }
     let text = format_blocks(&blocks, part, fmt);
     if write_to_clipboard(&text) {
         let msg = copy_flash(blocks.len(), part, fmt);
@@ -1783,7 +1871,10 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
             true
         }
         BlockViewAction::Rerun => {
-            let ids = visual_range_ids(state);
+            let ids: Vec<BlockId> = visual_range_ids(state)
+                .into_iter()
+                .filter(|id| state.blocks.block(*id).map(block_allows_standard_actions).unwrap_or(false))
+                .collect();
             if ids.len() > 1 {
                 state.view.confirm = Some(ConfirmState::multi(ConfirmKind::RerunBlocks, ids));
                 state.render_state.dirty = true;
@@ -1800,6 +1891,8 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                     state.input_accumulator.pending_block_delta = 0;
                     state.render_state.needs_cleanup = true;
                     state.render_state.pending_paste = Some(cmd);
+                } else {
+                    state.render_state.flash_message = Some(("shared block: jump only".to_string(), Instant::now()));
                 }
             }
             true
@@ -1810,14 +1903,19 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                     && let Some(alias) = is_shared_opencode_block(block)
                     && let Ok(Some(rec)) = crate::opencode_registry::find_by_alias(&alias)
                 {
-                    if tmux_target_exists(&rec.tmux_target) {
+                    let jump_target = if !rec.tmux_pane_id.is_empty() {
+                        rec.tmux_pane_id.clone()
+                    } else {
+                        rec.tmux_target.clone()
+                    };
+                    if tmux_target_exists(&jump_target) {
                         if let Some(cur) = tmux_current_target() {
                             state.opencode_jump_stack.push(cur.clone());
                             let from_zoomed = tmux_window_zoomed(&cur).unwrap_or(false);
                             let _ =
-                                crate::opencode_registry::write_last_jump(&cur, &rec.tmux_target, from_zoomed);
+                                crate::opencode_registry::write_last_jump(&cur, &jump_target, from_zoomed);
                         }
-                        if tmux_jump_and_zoom(&rec.tmux_target) {
+                        if tmux_jump_and_zoom(&jump_target) {
                             state.render_state.flash_message =
                                 Some((format!("jumped [{}]", alias), Instant::now()));
                         } else {
@@ -1859,7 +1957,10 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
             true
         }
         BlockViewAction::Delete => {
-            let ids = visual_range_ids(state);
+            let ids: Vec<BlockId> = visual_range_ids(state)
+                .into_iter()
+                .filter(|id| state.blocks.block(*id).map(block_allows_standard_actions).unwrap_or(false))
+                .collect();
             if !ids.is_empty() {
                 let kind = if ids.len() == 1 {
                     ConfirmKind::DeleteBlock
@@ -1869,6 +1970,8 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                 state.view.confirm = Some(ConfirmState::multi(kind, ids));
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
+            } else {
+                state.render_state.flash_message = Some(("shared block: jump only".to_string(), Instant::now()));
             }
             true
         }
@@ -1992,6 +2095,18 @@ fn execute_detail_view_action(action: DetailViewAction, state: &mut RuntimeState
             perform_block_action(state, BlockAction::CopyCommand);
         }
         DetailViewAction::CopyOutput => {
+            let allowed = state
+                .view
+                .expanded_block
+                .and_then(|id| state.blocks.block(id))
+                .map(block_allows_standard_actions)
+                .unwrap_or(false);
+            if !allowed {
+                state.render_state.flash_message = Some(("shared block: jump only".to_string(), Instant::now()));
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+                return;
+            }
             let fmt = state.config.block_view.copy_format;
             let text = detail_copy_output(state);
             if let Some(text) = text {
@@ -2005,6 +2120,18 @@ fn execute_detail_view_action(action: DetailViewAction, state: &mut RuntimeState
             state.render_state.force_render = true;
         }
         DetailViewAction::CopyBoth => {
+            let allowed = state
+                .view
+                .expanded_block
+                .and_then(|id| state.blocks.block(id))
+                .map(block_allows_standard_actions)
+                .unwrap_or(false);
+            if !allowed {
+                state.render_state.flash_message = Some(("shared block: jump only".to_string(), Instant::now()));
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+                return;
+            }
             let fmt = state.config.block_view.copy_format;
             let out = detail_copy_output(state).unwrap_or_default();
             let cmd = state
@@ -2031,17 +2158,20 @@ fn execute_detail_view_action(action: DetailViewAction, state: &mut RuntimeState
             state.render_state.force_render = true;
         }
         DetailViewAction::Rerun => {
-            let command = state
-                .view
-                .expanded_block
-                .and_then(|id| state.blocks.block(id))
-                .map(|b| b.command.clone())
-                .filter(|cmd| !cmd.is_empty());
+            let command = state.view.expanded_block.and_then(|id| {
+                state
+                    .blocks
+                    .block(id)
+                    .filter(|b| block_allows_standard_actions(b))
+                    .map(|b| b.command.clone())
+            }).filter(|cmd| !cmd.is_empty());
             if let Some(cmd) = command {
                 state.view = ViewState::default();
                 state.input_accumulator.pending_block_delta = 0;
                 state.render_state.needs_cleanup = true;
                 state.render_state.pending_paste = Some(cmd);
+            } else {
+                state.render_state.flash_message = Some(("shared block: jump only".to_string(), Instant::now()));
             }
         }
         DetailViewAction::VisualMode => {
@@ -2116,6 +2246,11 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
     }
 
     if byte == b'b' {
+        if try_global_jump_back(state) {
+            state.render_state.dirty = true;
+            state.render_state.force_render = true;
+            return true;
+        }
         if let Some(target) = state.opencode_jump_stack.pop() {
             if tmux_target_exists(&target) && tmux_jump_and_zoom(&target) {
                 state.render_state.flash_message = Some(("jumped back".to_string(), Instant::now()));

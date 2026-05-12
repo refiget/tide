@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::PathBuf, time::SystemTime};
 
 use strip_ansi_escapes::strip;
 
-use crate::app::{BlockId, BlockKind, BlockStatus, CommandBlock};
+use crate::app::{BlockActionScope, BlockId, BlockKind, BlockOrigin, BlockStatus, CommandBlock};
 use crate::block_export::{ExportPart, format_block_json, format_blocks_json};
 
 #[derive(Debug)]
@@ -66,6 +66,9 @@ impl BlockStore {
                 output_text: String::new(),
                 output_truncated: false,
                 app_name: None,
+                origin: BlockOrigin::Local,
+                synthetic: false,
+                actions: BlockActionScope::Full,
                 kind,
                 status: BlockStatus::Running,
                 git_context: None,

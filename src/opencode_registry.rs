@@ -9,6 +9,14 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpencodeStatus {
+    Running,
+    Stale,
+    Exited,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpencodeRecord {
     pub alias: String,
@@ -18,8 +26,12 @@ pub struct OpencodeRecord {
     pub cwd: String,
     pub project_name: String,
     pub tmux_target: String,
+    pub tmux_pane_id: String,
+    pub tmux_window_id: String,
+    pub status: OpencodeStatus,
     pub started_at_ms: u128,
     pub last_seen_at_ms: u128,
+    pub exited_at_ms: Option<u128>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -34,6 +46,11 @@ pub struct JumpRecord {
     pub at_ms: u128,
     #[serde(default)]
     pub from_zoomed: bool,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct JumpStackFile {
+    records: Vec<JumpRecord>,
 }
 
 fn now_ms() -> u128 {
@@ -62,7 +79,7 @@ fn lock_path() -> PathBuf {
 }
 
 fn jump_path() -> PathBuf {
-    registry_dir().join("opencode_last_jump.json")
+    registry_dir().join("opencode_jump_stack.json")
 }
 
 fn with_lock<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -117,7 +134,46 @@ fn write_registry_unlocked(path: &Path, reg: &RegistryFile) -> Result<()> {
     Ok(())
 }
 
+fn read_jump_stack_unlocked(path: &Path) -> JumpStackFile {
+    let mut data = String::new();
+    if let Ok(mut f) = OpenOptions::new().read(true).open(path)
+        && f.read_to_string(&mut data).is_ok()
+        && !data.trim().is_empty()
+        && let Ok(parsed) = serde_json::from_str::<JumpStackFile>(&data)
+    {
+        return parsed;
+    }
+    JumpStackFile::default()
+}
+
+fn write_jump_stack_unlocked(path: &Path, stack: &JumpStackFile) -> Result<()> {
+    let payload = serde_json::to_string(stack).context("serialize jump stack")?;
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    let mut f = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&tmp)
+        .context("open tmp jump file")?;
+    f.write_all(payload.as_bytes()).context("write tmp jump file")?;
+    f.sync_all().ok();
+    fs::rename(&tmp, path).context("rename tmp jump file")?;
+    Ok(())
+}
+
 pub fn list_running() -> Result<Vec<OpencodeRecord>> {
+    with_lock(|| {
+        let path = registry_path();
+        let reg = read_registry_unlocked(&path);
+        Ok(reg
+            .records
+            .into_iter()
+            .filter(|r| r.status != OpencodeStatus::Exited)
+            .collect())
+    })
+}
+
+pub fn list_all() -> Result<Vec<OpencodeRecord>> {
     with_lock(|| {
         let path = registry_path();
         let reg = read_registry_unlocked(&path);
@@ -173,6 +229,8 @@ pub fn register_running(
     cwd: &str,
     project_name: &str,
     tmux_target: &str,
+    tmux_pane_id: &str,
+    tmux_window_id: &str,
 ) -> Result<String> {
     with_lock(|| {
         let path = registry_path();
@@ -188,7 +246,11 @@ pub fn register_running(
             reg.records[pos].cwd = cwd.to_string();
             reg.records[pos].project_name = project_name.to_string();
             reg.records[pos].tmux_target = tmux_target.to_string();
+            reg.records[pos].tmux_pane_id = tmux_pane_id.to_string();
+            reg.records[pos].tmux_window_id = tmux_window_id.to_string();
+            reg.records[pos].status = OpencodeStatus::Running;
             reg.records[pos].last_seen_at_ms = now_ms();
+            reg.records[pos].exited_at_ms = None;
             write_registry_unlocked(&path, &reg)?;
             return Ok(alias);
         }
@@ -202,8 +264,12 @@ pub fn register_running(
             cwd: cwd.to_string(),
             project_name: project_name.to_string(),
             tmux_target: tmux_target.to_string(),
+            tmux_pane_id: tmux_pane_id.to_string(),
+            tmux_window_id: tmux_window_id.to_string(),
+            status: OpencodeStatus::Running,
             started_at_ms: now_ms(),
             last_seen_at_ms: now_ms(),
+            exited_at_ms: None,
         });
         write_registry_unlocked(&path, &reg)?;
         Ok(alias)
@@ -214,8 +280,14 @@ pub fn unregister_running(source_tide_id: &str, command_block_id: u64) -> Result
     with_lock(|| {
         let path = registry_path();
         let mut reg = read_registry_unlocked(&path);
-        reg.records
-            .retain(|r| !(r.source_tide_id == source_tide_id && r.command_block_id == command_block_id));
+        let now = now_ms();
+        for rec in &mut reg.records {
+            if rec.source_tide_id == source_tide_id && rec.command_block_id == command_block_id {
+                rec.status = OpencodeStatus::Exited;
+                rec.last_seen_at_ms = now;
+                rec.exited_at_ms = Some(now);
+            }
+        }
         write_registry_unlocked(&path, &reg)
     })
 }
@@ -228,56 +300,59 @@ pub fn find_by_alias(alias: &str) -> Result<Option<OpencodeRecord>> {
     })
 }
 
+pub fn mark_stale(alias: &str) -> Result<()> {
+    with_lock(|| {
+        let path = registry_path();
+        let mut reg = read_registry_unlocked(&path);
+        for rec in &mut reg.records {
+            if rec.alias == alias && rec.status == OpencodeStatus::Running {
+                rec.status = OpencodeStatus::Stale;
+                rec.last_seen_at_ms = now_ms();
+            }
+        }
+        write_registry_unlocked(&path, &reg)
+    })
+}
+
 pub fn write_last_jump(from_tmux_target: &str, to_tmux_target: &str, from_zoomed: bool) -> Result<()> {
     if from_tmux_target == to_tmux_target {
         return Ok(());
     }
     with_lock(|| {
         let path = jump_path();
-        let payload = serde_json::to_string(&JumpRecord {
+        let mut stack = read_jump_stack_unlocked(&path);
+        stack.records.push(JumpRecord {
             from_tmux_target: from_tmux_target.to_string(),
             to_tmux_target: to_tmux_target.to_string(),
             at_ms: now_ms(),
             from_zoomed,
-        })
-        .context("serialize jump record")?;
-        let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-        let mut f = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&tmp)
-            .context("open tmp jump file")?;
-        f.write_all(payload.as_bytes()).context("write tmp jump file")?;
-        f.sync_all().ok();
-        fs::rename(&tmp, &path).context("rename tmp jump file")?;
-        Ok(())
+        });
+        if stack.records.len() > 32 {
+            let drain = stack.records.len() - 32;
+            stack.records.drain(0..drain);
+        }
+        write_jump_stack_unlocked(&path, &stack)
     })
 }
 
-pub fn read_last_jump() -> Result<Option<JumpRecord>> {
+pub fn pop_jump_for_target(current_target: &str) -> Result<Option<JumpRecord>> {
     with_lock(|| {
         let path = jump_path();
-        let mut data = String::new();
-        let Ok(mut f) = OpenOptions::new().read(true).open(&path) else {
-            return Ok(None);
-        };
-        f.read_to_string(&mut data).context("read jump file")?;
-        if data.trim().is_empty() {
-            return Ok(None);
-        }
-        let parsed = serde_json::from_str::<JumpRecord>(&data).context("parse jump file")?;
-        if parsed.from_tmux_target == parsed.to_tmux_target {
-            return Ok(None);
-        }
-        Ok(Some(parsed))
+        let mut stack = read_jump_stack_unlocked(&path);
+        let found = stack
+            .records
+            .iter()
+            .rposition(|r| r.to_tmux_target == current_target);
+        let out = found.map(|idx| stack.records.remove(idx));
+        write_jump_stack_unlocked(&path, &stack)?;
+        Ok(out)
     })
 }
 
 pub fn clear_last_jump() -> Result<()> {
     with_lock(|| {
         let path = jump_path();
-        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(&path);
         Ok(())
     })
 }

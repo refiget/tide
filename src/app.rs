@@ -416,6 +416,12 @@ pub struct CommandBlock {
     pub output_truncated: bool,
     /// App name when this block represents a known TUI session (e.g. "lazygit").
     pub app_name: Option<String>,
+    /// Data origin boundary: local shell history vs injected shared overlay.
+    pub origin: BlockOrigin,
+    /// Whether this block is synthetic (not directly produced by local shell execution).
+    pub synthetic: bool,
+    /// Action boundary for UI operations.
+    pub actions: BlockActionScope,
 }
 
 impl Default for CommandBlock {
@@ -438,6 +444,9 @@ impl Default for CommandBlock {
             end_line: 0,
             output_truncated: false,
             app_name: None,
+            origin: BlockOrigin::Local,
+            synthetic: false,
+            actions: BlockActionScope::Full,
         }
     }
 }
@@ -462,6 +471,18 @@ pub enum BlockStatus {
     Failed,
     Interrupted,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockOrigin {
+    Local,
+    Shared,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockActionScope {
+    Full,
+    JumpOnly,
 }
 
 impl BlockKind {
