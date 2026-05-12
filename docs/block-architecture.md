@@ -45,8 +45,7 @@ The canonical type for one command execution. `ExecutionBlock` is a type alias.
 
 ```rust
 pub enum BlockKind {
-    NormalCommand,   // successful ordinary command
-    FailedCommand,   // non-zero exit (promoted from NormalCommand on finish)
+    NormalCommand,   // ordinary command
     TuiSession,      // interactive TUI program (reserved)
     RawProgram,      // full-screen program detected (vim, fzf, less, etc.)
     AiGenerated,     // future: AI-generated commands
@@ -109,7 +108,7 @@ zsh precmd hook (ShellHookEvent::Precmd)
 finish_command(exit_code, end_line)
     ├── Records duration, exit_code, status
     ├── Derives output_text: strips ANSI from output_raw
-    ├── Promotes NormalCommand → FailedCommand on non-zero exit
+    ├── Sets status=Failed on non-zero exit
     └── Clears active_block_id
 ```
 
