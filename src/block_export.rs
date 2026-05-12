@@ -253,6 +253,13 @@ mod tests {
         }
     }
 
+    fn assert_has_key(json: &str, key: &str) {
+        assert!(
+            json.contains(&format!("\"{key}\":")),
+            "expected key `{key}` in: {json}"
+        );
+    }
+
     #[test]
     fn schema_constants_are_used_in_output() {
         let out = format_block_json(&fixed_block(), ExportPart::Both);
@@ -266,5 +273,80 @@ mod tests {
         let out = format_block_json(&fixed_block(), ExportPart::Both);
         let expected = r#"{"schema_version":"block_export.v1","id":7,"kind":"normal_command","status":"failed","output_semantics":"line_oriented","output_truncated":true,"cwd":"/repo","started_at_ms":1000,"finished_at_ms":2500,"duration_ms":1500,"exit_code":1,"output_stored_bytes":12,"command":"cargo test","output_text":"line1\nline2\n","views":{"summary":{"headline":"cargo test","status":"failed","duration_ms":1500,"exit_code":1,"truncated":true},"error":{"status":"failed","exit_code":1,"tail":"line1\nline2"},"audit":["output_truncated","command_failed"],"context":{"command":"cargo test","cwd":"/repo","status":"failed","output_excerpt":"line1\nline2"}}}"#;
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn export_part_command_has_expected_shape() {
+        let out = format_block_json(&fixed_block(), ExportPart::Command);
+        for key in [
+            KEY_SCHEMA_VERSION,
+            KEY_ID,
+            KEY_KIND,
+            KEY_STATUS,
+            KEY_OUTPUT_SEMANTICS,
+            KEY_OUTPUT_TRUNCATED,
+            KEY_CWD,
+            KEY_STARTED_AT_MS,
+            KEY_FINISHED_AT_MS,
+            KEY_DURATION_MS,
+            KEY_EXIT_CODE,
+            KEY_OUTPUT_STORED_BYTES,
+            KEY_COMMAND,
+        ] {
+            assert_has_key(&out, key);
+        }
+        assert!(!out.contains(&format!("\"{KEY_OUTPUT_TEXT}\":")));
+        assert!(!out.contains(&format!("\"{KEY_VIEWS}\":")));
+    }
+
+    #[test]
+    fn export_part_output_has_expected_shape() {
+        let out = format_block_json(&fixed_block(), ExportPart::Output);
+        for key in [
+            KEY_SCHEMA_VERSION,
+            KEY_ID,
+            KEY_KIND,
+            KEY_STATUS,
+            KEY_OUTPUT_SEMANTICS,
+            KEY_OUTPUT_TRUNCATED,
+            KEY_CWD,
+            KEY_STARTED_AT_MS,
+            KEY_FINISHED_AT_MS,
+            KEY_DURATION_MS,
+            KEY_EXIT_CODE,
+            KEY_OUTPUT_STORED_BYTES,
+            KEY_OUTPUT_TEXT,
+        ] {
+            assert_has_key(&out, key);
+        }
+        assert!(!out.contains(&format!("\"{KEY_COMMAND}\":")));
+        assert!(!out.contains(&format!("\"{KEY_VIEWS}\":")));
+    }
+
+    #[test]
+    fn export_part_both_has_expected_shape_and_views() {
+        let out = format_block_json(&fixed_block(), ExportPart::Both);
+        for key in [
+            KEY_SCHEMA_VERSION,
+            KEY_ID,
+            KEY_KIND,
+            KEY_STATUS,
+            KEY_OUTPUT_SEMANTICS,
+            KEY_OUTPUT_TRUNCATED,
+            KEY_CWD,
+            KEY_STARTED_AT_MS,
+            KEY_FINISHED_AT_MS,
+            KEY_DURATION_MS,
+            KEY_EXIT_CODE,
+            KEY_OUTPUT_STORED_BYTES,
+            KEY_COMMAND,
+            KEY_OUTPUT_TEXT,
+            KEY_VIEWS,
+        ] {
+            assert_has_key(&out, key);
+        }
+        for view_key in ["summary", "error", "audit", "context"] {
+            assert_has_key(&out, view_key);
+        }
     }
 }
