@@ -103,7 +103,7 @@ copy_format = "plaintext"
   | `"plaintext"` | Plain text with blocks separated by `\n\n---\n\n` |
   | `"markdown"` | Markdown fenced code blocks per block |
   | `"shell_transcript"` | Shell session transcript format with prompt markers |
-  | `"json"` | Structured JSON (single block or array) |
+  | `"json"` | Structured JSON `block_export.v1` (single block or array), including metadata, truncation flags, and derived `views` |
 
 ## Block Layout
 

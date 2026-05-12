@@ -1191,7 +1191,7 @@ pub enum CopyFormat {
 - **Plaintext**: command, output, or both with `\n\n---\n\n` multi-block separator
 - **Markdown**: command in backticks, output in fenced code blocks, both as `## heading + code block`
 - **ShellTranscript**: command prefixed with `$ `
-- **Json**: `{"command":...,"output":...}` or `[{...},{...}]` for multi-block
+- **Json**: `block_export.v1` objects. Includes stable metadata (`id`, `kind`, `status`, timestamps, truncation flags), selected payload fields by `CopyPart`, and derived `views` for `CopyPart::Both`. Multi-block output is a JSON array.
 
 `CopyFormat` is configurable via `block_view.copy_format` in the TOML config.
 

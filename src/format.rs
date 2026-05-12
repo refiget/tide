@@ -782,6 +782,24 @@ mod tests {
         }
     }
 
+    fn copy_block_with_status(
+        command: &str,
+        output: &str,
+        kind: crate::app::BlockKind,
+        status: BlockStatus,
+        truncated: bool,
+    ) -> CommandBlock {
+        CommandBlock {
+            command: command.to_string(),
+            output_text: output.to_string(),
+            kind,
+            status,
+            output_truncated: truncated,
+            output_raw: output.as_bytes().to_vec(),
+            ..CommandBlock::default()
+        }
+    }
+
     // -- Plaintext --
 
     #[test]
@@ -944,6 +962,49 @@ mod tests {
         assert!(result.contains(r#"\"hi\""#), "quotes should be escaped");
         assert!(result.contains(r#"\n"#), "newlines should be escaped");
         assert!(result.contains(r#"\t"#), "tabs should be escaped");
+    }
+
+    #[test]
+    fn json_raw_program_marks_non_linear_semantics() {
+        let b = copy_block_with_status(
+            "fzf",
+            "raw-bytes",
+            crate::app::BlockKind::RawProgram,
+            BlockStatus::Success,
+            false,
+        );
+        let result = format_blocks(&[&b], CopyPart::Both, CopyFormat::Json);
+        assert!(result.contains(r#""output_semantics":"non_linear_tui""#));
+        assert!(result.contains(r#""raw_program_output_non_linear""#));
+    }
+
+    #[test]
+    fn json_truncated_and_failed_are_audited() {
+        let b = copy_block_with_status(
+            "cargo test",
+            "line1\nline2\nline3\nline4\nline5",
+            crate::app::BlockKind::NormalCommand,
+            BlockStatus::Failed,
+            true,
+        );
+        let result = format_blocks(&[&b], CopyPart::Both, CopyFormat::Json);
+        assert!(result.contains(r#""output_truncated":true"#));
+        assert!(result.contains(r#""command_failed""#));
+        assert!(result.contains(r#""error":{"status":"failed""#));
+    }
+
+    #[test]
+    fn json_context_omits_output_excerpt_for_tui() {
+        let b = copy_block_with_status(
+            "nvim",
+            "ignored",
+            crate::app::BlockKind::TuiSession,
+            BlockStatus::Success,
+            false,
+        );
+        let result = format_blocks(&[&b], CopyPart::Both, CopyFormat::Json);
+        assert!(result.contains(r#""context":{"command":"nvim""#));
+        assert!(result.contains(r#""output_excerpt":"""#));
     }
 
     // -- edge cases --
