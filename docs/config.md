@@ -240,3 +240,23 @@ raw_programs = [
 ```
 
 Future versions may use this or a replacement setting as metadata for labeling interactive blocks. It must not be required for terminal passthrough.
+
+## Shared Agent Registry
+
+Tide supports sharing minimal agent navigation state between instances (current provider: `opencode`).
+
+```toml
+[opencode_share]
+enabled = true
+cwd = "basename"   # "full" | "basename" | "none"
+command = true
+```
+
+- `enabled` — enable shared agent block sync and jump behavior.
+- `cwd` — privacy level for shared cwd in registry:
+  - `"full"` stores full cwd path
+  - `"basename"` stores only last path component
+  - `"none"` stores no cwd
+- `command` — whether to share original command text (`false` stores generic `"opencode"`).
+
+The shared registry stores navigation state only (alias, tmux target, status metadata). It does not store command output, prompt/reply content, or full session context.

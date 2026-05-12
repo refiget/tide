@@ -64,6 +64,7 @@ Current source layout (flat `src/` modules):
 ```text
 src/
   main.rs          — thin entry point, loads config, starts PTY session
+  agent_registry.rs— global shared agent records + jump stack persistence (file-backed)
   app.rs           — ViewState, ViewKind, InputMode, BlockViewport, ViewAnchor,
                      InputAccumulator, RenderState, AppEvent, CommandBlock,
                      BlockKind, BlockStatus, BlockAction, BlockFilter,
@@ -113,6 +114,14 @@ Block View uses a visual-line viewport: selection moves by block, but the viewpo
 
 Input handler dispatches through configurable keymaps (`resolved_block_keymap`, `resolved_detail_keymap`) for single-byte actions. Esc sequences (`\x1b[A`, `\x1b[B`) are hardcoded.
 
+Shared agent integration (MVP):
+- Detect provider runtime (`opencode` currently) from command/process context.
+- Register running sessions into `agent_registry`.
+- Inject shared synthetic blocks (`origin=shared`, `synthetic=true`, `actions=jump_only`).
+- `i` on shared block jumps by tmux target and records jump stack entry.
+- `Ctrl-B` first attempts jump-back; only enters Block View in shell-normal state.
+- On shell `precmd` with cwd, Tide also updates its own process cwd so tmux pane path tracking stays aligned.
+
 ### block.rs
 
 Provides `BlockStore` with a `Vec<BlockId>` timeline and `HashMap<BlockId, CommandBlock>` lookup. Controls retention via `max_blocks`. Methods: `start_command`, `append_output`, `finish_command`, `block`, `block_mut`, `block_id_at`, `len`, `remove`, `set_cwd`. Enforces `max_output_bytes_per_block` with `output_truncated` flag.
@@ -150,6 +159,13 @@ Also exposes `enter_block_render()` / `leave_block_render()` for alternate scree
 ### shell_hooks.rs
 
 Owns zsh hook definitions (`install_script()`), the `Osc777Parser` that strips invisible OSC 777 markers from PTY output, and marker parsing (`parse_block_marker`).
+
+### agent_registry.rs
+
+File-backed global registry for shared agent navigation metadata and jump-back stack:
+- Stores minimal provider records (`provider`, `alias`, status, tmux pane/window/target, timestamps).
+- Stores jump stack (`from`, `to`, `from_zoomed`, timestamp), bounded in-memory/file model.
+- Uses lock file + atomic write/rename pattern for cross-instance safety.
 
 ### config.rs
 

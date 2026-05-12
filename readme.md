@@ -10,6 +10,18 @@ It runs inside the user's existing terminal, starts real `zsh`, transparently sh
 
 Tide is not a terminal emulator and not a replacement for zsh. Normal mode is passthrough; Block and Detail modes are reconstructed views based on Tide's own captured `ShellBuffer` and `BlockStore`.
 
+## Shared Agent Blocks (MVP)
+
+Tide includes a first-stage shared agent registry (currently `opencode` provider):
+
+- detects running agent sessions in tmux panes
+- shares minimal navigation state across Tide instances
+- renders shared synthetic blocks in Block View
+- `i` on a shared block jumps to the target tmux pane and zooms
+- `Ctrl-B` acts as navigation escape: back first, then enter Block View only in shell-normal state
+
+Shared blocks are `jump-only` and are not treated as local command history for copy/rerun/delete flows.
+
 ## Architecture
 
 ```text

@@ -23,7 +23,13 @@ struct RuntimeState {
     input_accumulator: InputAccumulator,
     render_state: RenderState,
     config: RuntimeConfig,
-    capture_suspended: bool,
+    tui_state: TuiRuntimeState,
+    pty_alt_screen_active: bool,
+    tide_alt_screen_active: bool,
+    tide_id: String,
+    opencode_by_block: HashMap<BlockId, String>,
+    opencode_jump_stack: Vec<String>,
+    shell_command_running: bool,
     rows: u16,
     cols: u16,
     index: BlockIndex,
@@ -102,6 +108,10 @@ pub struct CommandBlock {
     pub start_line: usize,
     pub end_line: usize,
     pub output_truncated: bool,
+    pub app_name: Option<String>,
+    pub origin: BlockOrigin,
+    pub synthetic: bool,
+    pub actions: BlockActionScope,
 }
 ```
 
@@ -117,7 +127,6 @@ pub struct CommandBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockKind {
     NormalCommand,
-    FailedCommand,
     TuiSession,
     RawProgram,
     AiGenerated,
@@ -125,7 +134,7 @@ pub enum BlockKind {
 }
 ```
 
-`RawProgram` is set when an alternate-screen switch is detected during command execution. `FailedCommand` is promoted from `NormalCommand` when the exit code is non-zero. `AiGenerated` and `SystemEvent` are future/reserved.
+`RawProgram` is set when an alternate-screen switch is detected during command execution. Non-zero exits set `BlockStatus::Failed` (kind stays `NormalCommand` unless another classifier changes it). `AiGenerated` and `SystemEvent` are future/reserved.
 
 ## BlockStatus
 
@@ -141,6 +150,51 @@ pub enum BlockStatus {
 ```
 
 Set to `Running` on `start_command`. Set to `Success` or `Failed` on `finish_command` based on exit code.
+
+## Shared Block Boundaries
+
+```rust
+pub enum BlockOrigin {
+    Local,
+    Shared,
+}
+
+pub enum BlockActionScope {
+    Full,
+    JumpOnly,
+}
+```
+
+Shared synthetic blocks are marked `origin=Shared`, `synthetic=true`, `actions=JumpOnly`.
+They are rendered in Block View but are excluded from local-history operations such as copy/rerun/delete/export flows.
+
+## Agent Registry (MVP)
+
+```rust
+pub enum AgentProvider { Opencode }
+pub enum AgentStatus { Running, Stale, Exited }
+pub struct AgentRecord {
+    pub provider: AgentProvider,
+    pub alias: String,
+    pub source_tide_id: String,
+    pub command_block_id: u64,
+    pub command: String,
+    pub cwd: String,
+    pub project_name: String,
+    pub tmux_target: String,
+    pub tmux_pane_id: String,
+    pub tmux_window_id: String,
+    pub status: AgentStatus,
+    pub started_at_ms: u128,
+    pub last_seen_at_ms: u128,
+    pub exited_at_ms: Option<u128>,
+}
+```
+
+`agent_registry.rs` stores global minimal navigation records and a jump stack:
+- register/unregister runtime records
+- mark stale targets
+- push/pop jump-back entries by current target
 
 ## BlockStore
 
