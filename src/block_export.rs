@@ -5,6 +5,23 @@ use crate::{
     format::compact_command,
 };
 
+pub const SCHEMA_VERSION: &str = "block_export.v1";
+pub const KEY_SCHEMA_VERSION: &str = "schema_version";
+pub const KEY_ID: &str = "id";
+pub const KEY_KIND: &str = "kind";
+pub const KEY_STATUS: &str = "status";
+pub const KEY_OUTPUT_SEMANTICS: &str = "output_semantics";
+pub const KEY_OUTPUT_TRUNCATED: &str = "output_truncated";
+pub const KEY_CWD: &str = "cwd";
+pub const KEY_STARTED_AT_MS: &str = "started_at_ms";
+pub const KEY_FINISHED_AT_MS: &str = "finished_at_ms";
+pub const KEY_DURATION_MS: &str = "duration_ms";
+pub const KEY_EXIT_CODE: &str = "exit_code";
+pub const KEY_OUTPUT_STORED_BYTES: &str = "output_stored_bytes";
+pub const KEY_COMMAND: &str = "command";
+pub const KEY_OUTPUT_TEXT: &str = "output_text";
+pub const KEY_VIEWS: &str = "views";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportPart {
     Command,
@@ -14,27 +31,30 @@ pub enum ExportPart {
 
 pub fn format_block_json(block: &CommandBlock, part: ExportPart) -> String {
     let mut fields: Vec<String> = Vec::new();
-    fields.push(format!("\"schema_version\":\"{}\"", "block_export.v1"));
-    fields.push(format!("\"id\":{}", block.id.0));
-    fields.push(format!("\"kind\":{}", json_string(block.kind.as_str())));
-    fields.push(format!("\"status\":{}", json_string(block.status.as_str())));
+    fields.push(format!("\"{KEY_SCHEMA_VERSION}\":\"{SCHEMA_VERSION}\""));
+    fields.push(format!("\"{KEY_ID}\":{}", block.id.0));
+    fields.push(format!("\"{KEY_KIND}\":{}", json_string(block.kind.as_str())));
+    fields.push(format!("\"{KEY_STATUS}\":{}", json_string(block.status.as_str())));
     fields.push(format!(
-        "\"output_semantics\":{}",
+        "\"{KEY_OUTPUT_SEMANTICS}\":{}",
         json_string(output_semantics(block.kind.clone()))
     ));
     fields.push(format!(
-        "\"output_truncated\":{}",
+        "\"{KEY_OUTPUT_TRUNCATED}\":{}",
         if block.output_truncated { "true" } else { "false" }
     ));
-    fields.push(format!("\"cwd\":{}", json_string(&block.cwd.display().to_string())));
     fields.push(format!(
-        "\"started_at_ms\":{}",
+        "\"{KEY_CWD}\":{}",
+        json_string(&block.cwd.display().to_string())
+    ));
+    fields.push(format!(
+        "\"{KEY_STARTED_AT_MS}\":{}",
         system_time_ms(block.started_at)
             .map(|v| v.to_string())
             .unwrap_or_else(|| "null".to_string())
     ));
     fields.push(format!(
-        "\"finished_at_ms\":{}",
+        "\"{KEY_FINISHED_AT_MS}\":{}",
         block
             .finished_at
             .and_then(system_time_ms)
@@ -42,32 +62,41 @@ pub fn format_block_json(block: &CommandBlock, part: ExportPart) -> String {
             .unwrap_or_else(|| "null".to_string())
     ));
     fields.push(format!(
-        "\"duration_ms\":{}",
+        "\"{KEY_DURATION_MS}\":{}",
         block
             .duration_ms
             .map(|v| v.to_string())
             .unwrap_or_else(|| "null".to_string())
     ));
     fields.push(format!(
-        "\"exit_code\":{}",
+        "\"{KEY_EXIT_CODE}\":{}",
         block
             .exit_code
             .map(|v| v.to_string())
             .unwrap_or_else(|| "null".to_string())
     ));
-    fields.push(format!("\"output_stored_bytes\":{}", block.output_raw.len()));
+    fields.push(format!(
+        "\"{KEY_OUTPUT_STORED_BYTES}\":{}",
+        block.output_raw.len()
+    ));
 
     match part {
         ExportPart::Command => {
-            fields.push(format!("\"command\":{}", json_string(&block.command)));
+            fields.push(format!("\"{KEY_COMMAND}\":{}", json_string(&block.command)));
         }
         ExportPart::Output => {
-            fields.push(format!("\"output_text\":{}", json_string(&block.output_text)));
+            fields.push(format!(
+                "\"{KEY_OUTPUT_TEXT}\":{}",
+                json_string(&block.output_text)
+            ));
         }
         ExportPart::Both => {
-            fields.push(format!("\"command\":{}", json_string(&block.command)));
-            fields.push(format!("\"output_text\":{}", json_string(&block.output_text)));
-            fields.push(format!("\"views\":{}", build_views_json(block)));
+            fields.push(format!("\"{KEY_COMMAND}\":{}", json_string(&block.command)));
+            fields.push(format!(
+                "\"{KEY_OUTPUT_TEXT}\":{}",
+                json_string(&block.output_text)
+            ));
+            fields.push(format!("\"{KEY_VIEWS}\":{}", build_views_json(block)));
         }
     }
 
@@ -197,4 +226,45 @@ fn json_string(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{path::PathBuf, time::UNIX_EPOCH};
+
+    use super::*;
+    use crate::app::{BlockId, CommandBlock};
+
+    fn fixed_block() -> CommandBlock {
+        CommandBlock {
+            id: BlockId(7),
+            command: "cargo test".to_string(),
+            cwd: PathBuf::from("/repo"),
+            started_at: UNIX_EPOCH + std::time::Duration::from_millis(1000),
+            finished_at: Some(UNIX_EPOCH + std::time::Duration::from_millis(2500)),
+            duration_ms: Some(1500),
+            exit_code: Some(1),
+            output_raw: b"line1\nline2\n".to_vec(),
+            output_text: "line1\nline2\n".to_string(),
+            kind: BlockKind::NormalCommand,
+            status: BlockStatus::Failed,
+            output_truncated: true,
+            ..CommandBlock::default()
+        }
+    }
+
+    #[test]
+    fn schema_constants_are_used_in_output() {
+        let out = format_block_json(&fixed_block(), ExportPart::Both);
+        assert!(out.contains(&format!("\"{KEY_SCHEMA_VERSION}\":\"{SCHEMA_VERSION}\"")));
+        assert!(out.contains(&format!("\"{KEY_ID}\":7")));
+        assert!(out.contains(&format!("\"{KEY_COMMAND}\":\"cargo test\"")));
+    }
+
+    #[test]
+    fn snapshot_export_both_is_stable() {
+        let out = format_block_json(&fixed_block(), ExportPart::Both);
+        let expected = r#"{"schema_version":"block_export.v1","id":7,"kind":"normal_command","status":"failed","output_semantics":"line_oriented","output_truncated":true,"cwd":"/repo","started_at_ms":1000,"finished_at_ms":2500,"duration_ms":1500,"exit_code":1,"output_stored_bytes":12,"command":"cargo test","output_text":"line1\nline2\n","views":{"summary":{"headline":"cargo test","status":"failed","duration_ms":1500,"exit_code":1,"truncated":true},"error":{"status":"failed","exit_code":1,"tail":"line1\nline2"},"audit":["output_truncated","command_failed"],"context":{"command":"cargo test","cwd":"/repo","status":"failed","output_excerpt":"line1\nline2"}}}"#;
+        assert_eq!(out, expected);
+    }
 }
