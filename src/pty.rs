@@ -1055,6 +1055,9 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             let finished_cwd = cwd;
             if let Some(ref cwd) = finished_cwd {
                 state.blocks.set_cwd(cwd.clone());
+                // Keep Tide process cwd aligned with inner shell cwd so tmux pane path
+                // tracking (split/new-window default path) stays accurate.
+                let _ = std::env::set_current_dir(cwd);
             }
 
             // TUI session finalization — decide Return Panel or direct Plain.
