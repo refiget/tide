@@ -121,9 +121,6 @@ impl BlockStore {
         block.status = if exit_code == 0 {
             BlockStatus::Success
         } else {
-            if block.kind == BlockKind::NormalCommand {
-                block.kind = BlockKind::FailedCommand;
-            }
             BlockStatus::Failed
         };
         block.output_text = String::from_utf8_lossy(&strip(&block.output_raw)).to_string();

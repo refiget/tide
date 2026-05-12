@@ -447,7 +447,6 @@ pub type ExecutionBlock = CommandBlock;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockKind {
     NormalCommand,
-    FailedCommand,
     TuiSession,
     RawProgram,
     AiGenerated,
@@ -463,6 +462,30 @@ pub enum BlockStatus {
     Failed,
     Interrupted,
     Unknown,
+}
+
+impl BlockKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BlockKind::NormalCommand => "normal_command",
+            BlockKind::TuiSession => "tui_session",
+            BlockKind::RawProgram => "raw_program",
+            BlockKind::AiGenerated => "ai_generated",
+            BlockKind::SystemEvent => "system_event",
+        }
+    }
+}
+
+impl BlockStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BlockStatus::Running => "running",
+            BlockStatus::Success => "success",
+            BlockStatus::Failed => "failed",
+            BlockStatus::Interrupted => "interrupted",
+            BlockStatus::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

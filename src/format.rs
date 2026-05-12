@@ -1,7 +1,7 @@
-use std::path::Path;
+use std::{path::Path, time::UNIX_EPOCH};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{BlockStatus, CommandBlock};
+use crate::app::{BlockKind, BlockStatus, CommandBlock};
 
 // ─── compact_command ─────────────────────────────────────────────────────────
 
@@ -358,16 +358,169 @@ fn format_one(block: &CommandBlock, part: CopyPart, fmt: CopyFormat) -> String {
             CopyPart::Output => out.clone(),
             CopyPart::Both => format!("$ {cmd}\n{out}"),
         },
-        CopyFormat::Json => match part {
-            CopyPart::Command => format!("{{\"command\":{}}}", json_string(cmd)),
-            CopyPart::Output => format!("{{\"output\":{}}}", json_string(out)),
-            CopyPart::Both => format!(
-                "{{\"command\":{},\"output\":{}}}",
-                json_string(cmd),
-                json_string(out)
-            ),
-        },
+        CopyFormat::Json => format_one_json(block, part),
     }
+}
+
+fn format_one_json(block: &CommandBlock, part: CopyPart) -> String {
+    let mut fields: Vec<String> = Vec::new();
+    fields.push(format!("\"schema_version\":\"{}\"", "block_export.v1"));
+    fields.push(format!("\"id\":{}", block.id.0));
+    fields.push(format!("\"kind\":{}", json_string(block.kind.as_str())));
+    fields.push(format!("\"status\":{}", json_string(block.status.as_str())));
+    fields.push(format!(
+        "\"output_semantics\":{}",
+        json_string(output_semantics(block.kind.clone()))
+    ));
+    fields.push(format!(
+        "\"output_truncated\":{}",
+        if block.output_truncated { "true" } else { "false" }
+    ));
+    fields.push(format!("\"cwd\":{}", json_string(&block.cwd.display().to_string())));
+    fields.push(format!(
+        "\"started_at_ms\":{}",
+        system_time_ms(block.started_at)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string())
+    ));
+    fields.push(format!(
+        "\"finished_at_ms\":{}",
+        block.finished_at
+            .and_then(system_time_ms)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string())
+    ));
+    fields.push(format!(
+        "\"duration_ms\":{}",
+        block.duration_ms
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string())
+    ));
+    fields.push(format!(
+        "\"exit_code\":{}",
+        block.exit_code
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string())
+    ));
+    fields.push(format!("\"output_stored_bytes\":{}", block.output_raw.len()));
+
+    match part {
+        CopyPart::Command => {
+            fields.push(format!("\"command\":{}", json_string(&block.command)));
+        }
+        CopyPart::Output => {
+            fields.push(format!("\"output_text\":{}", json_string(&block.output_text)));
+        }
+        CopyPart::Both => {
+            fields.push(format!("\"command\":{}", json_string(&block.command)));
+            fields.push(format!("\"output_text\":{}", json_string(&block.output_text)));
+            fields.push(format!("\"views\":{}", build_views_json(block)));
+        }
+    }
+
+    format!("{{{}}}", fields.join(","))
+}
+
+fn build_views_json(block: &CommandBlock) -> String {
+    let summary = build_summary_json(block);
+    let error = build_error_json(block).unwrap_or_else(|| "null".to_string());
+    let audit = build_audit_json(block);
+    let context = build_context_json(block);
+    format!(
+        "{{\"summary\":{},\"error\":{},\"audit\":{},\"context\":{}}}",
+        summary, error, audit, context
+    )
+}
+
+fn build_summary_json(block: &CommandBlock) -> String {
+    let headline = if block.command.is_empty() {
+        "(empty command)".to_string()
+    } else {
+        compact_command(&block.command, 80)
+    };
+    format!(
+        "{{\"headline\":{},\"status\":{},\"duration_ms\":{},\"exit_code\":{},\"truncated\":{}}}",
+        json_string(&headline),
+        json_string(block.status.as_str()),
+        block.duration_ms
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+        block.exit_code
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+        if block.output_truncated { "true" } else { "false" }
+    )
+}
+
+fn build_error_json(block: &CommandBlock) -> Option<String> {
+    if !matches!(block.status, BlockStatus::Failed | BlockStatus::Interrupted) {
+        return None;
+    }
+    let tail = output_tail(&block.output_text, 8);
+    Some(format!(
+        "{{\"status\":{},\"exit_code\":{},\"tail\":{}}}",
+        json_string(block.status.as_str()),
+        block.exit_code
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+        json_string(&tail)
+    ))
+}
+
+fn build_audit_json(block: &CommandBlock) -> String {
+    let mut items: Vec<String> = Vec::new();
+    if block.output_truncated {
+        items.push(json_string("output_truncated"));
+    }
+    if matches!(block.status, BlockStatus::Failed) {
+        items.push(json_string("command_failed"));
+    }
+    if matches!(block.status, BlockStatus::Interrupted) {
+        items.push(json_string("command_interrupted"));
+    }
+    if matches!(block.kind, BlockKind::RawProgram) {
+        items.push(json_string("raw_program_output_non_linear"));
+    }
+    if matches!(block.kind, BlockKind::TuiSession) {
+        items.push(json_string("tui_session"));
+    }
+    format!("[{}]", items.join(","))
+}
+
+fn build_context_json(block: &CommandBlock) -> String {
+    let excerpt = if matches!(block.kind, BlockKind::RawProgram | BlockKind::TuiSession) {
+        String::new()
+    } else {
+        output_tail(&block.output_text, 4)
+    };
+    format!(
+        "{{\"command\":{},\"cwd\":{},\"status\":{},\"output_excerpt\":{}}}",
+        json_string(&block.command),
+        json_string(&block.cwd.display().to_string()),
+        json_string(block.status.as_str()),
+        json_string(&excerpt)
+    )
+}
+
+fn output_tail(output: &str, lines: usize) -> String {
+    if lines == 0 || output.is_empty() {
+        return String::new();
+    }
+    let all: Vec<&str> = output.lines().collect();
+    let start = all.len().saturating_sub(lines);
+    all[start..].join("\n")
+}
+
+fn output_semantics(kind: BlockKind) -> &'static str {
+    if matches!(kind, BlockKind::RawProgram | BlockKind::TuiSession) {
+        "non_linear_tui"
+    } else {
+        "line_oriented"
+    }
+}
+
+fn system_time_ms(t: std::time::SystemTime) -> Option<u128> {
+    t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_millis())
 }
 
 fn json_string(s: &str) -> String {
@@ -748,28 +901,29 @@ mod tests {
     #[test]
     fn json_single_both() {
         let b = copy_block("ls", "a\nb");
-        assert_eq!(
-            format_blocks(&[&b], CopyPart::Both, CopyFormat::Json),
-            r#"{"command":"ls","output":"a\nb"}"#
-        );
+        let result = format_blocks(&[&b], CopyPart::Both, CopyFormat::Json);
+        assert!(result.contains(r#""schema_version":"block_export.v1""#));
+        assert!(result.contains(r#""command":"ls""#));
+        assert!(result.contains(r#""output_text":"a\nb""#));
+        assert!(result.contains(r#""views":{"summary":"#));
     }
 
     #[test]
     fn json_command_only() {
         let b = copy_block("ls", "a");
-        assert_eq!(
-            format_blocks(&[&b], CopyPart::Command, CopyFormat::Json),
-            r#"{"command":"ls"}"#
-        );
+        let result = format_blocks(&[&b], CopyPart::Command, CopyFormat::Json);
+        assert!(result.contains(r#""schema_version":"block_export.v1""#));
+        assert!(result.contains(r#""command":"ls""#));
+        assert!(!result.contains(r#""output_text":"#));
     }
 
     #[test]
     fn json_output_only() {
         let b = copy_block("ls", "a");
-        assert_eq!(
-            format_blocks(&[&b], CopyPart::Output, CopyFormat::Json),
-            r#"{"output":"a"}"#
-        );
+        let result = format_blocks(&[&b], CopyPart::Output, CopyFormat::Json);
+        assert!(result.contains(r#""schema_version":"block_export.v1""#));
+        assert!(result.contains(r#""output_text":"a""#));
+        assert!(!result.contains(r#""command":"ls""#));
     }
 
     #[test]
@@ -777,10 +931,10 @@ mod tests {
         let b1 = copy_block("ls", "a");
         let b2 = copy_block("pwd", "/");
         let result = format_blocks(&[&b1, &b2], CopyPart::Both, CopyFormat::Json);
-        assert_eq!(
-            result,
-            r#"[{"command":"ls","output":"a"},{"command":"pwd","output":"/"}]"#
-        );
+        assert!(result.starts_with('['));
+        assert!(result.ends_with(']'));
+        assert!(result.contains(r#""command":"ls""#));
+        assert!(result.contains(r#""command":"pwd""#));
     }
 
     #[test]
