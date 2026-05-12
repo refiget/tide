@@ -15,10 +15,10 @@ use signal_hook::{consts::signal::SIGWINCH, iterator::Signals};
 
 use crate::{
     app::{
-        AltScreenEvent, BlockAction, BlockId, BlockKind, BlockStatus, BlockViewAction, CaptureMode,
-        ConfirmKind, ConfirmState, DEFAULT_TUI_COMMANDS, DetailViewAction, HelpState,
-        InputAccumulator, RenderState, TuiAppMatch, TuiAppMatchSource, TuiRuntimeState, ViewAnchor,
-        ViewKind, ViewState, VisibleSource,
+        BlockAction, BlockId, BlockKind, BlockStatus, BlockViewAction, CaptureMode, ConfirmKind,
+        ConfirmState, DEFAULT_TUI_COMMANDS, DetailViewAction, HelpState, InputAccumulator,
+        RenderState, ReturnPanelTarget, TuiAppMatch, TuiAppMatchSource, TuiRuntimeState,
+        ViewAnchor, ViewKind, ViewState, VisibleSource,
     },
     block::BlockStore,
     buffer::ShellBuffer,
@@ -42,6 +42,10 @@ struct RuntimeState {
     index: crate::index::BlockIndex,
     /// TUI full-screen lifecycle state machine.
     tui_state: TuiRuntimeState,
+    /// Whether the PTY (child process) is currently in an alternate screen buffer.
+    pty_alt_screen_active: bool,
+    /// Whether Tide's own UI (Block View) is currently in an alternate screen buffer.
+    tide_alt_screen_active: bool,
 }
 
 const FRAME_DURATION: Duration = Duration::from_millis(16);
@@ -105,6 +109,8 @@ pub fn run_shell(config: &Config) -> Result<()> {
         cols,
         index: crate::index::BlockIndex::new(),
         tui_state: TuiRuntimeState::Idle,
+        pty_alt_screen_active: false,
+        tide_alt_screen_active: false,
     }));
     let stdout = Arc::new(Mutex::new(io::stdout()));
     let debug_blocks = std::env::var_os("TIDE_DEBUG_BLOCKS").is_some();
@@ -128,39 +134,34 @@ pub fn run_shell(config: &Config) -> Result<()> {
                     for part in parsed {
                         match part {
                             ParsedPtyPart::Visible(visible) => {
-                                let view = if let Ok(mut state) = output_state.lock() {
-                                    // Process alt-screen events (enter/exit).
-                                    for event in detect_alt_screen_events(&visible) {
-                                        match event {
-                                            AltScreenEvent::Enter => {
-                                                on_alt_screen_enter(&mut state)
-                                            }
-                                            AltScreenEvent::Exit => on_alt_screen_exit(&mut state),
-                                        }
-                                    }
-
+                                if let Ok(mut state) = output_state.lock() {
                                     let active_block_id = state.blocks.active_block_id();
                                     if matches!(state.capture_mode, CaptureMode::Normal) {
                                         state.blocks.append_output(&visible);
                                         state.shell.append(&visible, active_block_id);
                                     }
-                                    state.view.view.clone()
+                                    let view = state.view.view.clone();
+                                    drop(state);
+
+                                    if matches!(view, ViewKind::Plain) {
+                                        if let Ok(mut stdout) = output_stdout.lock() {
+                                            if stdout.write_all(&visible).is_err() {
+                                                break;
+                                            }
+                                            let _ = stdout.flush();
+                                        }
+                                    }
                                 } else {
                                     break;
                                 };
-
-                                if matches!(view, ViewKind::Plain) {
-                                    if let Ok(mut stdout) = output_stdout.lock() {
-                                        if stdout.write_all(&visible).is_err() {
-                                            break;
-                                        }
-                                        let _ = stdout.flush();
-                                    }
-                                }
                             }
                             ParsedPtyPart::Event(event) => {
                                 if let Ok(mut state) = output_state.lock() {
-                                    apply_shell_hook_event(&mut state, event, debug_blocks);
+                                    match event {
+                                        ShellHookEvent::AltScreenEnter => on_alt_screen_enter(&mut state),
+                                        ShellHookEvent::AltScreenExit => on_alt_screen_exit(&mut state),
+                                        _ => apply_shell_hook_event(&mut state, event, debug_blocks),
+                                    }
                                 }
                             }
                         }
@@ -185,14 +186,6 @@ pub fn run_shell(config: &Config) -> Result<()> {
         let remaining = parser.flush_visible();
         if !remaining.is_empty() {
             let (view, has_overlay) = if let Ok(mut state) = output_state.lock() {
-                // Process alt-screen events in remaining bytes.
-                for event in detect_alt_screen_events(&remaining) {
-                    match event {
-                        AltScreenEvent::Enter => on_alt_screen_enter(&mut state),
-                        AltScreenEvent::Exit => on_alt_screen_exit(&mut state),
-                    }
-                }
-
                 let active_block_id = state.blocks.active_block_id();
                 if matches!(state.capture_mode, CaptureMode::Normal) {
                     state.shell.append(&remaining, active_block_id);
@@ -265,6 +258,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
                                     }
                                     let mut state =
                                         input_state.lock().unwrap_or_else(|e| e.into_inner());
+                                    state.tide_alt_screen_active = true;
                                     enter_block_view(&mut state);
                                     drop(state);
                                     let _ = maybe_flush_navigation_and_render(
@@ -287,20 +281,34 @@ pub fn run_shell(config: &Config) -> Result<()> {
 
                     let _ = writer.flush();
 
-                    let needs_cleanup = input_state
-                        .lock()
-                        .map(|s| s.render_state.needs_cleanup)
-                        .unwrap_or(false);
+                    let (needs_cleanup, was_alt_screen) = if let Ok(state) = input_state.lock() {
+                        let should_emit_leave = if state.render_state.force_pty_alt_screen_cleanup {
+                            state.pty_alt_screen_active
+                        } else if state.tide_alt_screen_active {
+                            !state.pty_alt_screen_active
+                        } else {
+                            false
+                        };
+                        (state.render_state.needs_cleanup, should_emit_leave)
+                    } else {
+                        (false, false)
+                    };
+
                     if needs_cleanup {
-                        // Leave alt screen before anything else — SGR reset and cursor show
-                        // must apply on the main screen after the alt screen is gone.
+                        // Leave alt screen only if needed.
                         if let Ok(mut stdout) = input_stdout.lock() {
-                            let _ = renderer::leave_block_render(&mut *stdout);
+                            let _ = renderer::leave_block_render(&mut *stdout, was_alt_screen);
                         }
 
                         // Clear cleanup flags and extract pending_paste (state lock isolated,
                         // no stdout lock held).
                         let paste = if let Ok(mut state) = input_state.lock() {
+                            // If it was a forced PTY cleanup, reset PTY flag.
+                            if state.render_state.force_pty_alt_screen_cleanup {
+                                state.pty_alt_screen_active = false;
+                                state.render_state.force_pty_alt_screen_cleanup = false;
+                            }
+                            state.tide_alt_screen_active = false;
                             state.render_state.needs_cleanup = false;
                             state.render_state.dirty = false;
                             state.render_state.force_render = false;
@@ -503,6 +511,8 @@ fn detect_tui_app(
 
 fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug_blocks: bool) {
     match event {
+        ShellHookEvent::AltScreenEnter => on_alt_screen_enter(state),
+        ShellHookEvent::AltScreenExit => on_alt_screen_exit(state),
         ShellHookEvent::Preexec { command } => {
             let start_line = state.shell.line_count();
             state.capture_mode = CaptureMode::Normal;
@@ -529,29 +539,24 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
                 state.blocks.set_cwd(cwd.clone());
             }
 
-            // Finalize TUI lifecycle state. precmd means the shell command
-            // has truly ended (exit code + lifecycle boundary).
-            match std::mem::take(&mut state.tui_state) {
-                TuiRuntimeState::ExitedAltScreen { .. } => {
-                    // TUI app exited alt-screen earlier; now the command is done.
-                }
-                TuiRuntimeState::Pending { .. } => {
-                    // preexec matched a TUI app but it never entered alt-screen.
-                    // Treat as a normal command (NormalCommand block already created).
-                }
-                TuiRuntimeState::InAltScreen { .. } => {
-                    // Alt-screen was entered but we never saw the exit.
-                    // Unusual (crash?); restore capture and finalize.
-                }
-                TuiRuntimeState::Idle => {}
-            }
-            // tui_state is now Idle via std::mem::take + Default impl.
             state.capture_mode = CaptureMode::Normal;
+
+            // TUI session finalization — decide Return Panel or direct Plain.
+            let tui_finalize_block = match std::mem::take(&mut state.tui_state) {
+                TuiRuntimeState::ExitedAltScreen { block_id } => Some(block_id),
+                TuiRuntimeState::InAltScreen { block_id } => Some(block_id),
+                TuiRuntimeState::Pending { .. } | TuiRuntimeState::Idle => None,
+            };
 
             let active_id = state.blocks.active_block_id();
             let end_line = state.shell.line_count().saturating_sub(1);
             state.blocks.finish_command(exit_code, end_line);
             sync_block_viewport_after_history_change(state);
+
+            if let Some(block_id) = tui_finalize_block {
+                finalize_exited_tui_on_precmd(state, block_id);
+            }
+
             if let Some(block_id) = active_id {
                 if let Some(block) = state.blocks.block(block_id) {
                     if block.status == BlockStatus::Failed {
@@ -1907,28 +1912,8 @@ fn content_height(state: &RuntimeState) -> usize {
     (state.rows as usize).saturating_sub(usize::from(state.config.block_view.show_footer))
 }
 
-fn detect_alt_screen_events(bytes: &[u8]) -> Vec<AltScreenEvent> {
-    let patterns: &[(&[u8], AltScreenEvent)] = &[
-        (b"\x1b[?1049h", AltScreenEvent::Enter),
-        (b"\x1b[?1049l", AltScreenEvent::Exit),
-        (b"\x1b[?1047h", AltScreenEvent::Enter),
-        (b"\x1b[?1047l", AltScreenEvent::Exit),
-        (b"\x1b[?47h", AltScreenEvent::Enter),
-        (b"\x1b[?47l", AltScreenEvent::Exit),
-    ];
-    let mut found: Vec<(usize, AltScreenEvent)> = Vec::new();
-    for i in 0..bytes.len() {
-        for (pat, ev) in patterns {
-            if bytes[i..].starts_with(pat) {
-                found.push((i, *ev));
-            }
-        }
-    }
-    found.sort_by_key(|(i, _)| *i);
-    found.into_iter().map(|(_, ev)| ev).collect()
-}
-
 fn on_alt_screen_enter(state: &mut RuntimeState) {
+    state.pty_alt_screen_active = true;
     // Extract app_name from Pending state (immutable borrow scope).
     let (is_known_tui, app_name) = {
         match &state.tui_state {
@@ -1959,12 +1944,61 @@ fn on_alt_screen_enter(state: &mut RuntimeState) {
 }
 
 fn on_alt_screen_exit(state: &mut RuntimeState) {
+    state.pty_alt_screen_active = false;
     let prev = std::mem::take(&mut state.tui_state);
-    state.capture_mode = CaptureMode::Normal;
     state.tui_state = match prev {
         TuiRuntimeState::InAltScreen { block_id } => TuiRuntimeState::ExitedAltScreen { block_id },
         _ => TuiRuntimeState::Idle,
     };
+}
+
+/// Called from precmd when a TUI session has exited alt-screen.
+/// Determines whether to show the Return Panel or go directly to Plain view.
+fn finalize_exited_tui_on_precmd(state: &mut RuntimeState, block_id: BlockId) {
+    let app_name = state
+        .blocks
+        .block(block_id)
+        .and_then(|b| b.app_name.clone())
+        .unwrap_or_default();
+
+    let app_cfg = state.config.tui_apps.get(&app_name).or_else(|| {
+        state
+            .config
+            .tui_apps
+            .values()
+            .find(|cfg| cfg.commands.contains(&app_name))
+    });
+
+    let target = app_cfg
+        .map(|cfg| cfg.return_panel)
+        .unwrap_or(ReturnPanelTarget::None);
+    let needs_clear = app_cfg
+        .map(|cfg| cfg.after_exit.iter().any(|c| c == "clear"))
+        .unwrap_or(false);
+
+    match target {
+        ReturnPanelTarget::None => {
+            // No Return Panel — exit alt screen back to Plain transparently.
+            state.view.return_panel = None;
+            state.view.view = ViewKind::Plain;
+            state.render_state.needs_cleanup = true;
+            
+            // If the TUI process exited but we still think it's in the alt screen,
+            // it likely crashed without cleaning up. Force cleanup.
+            if state.pty_alt_screen_active {
+                state.render_state.force_pty_alt_screen_cleanup = true;
+            }
+        }
+        _ => {
+            let panel = crate::app::ReturnPanelState {
+                block_id,
+                target,
+                clear_main_screen_before_show: needs_clear,
+            };
+            crate::app::enter_return_panel(&mut state.view, panel);
+            state.render_state.force_render = true;
+        }
+    }
 }
 
 fn current_pty_size() -> PtySize {
@@ -2007,6 +2041,8 @@ mod tests {
             cols: 80,
             index: crate::index::BlockIndex::new(),
             tui_state: TuiRuntimeState::Idle,
+            pty_alt_screen_active: false,
+            tide_alt_screen_active: false,
         }
     }
 
@@ -2372,6 +2408,63 @@ mod tests {
         // copy keys on empty block store should never panic.
         assert!(handle_block_view_byte(b'o', &mut state));
         assert!(handle_block_view_byte(b'y', &mut state));
+    }
+
+    #[test]
+    fn tide_ui_transition_does_not_clobber_pty_alt_screen_state() {
+        let mut state = runtime_state();
+
+        // 1. PTY enters alt screen (e.g. nvim starts)
+        on_alt_screen_enter(&mut state);
+        assert!(state.pty_alt_screen_active);
+        assert!(!state.tide_alt_screen_active);
+
+        // 2. User enters Tide Block View (Ctrl-B)
+        state.tide_alt_screen_active = true;
+        enter_block_view(&mut state);
+        assert!(state.pty_alt_screen_active);
+        assert!(state.tide_alt_screen_active);
+
+        // 3. User leaves Tide Block View (q)
+        // Cleanup logic simulated:
+        state.tide_alt_screen_active = false;
+        state.render_state.needs_cleanup = false;
+
+        // PTY state must be preserved
+        assert!(state.pty_alt_screen_active);
+    }
+
+    #[test]
+    fn precmd_triggers_cleanup_only_if_pty_alt_screen_still_active() {
+        let mut state = runtime_state();
+
+        // Case A: Normal TUI exit (observed leave sequence)
+        on_alt_screen_enter(&mut state);
+        on_alt_screen_exit(&mut state);
+        assert!(!state.pty_alt_screen_active);
+
+        let block_id = state.blocks.start_command("yazi".to_string(), 0, BlockKind::TuiSession);
+        state.tui_state = TuiRuntimeState::InAltScreen { block_id };
+        // Simulated alt-screen exit happened before precmd
+        on_alt_screen_exit(&mut state); 
+
+        apply_shell_hook_event(&mut state, ShellHookEvent::Precmd { exit_code: 0, cwd: None }, false);
+        // If pty_alt_screen_active is false, renderer::leave_block_render(stdout, false) 
+        // would be called in the real loop, which is idempotent.
+        assert!(!state.pty_alt_screen_active);
+        assert!(!state.render_state.force_pty_alt_screen_cleanup);
+
+        // Case B: Crashed TUI (no leave sequence observed)
+        let block_id = state.blocks.start_command("crash".to_string(), 0, BlockKind::TuiSession);
+        state.tui_state = TuiRuntimeState::InAltScreen { block_id };
+        // We set pty_alt_screen_active to true manually to simulate what on_alt_screen_enter does
+        state.pty_alt_screen_active = true; 
+
+        apply_shell_hook_event(&mut state, ShellHookEvent::Precmd { exit_code: 1, cwd: None }, false);
+        // Precmd should have set force_pty_alt_screen_cleanup because pty_alt_screen_active was true.
+        assert!(state.render_state.needs_cleanup);
+        assert!(state.pty_alt_screen_active);
+        assert!(state.render_state.force_pty_alt_screen_cleanup);
     }
 
     #[test]

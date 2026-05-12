@@ -197,8 +197,12 @@ pub fn enter_block_render<W: Write>(w: &mut W) -> io::Result<()> {
 /// `LeaveAlternateScreen` MUST come first so that `ResetColor` and `Show` are
 /// applied on the *main* screen (the restored terminal state), not the alt
 /// screen that is about to be discarded.
-pub fn leave_block_render<W: Write>(w: &mut W) -> io::Result<()> {
-    execute!(w, LeaveAlternateScreen, ResetColor, Show)
+pub fn leave_block_render<W: Write>(w: &mut W, was_alt_screen: bool) -> io::Result<()> {
+    if was_alt_screen {
+        execute!(w, LeaveAlternateScreen, ResetColor, Show)
+    } else {
+        execute!(w, ResetColor, Show)
+    }
 }
 
 /// Returns `(rendered_rows, drew_underlying)`.

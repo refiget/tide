@@ -307,6 +307,9 @@ pub struct RenderState {
     /// Set true when leaving Block/Detail view so the input thread performs
     /// terminal cleanup (leave alternate screen, reset SGR, show cursor).
     pub needs_cleanup: bool,
+    /// Set true when a TUI crash is detected in precmd, forcing alt-screen cleanup
+    /// even if Tide's own UI was already closed.
+    pub force_pty_alt_screen_cleanup: bool,
     /// Transient flash message (e.g. "copied output") shown in the footer
     /// for ~1.5 seconds. Reset to None after the duration expires.
     pub flash_message: Option<(String, Instant)>,
@@ -329,6 +332,7 @@ impl Default for RenderState {
             force_render: false,
             last_render_at: Instant::now(),
             needs_cleanup: false,
+            force_pty_alt_screen_cleanup: false,
             flash_message: None,
             last_rendered_rows: 0,
             pending_paste: None,
@@ -596,12 +600,6 @@ pub const DEFAULT_TUI_COMMANDS: &[&str] = &[
 ];
 
 // ─── Alt-Screen Lifecycle ───────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AltScreenEvent {
-    Enter,
-    Exit,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureMode {
