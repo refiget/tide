@@ -227,6 +227,9 @@ pub fn find_by_alias(alias: &str) -> Result<Option<OpencodeRecord>> {
 }
 
 pub fn write_last_jump(from_tmux_target: &str, to_tmux_target: &str) -> Result<()> {
+    if from_tmux_target == to_tmux_target {
+        return Ok(());
+    }
     with_lock(|| {
         let path = jump_path();
         let payload = serde_json::to_string(&JumpRecord {
@@ -261,6 +264,9 @@ pub fn read_last_jump() -> Result<Option<JumpRecord>> {
             return Ok(None);
         }
         let parsed = serde_json::from_str::<JumpRecord>(&data).context("parse jump file")?;
+        if parsed.from_tmux_target == parsed.to_tmux_target {
+            return Ok(None);
+        }
         Ok(Some(parsed))
     })
 }

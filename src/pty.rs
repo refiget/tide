@@ -51,6 +51,7 @@ struct RuntimeState {
     tide_id: String,
     opencode_by_block: HashMap<BlockId, String>,
     opencode_jump_stack: Vec<String>,
+    shell_command_running: bool,
 }
 
 #[derive(Clone)]
@@ -132,6 +133,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
         tide_id: format!("tide-{}", std::process::id()),
         opencode_by_block: HashMap::new(),
         opencode_jump_stack: Vec::new(),
+        shell_command_running: false,
     }));
     let stdout = Arc::new(Mutex::new(io::stdout()));
     let debug_blocks = std::env::var_os("TIDE_DEBUG_BLOCKS").is_some();
@@ -268,10 +270,11 @@ pub fn run_shell(config: &Config) -> Result<()> {
                         }
 
                         if byte == 0x02 {
-                            if let Ok(state) = input_state.lock() {
-                                let should_enter_block =
-                                    matches!(state.view.view, ViewKind::Plain)
-                                        && is_shell_normal_mode(&state);
+                            if let Ok(mut state) = input_state.lock() {
+                                let did_back = try_global_jump_back(&mut state);
+                                let should_enter_block = !did_back
+                                    && matches!(state.view.view, ViewKind::Plain)
+                                    && is_shell_normal_mode(&state);
                                 drop(state);
                                 if should_enter_block {
                                     // Enter alternate screen for Block View.
@@ -290,10 +293,6 @@ pub fn run_shell(config: &Config) -> Result<()> {
                                         &input_stdout,
                                         false,
                                     );
-                                } else {
-                                    let mut state =
-                                        input_state.lock().unwrap_or_else(|e| e.into_inner());
-                                    let _ = try_global_jump_back(&mut state);
                                 }
                                 // Always consume Ctrl-B — never forward to the PTY.
                                 index += 1;
@@ -725,7 +724,9 @@ fn tmux_jump_and_zoom(target: &str) -> bool {
 }
 
 fn is_shell_normal_mode(state: &RuntimeState) -> bool {
-    state.blocks.active_block_id().is_none() && !state.pty_alt_screen_active
+    !state.shell_command_running
+        && !state.pty_alt_screen_active
+        && matches!(state.tui_state, TuiRuntimeState::Idle)
 }
 
 fn try_global_jump_back(state: &mut RuntimeState) -> bool {
@@ -736,6 +737,10 @@ fn try_global_jump_back(state: &mut RuntimeState) -> bool {
         return false;
     };
     if last.to_tmux_target != current {
+        return false;
+    }
+    if last.from_tmux_target == last.to_tmux_target {
+        let _ = crate::opencode_registry::clear_last_jump();
         return false;
     }
     if !tmux_target_exists(&last.from_tmux_target) {
@@ -885,6 +890,7 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
         ShellHookEvent::AltScreenEnter => on_alt_screen_enter(state),
         ShellHookEvent::AltScreenExit => on_alt_screen_exit(state),
         ShellHookEvent::Preexec { command } => {
+            state.shell_command_running = true;
             let start_line = state.shell.line_count();
             let block_id =
                 state
@@ -919,6 +925,7 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             sync_block_viewport_after_history_change(state);
         }
         ShellHookEvent::Precmd { exit_code, cwd } => {
+            state.shell_command_running = false;
             let finished_cwd = cwd;
             if let Some(ref cwd) = finished_cwd {
                 state.blocks.set_cwd(cwd.clone());
@@ -2487,6 +2494,7 @@ mod tests {
             tide_id: "test".to_string(),
             opencode_by_block: HashMap::new(),
             opencode_jump_stack: Vec::new(),
+            shell_command_running: false,
         }
     }
 
