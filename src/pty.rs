@@ -1945,11 +1945,12 @@ fn on_alt_screen_enter(state: &mut RuntimeState) {
 
 fn on_alt_screen_exit(state: &mut RuntimeState) {
     state.pty_alt_screen_active = false;
-    let prev = std::mem::take(&mut state.tui_state);
-    state.tui_state = match prev {
-        TuiRuntimeState::InAltScreen { block_id } => TuiRuntimeState::ExitedAltScreen { block_id },
-        _ => TuiRuntimeState::Idle,
-    };
+    // Only transition to ExitedAltScreen if we were actually InAltScreen.
+    // Otherwise, preserve the current TUI lifecycle state (e.g. Pending)
+    // so we don't lose TUI classification from unrelated exit sequences.
+    if let TuiRuntimeState::InAltScreen { block_id } = state.tui_state {
+        state.tui_state = TuiRuntimeState::ExitedAltScreen { block_id };
+    }
 }
 
 /// Called from precmd when a TUI session has exited alt-screen.
@@ -2432,6 +2433,27 @@ mod tests {
 
         // PTY state must be preserved
         assert!(state.pty_alt_screen_active);
+    }
+
+    #[test]
+    fn unrelated_alt_screen_exit_preserves_pending_tui_state() {
+        let mut state = runtime_state();
+        let app_match = TuiAppMatch {
+            app_name: "nvim".to_string(),
+            command_name: "nvim".to_string(),
+            source: TuiAppMatchSource::Builtin,
+        };
+        state.tui_state = TuiRuntimeState::Pending {
+            app_match,
+            command: "nvim".to_string(),
+        };
+
+        // Unrelated alt-screen exit observed before the TUI actually starts (or even if it's unrelated)
+        on_alt_screen_exit(&mut state);
+
+        // State must still be Pending so precmd can finalize it correctly if it never enters alt-screen,
+        // or so that it can still transition to InAltScreen later.
+        assert!(matches!(state.tui_state, TuiRuntimeState::Pending { .. }));
     }
 
     #[test]
