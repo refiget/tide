@@ -11,14 +11,21 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum OpencodeStatus {
+pub enum AgentProvider {
+    Opencode,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
     Running,
     Stale,
     Exited,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpencodeRecord {
+pub struct AgentRecord {
+    pub provider: AgentProvider,
     pub alias: String,
     pub source_tide_id: String,
     pub command_block_id: u64,
@@ -28,7 +35,7 @@ pub struct OpencodeRecord {
     pub tmux_target: String,
     pub tmux_pane_id: String,
     pub tmux_window_id: String,
-    pub status: OpencodeStatus,
+    pub status: AgentStatus,
     pub started_at_ms: u128,
     pub last_seen_at_ms: u128,
     pub exited_at_ms: Option<u128>,
@@ -36,7 +43,7 @@ pub struct OpencodeRecord {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct RegistryFile {
-    pub records: Vec<OpencodeRecord>,
+    pub records: Vec<AgentRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,15 +78,15 @@ fn registry_dir() -> PathBuf {
 }
 
 fn registry_path() -> PathBuf {
-    registry_dir().join("opencode_registry.json")
+    registry_dir().join("agent_registry.json")
 }
 
 fn lock_path() -> PathBuf {
-    registry_dir().join("opencode_registry.lock")
+    registry_dir().join("agent_registry.lock")
 }
 
 fn jump_path() -> PathBuf {
-    registry_dir().join("opencode_jump_stack.json")
+    registry_dir().join("agent_jump_stack.json")
 }
 
 fn with_lock<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -99,7 +106,7 @@ fn with_lock<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     }
 
     if !lock_acquired {
-        anyhow::bail!("opencode registry lock timeout");
+        anyhow::bail!("agent registry lock timeout");
     }
 
     let result = f();
@@ -121,7 +128,7 @@ fn read_registry_unlocked(path: &Path) -> RegistryFile {
 
 fn write_registry_unlocked(path: &Path, reg: &RegistryFile) -> Result<()> {
     let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-    let payload = serde_json::to_string(reg).context("serialize opencode registry")?;
+    let payload = serde_json::to_string(reg).context("serialize agent registry")?;
     let mut f = OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -161,23 +168,15 @@ fn write_jump_stack_unlocked(path: &Path, stack: &JumpStackFile) -> Result<()> {
     Ok(())
 }
 
-pub fn list_running() -> Result<Vec<OpencodeRecord>> {
+pub fn list_all(provider: AgentProvider) -> Result<Vec<AgentRecord>> {
     with_lock(|| {
         let path = registry_path();
         let reg = read_registry_unlocked(&path);
         Ok(reg
             .records
             .into_iter()
-            .filter(|r| r.status != OpencodeStatus::Exited)
+            .filter(|r| r.provider == provider)
             .collect())
-    })
-}
-
-pub fn list_all() -> Result<Vec<OpencodeRecord>> {
-    with_lock(|| {
-        let path = registry_path();
-        let reg = read_registry_unlocked(&path);
-        Ok(reg.records)
     })
 }
 
@@ -206,7 +205,7 @@ fn index_to_alias(mut idx: usize) -> String {
     chars.into_iter().rev().collect()
 }
 
-fn allocate_alias(records: &[OpencodeRecord]) -> String {
+fn allocate_alias(records: &[AgentRecord]) -> String {
     let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for r in records {
         if let Some(i) = alias_to_index(&r.alias) {
@@ -223,6 +222,7 @@ fn allocate_alias(records: &[OpencodeRecord]) -> String {
 }
 
 pub fn register_running(
+    provider: AgentProvider,
     source_tide_id: &str,
     command_block_id: u64,
     command: &str,
@@ -236,11 +236,11 @@ pub fn register_running(
         let path = registry_path();
         let mut reg = read_registry_unlocked(&path);
 
-        if let Some(pos) = reg
-            .records
-            .iter()
-            .position(|r| r.source_tide_id == source_tide_id && r.command_block_id == command_block_id)
-        {
+        if let Some(pos) = reg.records.iter().position(|r| {
+            r.provider == provider
+                && r.source_tide_id == source_tide_id
+                && r.command_block_id == command_block_id
+        }) {
             let alias = reg.records[pos].alias.clone();
             reg.records[pos].command = command.to_string();
             reg.records[pos].cwd = cwd.to_string();
@@ -248,15 +248,22 @@ pub fn register_running(
             reg.records[pos].tmux_target = tmux_target.to_string();
             reg.records[pos].tmux_pane_id = tmux_pane_id.to_string();
             reg.records[pos].tmux_window_id = tmux_window_id.to_string();
-            reg.records[pos].status = OpencodeStatus::Running;
+            reg.records[pos].status = AgentStatus::Running;
             reg.records[pos].last_seen_at_ms = now_ms();
             reg.records[pos].exited_at_ms = None;
             write_registry_unlocked(&path, &reg)?;
             return Ok(alias);
         }
 
-        let alias = allocate_alias(&reg.records);
-        reg.records.push(OpencodeRecord {
+        let same_provider: Vec<AgentRecord> = reg
+            .records
+            .iter()
+            .filter(|r| r.provider == provider)
+            .cloned()
+            .collect();
+        let alias = allocate_alias(&same_provider);
+        reg.records.push(AgentRecord {
+            provider,
             alias: alias.clone(),
             source_tide_id: source_tide_id.to_string(),
             command_block_id,
@@ -266,7 +273,7 @@ pub fn register_running(
             tmux_target: tmux_target.to_string(),
             tmux_pane_id: tmux_pane_id.to_string(),
             tmux_window_id: tmux_window_id.to_string(),
-            status: OpencodeStatus::Running,
+            status: AgentStatus::Running,
             started_at_ms: now_ms(),
             last_seen_at_ms: now_ms(),
             exited_at_ms: None,
@@ -276,14 +283,17 @@ pub fn register_running(
     })
 }
 
-pub fn unregister_running(source_tide_id: &str, command_block_id: u64) -> Result<()> {
+pub fn unregister_running(provider: AgentProvider, source_tide_id: &str, command_block_id: u64) -> Result<()> {
     with_lock(|| {
         let path = registry_path();
         let mut reg = read_registry_unlocked(&path);
         let now = now_ms();
         for rec in &mut reg.records {
-            if rec.source_tide_id == source_tide_id && rec.command_block_id == command_block_id {
-                rec.status = OpencodeStatus::Exited;
+            if rec.provider == provider
+                && rec.source_tide_id == source_tide_id
+                && rec.command_block_id == command_block_id
+            {
+                rec.status = AgentStatus::Exited;
                 rec.last_seen_at_ms = now;
                 rec.exited_at_ms = Some(now);
             }
@@ -292,21 +302,24 @@ pub fn unregister_running(source_tide_id: &str, command_block_id: u64) -> Result
     })
 }
 
-pub fn find_by_alias(alias: &str) -> Result<Option<OpencodeRecord>> {
+pub fn find_by_alias(provider: AgentProvider, alias: &str) -> Result<Option<AgentRecord>> {
     with_lock(|| {
         let path = registry_path();
         let reg = read_registry_unlocked(&path);
-        Ok(reg.records.into_iter().find(|r| r.alias == alias))
+        Ok(reg
+            .records
+            .into_iter()
+            .find(|r| r.provider == provider && r.alias == alias))
     })
 }
 
-pub fn mark_stale(alias: &str) -> Result<()> {
+pub fn mark_stale(provider: AgentProvider, alias: &str) -> Result<()> {
     with_lock(|| {
         let path = registry_path();
         let mut reg = read_registry_unlocked(&path);
         for rec in &mut reg.records {
-            if rec.alias == alias && rec.status == OpencodeStatus::Running {
-                rec.status = OpencodeStatus::Stale;
+            if rec.provider == provider && rec.alias == alias && rec.status == AgentStatus::Running {
+                rec.status = AgentStatus::Stale;
                 rec.last_seen_at_ms = now_ms();
             }
         }
@@ -347,25 +360,4 @@ pub fn pop_jump_for_target(current_target: &str) -> Result<Option<JumpRecord>> {
         write_jump_stack_unlocked(&path, &stack)?;
         Ok(out)
     })
-}
-
-pub fn clear_last_jump() -> Result<()> {
-    with_lock(|| {
-        let path = jump_path();
-        let _ = fs::remove_file(&path);
-        Ok(())
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{alias_to_index, index_to_alias};
-
-    #[test]
-    fn alias_roundtrip() {
-        for idx in [0usize, 1, 25, 26, 27, 51, 52, 701] {
-            let a = index_to_alias(idx);
-            assert_eq!(alias_to_index(&a), Some(idx));
-        }
-    }
 }

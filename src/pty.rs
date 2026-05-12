@@ -635,7 +635,8 @@ fn register_running_opencode_block(state: &mut RuntimeState, id: BlockId, comman
         crate::config::ShareCwdMode::Basename => project.clone(),
         crate::config::ShareCwdMode::None => String::new(),
     };
-    if let Ok(alias) = crate::opencode_registry::register_running(
+    if let Ok(alias) = crate::agent_registry::register_running(
+        crate::agent_registry::AgentProvider::Opencode,
         &state.tide_id,
         id.0,
         &share_command,
@@ -844,7 +845,7 @@ fn try_global_jump_back(state: &mut RuntimeState) -> bool {
     let Some(current) = tmux_current_target() else {
         return false;
     };
-    let Ok(Some(last)) = crate::opencode_registry::pop_jump_for_target(&current) else {
+    let Ok(Some(last)) = crate::agent_registry::pop_jump_for_target(&current) else {
         return false;
     };
     if !tmux_target_exists(&last.from_tmux_target) {
@@ -865,7 +866,7 @@ fn sync_shared_opencode_blocks(state: &mut RuntimeState) {
     if !state.config.opencode_share.enabled {
         return;
     }
-    let Ok(records) = crate::opencode_registry::list_all() else {
+    let Ok(records) = crate::agent_registry::list_all(crate::agent_registry::AgentProvider::Opencode) else {
         return;
     };
 
@@ -888,13 +889,13 @@ fn sync_shared_opencode_blocks(state: &mut RuntimeState) {
     }
 
     for rec in records {
-        if rec.status == crate::opencode_registry::OpencodeStatus::Exited {
+        if rec.status == crate::agent_registry::AgentStatus::Exited {
             continue;
         }
-        if rec.status == crate::opencode_registry::OpencodeStatus::Running
+        if rec.status == crate::agent_registry::AgentStatus::Running
             && !tmux_target_exists(&rec.tmux_target)
         {
-            let _ = crate::opencode_registry::mark_stale(&rec.alias);
+            let _ = crate::agent_registry::mark_stale(crate::agent_registry::AgentProvider::Opencode, &rec.alias);
         }
 
         let display_status = if tmux_target_exists(&rec.tmux_target) {
@@ -1087,7 +1088,7 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             }
             if let Some(id) = active_id {
                 if state.opencode_by_block.remove(&id).is_some() {
-                    let _ = crate::opencode_registry::unregister_running(&state.tide_id, id.0);
+                    let _ = crate::agent_registry::unregister_running(crate::agent_registry::AgentProvider::Opencode, &state.tide_id, id.0);
                 }
                 if let Some(cwd) = finished_cwd {
                     if let Some(block) = state.blocks.block_mut(id) {
@@ -1904,7 +1905,7 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
             if let Some(selected) = state.view.selected_block {
                 if let Some(block) = state.blocks.block(selected)
                     && let Some(alias) = is_shared_opencode_block(block)
-                    && let Ok(Some(rec)) = crate::opencode_registry::find_by_alias(&alias)
+                    && let Ok(Some(rec)) = crate::agent_registry::find_by_alias(crate::agent_registry::AgentProvider::Opencode, &alias)
                 {
                     let jump_target = if !rec.tmux_pane_id.is_empty() {
                         rec.tmux_pane_id.clone()
@@ -1916,7 +1917,7 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                             state.opencode_jump_stack.push(cur.clone());
                             let from_zoomed = tmux_window_zoomed(&cur).unwrap_or(false);
                             let _ =
-                                crate::opencode_registry::write_last_jump(&cur, &jump_target, from_zoomed);
+                                crate::agent_registry::write_last_jump(&cur, &jump_target, from_zoomed);
                         }
                         if tmux_jump_and_zoom(&jump_target) {
                             state.render_state.flash_message =

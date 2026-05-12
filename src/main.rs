@@ -1,4 +1,5 @@
 mod ansi;
+mod agent_registry;
 mod app;
 mod block;
 mod block_export;
@@ -8,7 +9,6 @@ mod compositor;
 mod config;
 mod format;
 mod index;
-mod opencode_registry;
 mod pty;
 mod renderer;
 mod shell_hooks;
