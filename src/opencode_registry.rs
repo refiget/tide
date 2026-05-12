@@ -32,6 +32,8 @@ pub struct JumpRecord {
     pub from_tmux_target: String,
     pub to_tmux_target: String,
     pub at_ms: u128,
+    #[serde(default)]
+    pub from_zoomed: bool,
 }
 
 fn now_ms() -> u128 {
@@ -226,7 +228,7 @@ pub fn find_by_alias(alias: &str) -> Result<Option<OpencodeRecord>> {
     })
 }
 
-pub fn write_last_jump(from_tmux_target: &str, to_tmux_target: &str) -> Result<()> {
+pub fn write_last_jump(from_tmux_target: &str, to_tmux_target: &str, from_zoomed: bool) -> Result<()> {
     if from_tmux_target == to_tmux_target {
         return Ok(());
     }
@@ -236,6 +238,7 @@ pub fn write_last_jump(from_tmux_target: &str, to_tmux_target: &str) -> Result<(
             from_tmux_target: from_tmux_target.to_string(),
             to_tmux_target: to_tmux_target.to_string(),
             at_ms: now_ms(),
+            from_zoomed,
         })
         .context("serialize jump record")?;
         let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));

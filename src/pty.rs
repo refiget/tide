@@ -742,6 +742,35 @@ fn tmux_jump_and_zoom(target: &str) -> bool {
     }
 }
 
+fn tmux_window_zoomed(target: &str) -> Option<bool> {
+    let out = Command::new("tmux")
+        .args(["display-message", "-p", "-t", target, "#{window_zoomed_flag}"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    match String::from_utf8_lossy(&out.stdout).trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
+fn tmux_set_zoom_state(target: &str, want_zoomed: bool) -> bool {
+    let Some(cur) = tmux_window_zoomed(target) else {
+        return false;
+    };
+    if cur == want_zoomed {
+        return true;
+    }
+    Command::new("tmux")
+        .args(["resize-pane", "-Z", "-t", target])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 fn is_shell_normal_mode(state: &RuntimeState) -> bool {
     !state.shell_command_running
         && !state.pty_alt_screen_active
@@ -767,6 +796,7 @@ fn try_global_jump_back(state: &mut RuntimeState) -> bool {
         return false;
     }
     if tmux_jump_and_zoom(&last.from_tmux_target) {
+        let _ = tmux_set_zoom_state(&last.from_tmux_target, last.from_zoomed);
         let _ = crate::opencode_registry::clear_last_jump();
         state.render_state.flash_message = Some(("jumped back".to_string(), Instant::now()));
         return true;
@@ -1783,8 +1813,9 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                     if tmux_target_exists(&rec.tmux_target) {
                         if let Some(cur) = tmux_current_target() {
                             state.opencode_jump_stack.push(cur.clone());
+                            let from_zoomed = tmux_window_zoomed(&cur).unwrap_or(false);
                             let _ =
-                                crate::opencode_registry::write_last_jump(&cur, &rec.tmux_target);
+                                crate::opencode_registry::write_last_jump(&cur, &rec.tmux_target, from_zoomed);
                         }
                         if tmux_jump_and_zoom(&rec.tmux_target) {
                             state.render_state.flash_message =
