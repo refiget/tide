@@ -103,6 +103,15 @@ pub fn format_block_json(block: &CommandBlock, part: ExportPart) -> String {
     format!("{{{}}}", fields.join(","))
 }
 
+pub fn format_blocks_json(blocks: &[&CommandBlock], part: ExportPart) -> String {
+    let entries: Vec<String> = blocks.iter().map(|b| format_block_json(b, part)).collect();
+    match entries.len() {
+        0 => String::new(),
+        1 => entries.into_iter().next().unwrap_or_default(),
+        _ => format!("[{}]", entries.join(",")),
+    }
+}
+
 fn build_views_json(block: &CommandBlock) -> String {
     let summary = build_summary_json(block);
     let error = build_error_json(block).unwrap_or_else(|| "null".to_string());

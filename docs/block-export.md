@@ -6,6 +6,9 @@
 
 - Generated from `CommandBlock` fact data plus deterministic derived views.
 - Emitted through copy pipeline when `block_view.copy_format = "json"`.
+- Programmatic entry points:
+  - `BlockStore::export_block_v1(id, part)`
+  - `BlockStore::export_blocks_v1(ids, part)`
 
 ## Shape
 

@@ -3,6 +3,7 @@ use std::{collections::HashMap, path::PathBuf, time::SystemTime};
 use strip_ansi_escapes::strip;
 
 use crate::app::{BlockId, BlockKind, BlockStatus, CommandBlock};
+use crate::block_export::{ExportPart, format_block_json, format_blocks_json};
 
 #[derive(Debug)]
 pub struct BlockStore {
@@ -138,6 +139,18 @@ impl BlockStore {
         self.executions.get_mut(&id)
     }
 
+    /// Program-facing export entry for a single block as `block_export.v1`.
+    pub fn export_block_v1(&self, id: BlockId, part: ExportPart) -> Option<String> {
+        self.block(id).map(|b| format_block_json(b, part))
+    }
+
+    /// Program-facing export entry for multiple blocks as `block_export.v1`.
+    /// Preserves caller-provided block ID order, skipping missing IDs.
+    pub fn export_blocks_v1(&self, ids: &[BlockId], part: ExportPart) -> String {
+        let blocks: Vec<&CommandBlock> = ids.iter().filter_map(|id| self.block(*id)).collect();
+        format_blocks_json(&blocks, part)
+    }
+
     pub fn remove(&mut self, id: BlockId) {
         self.timeline.retain(|&b| b != id);
         self.executions.remove(&id);
@@ -213,7 +226,7 @@ pub fn format_duration_ms(duration_ms: Option<u64>) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::app::BlockKind;
+    use crate::{app::BlockKind, block_export::ExportPart};
 
     use super::BlockStore;
 
@@ -272,5 +285,33 @@ mod tests {
 
         store.finish_command(0, 0);
         assert!(store.block(id).unwrap().output_truncated);
+    }
+
+    #[test]
+    fn export_block_v1_returns_schema_for_existing_block() {
+        let mut store = BlockStore::new(PathBuf::from("/tmp"), None, 1024);
+        let id = store.start_command("echo hi".to_string(), 0, BlockKind::NormalCommand);
+        store.append_output(b"hi\n");
+        store.finish_command(0, 0);
+
+        let exported = store
+            .export_block_v1(id, ExportPart::Both)
+            .expect("exported block");
+        assert!(exported.contains(r#""schema_version":"block_export.v1""#));
+        assert!(exported.contains(r#""command":"echo hi""#));
+    }
+
+    #[test]
+    fn export_blocks_v1_preserves_requested_order() {
+        let mut store = BlockStore::new(PathBuf::from("/tmp"), None, 1024);
+        let first = store.start_command("one".to_string(), 0, BlockKind::NormalCommand);
+        store.finish_command(0, 0);
+        let second = store.start_command("two".to_string(), 1, BlockKind::NormalCommand);
+        store.finish_command(0, 1);
+
+        let exported = store.export_blocks_v1(&[second, first], ExportPart::Command);
+        let two_pos = exported.find(r#""command":"two""#).expect("two present");
+        let one_pos = exported.find(r#""command":"one""#).expect("one present");
+        assert!(two_pos < one_pos, "requested order should be preserved");
     }
 }
