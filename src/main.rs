@@ -3,6 +3,7 @@ mod app;
 mod block;
 mod block_export;
 mod buffer;
+mod cli;
 mod compositor;
 mod config;
 mod format;
@@ -15,6 +16,7 @@ mod theme;
 use anyhow::Result;
 use tracing::debug;
 
+use crate::cli::{CliCommand, parse_cli_command, run_export_command};
 use crate::config::Config;
 
 fn main() -> Result<()> {
@@ -25,8 +27,15 @@ fn main() -> Result<()> {
         .without_time()
         .init();
 
-    let config = Config::load()?;
-    debug!(?config, "loaded config");
-
-    pty::run_shell(&config)
+    match parse_cli_command()? {
+        CliCommand::RunShell => {
+            let config = Config::load()?;
+            debug!(?config, "loaded config");
+            pty::run_shell(&config)
+        }
+        CliCommand::Export(args) => {
+            run_export_command(args);
+            Ok(())
+        }
+    }
 }

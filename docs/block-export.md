@@ -9,6 +9,7 @@
 - Programmatic entry points:
   - `BlockStore::export_block_v1(id, part)`
   - `BlockStore::export_blocks_v1(ids, part)`
+  - CLI: `tide export --command ...` (stateless export for scripts)
 
 ## Shape
 
@@ -61,6 +62,11 @@ Multiple blocks are returned as a JSON array of block objects.
 - `Command`: includes `command`; excludes `output_text` and `views`.
 - `Output`: includes `output_text`; excludes `command` and `views`.
 - `Both`: includes `command`, `output_text`, and `views`.
+
+CLI `--part` maps directly to this behavior:
+- `--part command`
+- `--part output`
+- `--part both` (default)
 
 ## Semantics Notes
 
