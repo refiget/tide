@@ -27,6 +27,13 @@ struct RegistryFile {
     pub records: Vec<OpencodeRecord>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JumpRecord {
+    pub from_tmux_target: String,
+    pub to_tmux_target: String,
+    pub at_ms: u128,
+}
+
 fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -50,6 +57,10 @@ fn registry_path() -> PathBuf {
 
 fn lock_path() -> PathBuf {
     registry_dir().join("opencode_registry.lock")
+}
+
+fn jump_path() -> PathBuf {
+    registry_dir().join("opencode_last_jump.json")
 }
 
 fn with_lock<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -212,6 +223,53 @@ pub fn find_by_alias(alias: &str) -> Result<Option<OpencodeRecord>> {
         let path = registry_path();
         let reg = read_registry_unlocked(&path);
         Ok(reg.records.into_iter().find(|r| r.alias == alias))
+    })
+}
+
+pub fn write_last_jump(from_tmux_target: &str, to_tmux_target: &str) -> Result<()> {
+    with_lock(|| {
+        let path = jump_path();
+        let payload = serde_json::to_string(&JumpRecord {
+            from_tmux_target: from_tmux_target.to_string(),
+            to_tmux_target: to_tmux_target.to_string(),
+            at_ms: now_ms(),
+        })
+        .context("serialize jump record")?;
+        let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        let mut f = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp)
+            .context("open tmp jump file")?;
+        f.write_all(payload.as_bytes()).context("write tmp jump file")?;
+        f.sync_all().ok();
+        fs::rename(&tmp, &path).context("rename tmp jump file")?;
+        Ok(())
+    })
+}
+
+pub fn read_last_jump() -> Result<Option<JumpRecord>> {
+    with_lock(|| {
+        let path = jump_path();
+        let mut data = String::new();
+        let Ok(mut f) = OpenOptions::new().read(true).open(&path) else {
+            return Ok(None);
+        };
+        f.read_to_string(&mut data).context("read jump file")?;
+        if data.trim().is_empty() {
+            return Ok(None);
+        }
+        let parsed = serde_json::from_str::<JumpRecord>(&data).context("parse jump file")?;
+        Ok(Some(parsed))
+    })
+}
+
+pub fn clear_last_jump() -> Result<()> {
+    with_lock(|| {
+        let path = jump_path();
+        let _ = fs::remove_file(path);
+        Ok(())
     })
 }
 

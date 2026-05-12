@@ -269,11 +269,14 @@ pub fn run_shell(config: &Config) -> Result<()> {
 
                         if byte == 0x02 {
                             if let Ok(state) = input_state.lock() {
-                                if matches!(state.view.view, ViewKind::Plain) {
+                                let should_enter_block =
+                                    matches!(state.view.view, ViewKind::Plain)
+                                        && is_shell_normal_mode(&state);
+                                drop(state);
+                                if should_enter_block {
                                     // Enter alternate screen for Block View.
                                     // Lock ordering: drop state before locking stdout
                                     // (output thread locks state -> stdout, must not invert).
-                                    drop(state);
                                     if let Ok(mut stdout) = input_stdout.lock() {
                                         let _ = renderer::enter_block_render(&mut *stdout);
                                     }
@@ -287,6 +290,10 @@ pub fn run_shell(config: &Config) -> Result<()> {
                                         &input_stdout,
                                         false,
                                     );
+                                } else {
+                                    let mut state =
+                                        input_state.lock().unwrap_or_else(|e| e.into_inner());
+                                    let _ = try_global_jump_back(&mut state);
                                 }
                                 // Always consume Ctrl-B — never forward to the PTY.
                                 index += 1;
@@ -715,6 +722,32 @@ fn tmux_jump_and_zoom(target: &str) -> bool {
     } else {
         false
     }
+}
+
+fn is_shell_normal_mode(state: &RuntimeState) -> bool {
+    state.blocks.active_block_id().is_none() && !state.pty_alt_screen_active
+}
+
+fn try_global_jump_back(state: &mut RuntimeState) -> bool {
+    let Some(current) = tmux_current_target() else {
+        return false;
+    };
+    let Ok(Some(last)) = crate::opencode_registry::read_last_jump() else {
+        return false;
+    };
+    if last.to_tmux_target != current {
+        return false;
+    }
+    if !tmux_target_exists(&last.from_tmux_target) {
+        let _ = crate::opencode_registry::clear_last_jump();
+        return false;
+    }
+    if tmux_jump_and_zoom(&last.from_tmux_target) {
+        let _ = crate::opencode_registry::clear_last_jump();
+        state.render_state.flash_message = Some(("jumped back".to_string(), Instant::now()));
+        return true;
+    }
+    false
 }
 
 fn sync_shared_opencode_blocks(state: &mut RuntimeState) {
@@ -1723,7 +1756,9 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                 {
                     if tmux_target_exists(&rec.tmux_target) {
                         if let Some(cur) = tmux_current_target() {
-                            state.opencode_jump_stack.push(cur);
+                            state.opencode_jump_stack.push(cur.clone());
+                            let _ =
+                                crate::opencode_registry::write_last_jump(&cur, &rec.tmux_target);
                         }
                         if tmux_jump_and_zoom(&rec.tmux_target) {
                             state.render_state.flash_message =
