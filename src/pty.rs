@@ -521,6 +521,69 @@ fn detect_tui_app(
     None
 }
 
+fn is_opencode_command(command_line: &str) -> bool {
+    matches!(extract_command_name(command_line).as_deref(), Some("opencode"))
+}
+
+fn is_running_opencode_block(state: &RuntimeState, id: BlockId) -> bool {
+    state
+        .blocks
+        .block(id)
+        .map(|b| b.status == BlockStatus::Running && is_opencode_command(&b.command))
+        .unwrap_or(false)
+}
+
+fn move_running_opencode_to_bottom(state: &mut RuntimeState) {
+    if state.blocks.timeline.len() < 2 {
+        return;
+    }
+
+    let mut normal = Vec::with_capacity(state.blocks.timeline.len());
+    let mut running_opencode = Vec::new();
+
+    for &id in &state.blocks.timeline {
+        if is_running_opencode_block(state, id) {
+            running_opencode.push(id);
+        } else {
+            normal.push(id);
+        }
+    }
+
+    if running_opencode.is_empty() {
+        return;
+    }
+
+    normal.extend(running_opencode);
+    state.blocks.timeline = normal;
+
+    let reordered_filtered = match &state.view.visible {
+        VisibleSource::Filtered(ids) => {
+            let running: std::collections::HashSet<BlockId> = ids
+                .iter()
+                .copied()
+                .filter(|id| is_running_opencode_block(state, *id))
+                .collect();
+            if running.is_empty() {
+                None
+            } else {
+                let mut non_running: Vec<BlockId> =
+                    ids.iter().copied().filter(|id| !running.contains(id)).collect();
+                let mut running_ids: Vec<BlockId> =
+                    ids.iter().copied().filter(|id| running.contains(id)).collect();
+                non_running.append(&mut running_ids);
+                Some(non_running)
+            }
+        }
+        VisibleSource::AllTimeline => None,
+    };
+
+    if let (Some(reordered), VisibleSource::Filtered(ids)) =
+        (reordered_filtered, &mut state.view.visible)
+    {
+        *ids = reordered;
+    }
+}
+
 fn advance_tui_state(
     prev: TuiRuntimeState,
     event: TuiLifecycleEvent,
@@ -575,6 +638,8 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             let (next, _) = advance_tui_state(prev, lifecycle_event);
             state.tui_state = next;
 
+            // Pin running opencode blocks to the bottom in Block View.
+            move_running_opencode_to_bottom(state);
             sync_block_viewport_after_history_change(state);
         }
         ShellHookEvent::Precmd { exit_code, cwd } => {
@@ -628,6 +693,7 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
                     }
                 }
             }
+            move_running_opencode_to_bottom(state);
         }
     }
 }
@@ -1121,6 +1187,9 @@ fn rebuild_visible(state: &mut RuntimeState) {
             state.view.visible = crate::app::VisibleSource::Filtered(ids);
         }
     }
+
+    // Keep running opencode blocks at the end even in filtered lists.
+    move_running_opencode_to_bottom(state);
 }
 
 fn restore_or_clamp_selection(state: &mut RuntimeState) {
