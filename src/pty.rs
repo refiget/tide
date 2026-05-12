@@ -619,7 +619,9 @@ fn tmux_jump_and_zoom(target: &str) -> bool {
 }
 
 fn sync_shared_opencode_blocks(state: &mut RuntimeState) {
-    let records = crate::opencode_registry::list_running().unwrap_or_default();
+    let Ok(records) = crate::opencode_registry::list_running() else {
+        return;
+    };
 
     let existing_ids: std::collections::HashSet<BlockId> = state
         .blocks
@@ -1167,6 +1169,8 @@ fn flush_render_state(state: &mut RuntimeState) -> bool {
 }
 
 fn enter_block_view(state: &mut RuntimeState) {
+    sync_shared_opencode_blocks(state);
+    move_running_opencode_to_bottom(state);
     state.view.view = ViewKind::Blocks;
     state.view.expanded_block = None;
     select_tail_block(state);
