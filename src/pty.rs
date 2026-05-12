@@ -15,10 +15,10 @@ use signal_hook::{consts::signal::SIGWINCH, iterator::Signals};
 
 use crate::{
     app::{
-        BlockAction, BlockId, BlockKind, BlockStatus, BlockViewAction, CaptureMode, ConfirmKind,
-        ConfirmState, DEFAULT_TUI_COMMANDS, DetailViewAction, HelpState, InputAccumulator,
-        RenderState, ReturnPanelTarget, TuiAppMatch, TuiAppMatchSource, TuiRuntimeState,
-        ViewAnchor, ViewKind, ViewState, VisibleSource,
+        BlockAction, BlockId, BlockKind, BlockStatus, BlockViewAction, ConfirmKind, ConfirmState,
+        DEFAULT_TUI_COMMANDS, DetailViewAction, HelpState, InputAccumulator, RenderState,
+        ReturnPanelTarget, TuiAppMatch, TuiAppMatchSource, TuiRuntimeState, ViewAnchor, ViewKind,
+        ViewState, VisibleSource,
     },
     block::BlockStore,
     buffer::ShellBuffer,
@@ -36,7 +36,6 @@ struct RuntimeState {
     input_accumulator: InputAccumulator,
     render_state: RenderState,
     config: RuntimeConfig,
-    capture_mode: CaptureMode,
     rows: u16,
     cols: u16,
     index: crate::index::BlockIndex,
@@ -46,6 +45,20 @@ struct RuntimeState {
     pty_alt_screen_active: bool,
     /// Whether Tide's own UI (Block View) is currently in an alternate screen buffer.
     tide_alt_screen_active: bool,
+}
+
+#[derive(Clone)]
+enum TuiLifecycleEvent {
+    PreexecMatch {
+        app_match: TuiAppMatch,
+        command: String,
+    },
+    PreexecNoMatch,
+    AltScreenEnter {
+        block_id: BlockId,
+    },
+    AltScreenExit,
+    Precmd,
 }
 
 const FRAME_DURATION: Duration = Duration::from_millis(16);
@@ -104,7 +117,6 @@ pub fn run_shell(config: &Config) -> Result<()> {
         input_accumulator: InputAccumulator::default(),
         render_state: RenderState::default(),
         config: runtime_config,
-        capture_mode: CaptureMode::Normal,
         rows,
         cols,
         index: crate::index::BlockIndex::new(),
@@ -136,7 +148,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
                             ParsedPtyPart::Visible(visible) => {
                                 if let Ok(mut state) = output_state.lock() {
                                     let active_block_id = state.blocks.active_block_id();
-                                    if matches!(state.capture_mode, CaptureMode::Normal) {
+                                    if !state.tui_state.is_capture_suspended() {
                                         state.blocks.append_output(&visible);
                                         state.shell.append(&visible, active_block_id);
                                     }
@@ -187,7 +199,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
         if !remaining.is_empty() {
             let (view, has_overlay) = if let Ok(mut state) = output_state.lock() {
                 let active_block_id = state.blocks.active_block_id();
-                if matches!(state.capture_mode, CaptureMode::Normal) {
+                if !state.tui_state.is_capture_suspended() {
                     state.shell.append(&remaining, active_block_id);
                 }
                 let has_overlay =
@@ -509,13 +521,40 @@ fn detect_tui_app(
     None
 }
 
+fn advance_tui_state(
+    prev: TuiRuntimeState,
+    event: TuiLifecycleEvent,
+) -> (TuiRuntimeState, Option<BlockId>) {
+    match event {
+        TuiLifecycleEvent::PreexecMatch { app_match, command } => {
+            (TuiRuntimeState::Pending { app_match, command }, None)
+        }
+        TuiLifecycleEvent::PreexecNoMatch => (TuiRuntimeState::Idle, None),
+        TuiLifecycleEvent::AltScreenEnter { block_id } => {
+            (TuiRuntimeState::InAltScreen { block_id }, None)
+        }
+        TuiLifecycleEvent::AltScreenExit => match prev {
+            // Preserve non-InAltScreen states to avoid clobbering Pending on unrelated exits.
+            TuiRuntimeState::InAltScreen { block_id } => {
+                (TuiRuntimeState::ExitedAltScreen { block_id }, None)
+            }
+            other => (other, None),
+        },
+        TuiLifecycleEvent::Precmd => match prev {
+            TuiRuntimeState::ExitedAltScreen { block_id } | TuiRuntimeState::InAltScreen { block_id } => {
+                (TuiRuntimeState::Idle, Some(block_id))
+            }
+            TuiRuntimeState::Pending { .. } | TuiRuntimeState::Idle => (TuiRuntimeState::Idle, None),
+        },
+    }
+}
+
 fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug_blocks: bool) {
     match event {
         ShellHookEvent::AltScreenEnter => on_alt_screen_enter(state),
         ShellHookEvent::AltScreenExit => on_alt_screen_exit(state),
         ShellHookEvent::Preexec { command } => {
             let start_line = state.shell.line_count();
-            state.capture_mode = CaptureMode::Normal;
             let block_id =
                 state
                     .blocks
@@ -523,13 +562,18 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             state.index.index_command(block_id, &command);
 
             // Detect known TUI apps for later handoff / return panel.
-            if let Some(app_match) = detect_tui_app(
+            let lifecycle_event = if let Some(app_match) = detect_tui_app(
                 &command,
                 &state.config.tui_extra_commands,
                 &state.config.tui_apps,
             ) {
-                state.tui_state = TuiRuntimeState::Pending { app_match, command };
-            }
+                TuiLifecycleEvent::PreexecMatch { app_match, command }
+            } else {
+                TuiLifecycleEvent::PreexecNoMatch
+            };
+            let prev = std::mem::take(&mut state.tui_state);
+            let (next, _) = advance_tui_state(prev, lifecycle_event);
+            state.tui_state = next;
 
             sync_block_viewport_after_history_change(state);
         }
@@ -539,14 +583,10 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
                 state.blocks.set_cwd(cwd.clone());
             }
 
-            state.capture_mode = CaptureMode::Normal;
-
             // TUI session finalization — decide Return Panel or direct Plain.
-            let tui_finalize_block = match std::mem::take(&mut state.tui_state) {
-                TuiRuntimeState::ExitedAltScreen { block_id } => Some(block_id),
-                TuiRuntimeState::InAltScreen { block_id } => Some(block_id),
-                TuiRuntimeState::Pending { .. } | TuiRuntimeState::Idle => None,
-            };
+            let prev = std::mem::take(&mut state.tui_state);
+            let (next, tui_finalize_block) = advance_tui_state(prev, TuiLifecycleEvent::Precmd);
+            state.tui_state = next;
 
             let active_id = state.blocks.active_block_id();
             let end_line = state.shell.line_count().saturating_sub(1);
@@ -1934,23 +1974,20 @@ fn on_alt_screen_enter(state: &mut RuntimeState) {
                 block.app_name = Some(name);
             }
         }
-        state.capture_mode = CaptureMode::SuspendedForTui;
-        state.tui_state = TuiRuntimeState::InAltScreen { block_id: id };
+        let prev = std::mem::take(&mut state.tui_state);
+        let (next, _) = advance_tui_state(prev, TuiLifecycleEvent::AltScreenEnter { block_id: id });
+        state.tui_state = next;
     } else {
         // No active block — shouldn't happen, but be defensive.
-        state.capture_mode = CaptureMode::SuspendedForTui;
         state.tui_state = TuiRuntimeState::Idle;
     }
 }
 
 fn on_alt_screen_exit(state: &mut RuntimeState) {
     state.pty_alt_screen_active = false;
-    // Only transition to ExitedAltScreen if we were actually InAltScreen.
-    // Otherwise, preserve the current TUI lifecycle state (e.g. Pending)
-    // so we don't lose TUI classification from unrelated exit sequences.
-    if let TuiRuntimeState::InAltScreen { block_id } = state.tui_state {
-        state.tui_state = TuiRuntimeState::ExitedAltScreen { block_id };
-    }
+    let prev = std::mem::take(&mut state.tui_state);
+    let (next, _) = advance_tui_state(prev, TuiLifecycleEvent::AltScreenExit);
+    state.tui_state = next;
 }
 
 /// Called from precmd when a TUI session has exited alt-screen.
@@ -2037,7 +2074,6 @@ mod tests {
             input_accumulator: InputAccumulator::default(),
             render_state: RenderState::default(),
             config: runtime_config,
-            capture_mode: CaptureMode::Normal,
             rows: 24,
             cols: 80,
             index: crate::index::BlockIndex::new(),
@@ -2487,6 +2523,197 @@ mod tests {
         assert!(state.render_state.needs_cleanup);
         assert!(state.pty_alt_screen_active);
         assert!(state.render_state.force_pty_alt_screen_cleanup);
+    }
+
+    #[test]
+    fn tui_lifecycle_state_transitions_cover_key_paths() {
+        #[derive(Clone, Copy)]
+        enum Scenario {
+            PendingThenPrecmdNoAlt,
+            PendingThenUnrelatedExitThenPrecmd,
+            PendingEnterExitPrecmd,
+            PendingEnterPrecmdNoExit,
+            NonTuiPrecmd,
+        }
+
+        let scenarios = [
+            Scenario::PendingThenPrecmdNoAlt,
+            Scenario::PendingThenUnrelatedExitThenPrecmd,
+            Scenario::PendingEnterExitPrecmd,
+            Scenario::PendingEnterPrecmdNoExit,
+            Scenario::NonTuiPrecmd,
+        ];
+
+        for scenario in scenarios {
+            let mut state = runtime_state();
+            let command = match scenario {
+                Scenario::NonTuiPrecmd => "ls".to_string(),
+                _ => "nvim".to_string(),
+            };
+
+            apply_shell_hook_event(
+                &mut state,
+                ShellHookEvent::Preexec {
+                    command: command.clone(),
+                },
+                false,
+            );
+
+            let block_id = state.blocks.active_block_id().expect("active block after preexec");
+
+            match scenario {
+                Scenario::PendingThenPrecmdNoAlt => {
+                    assert!(matches!(state.tui_state, TuiRuntimeState::Pending { .. }));
+                    apply_shell_hook_event(
+                        &mut state,
+                        ShellHookEvent::Precmd {
+                            exit_code: 0,
+                            cwd: None,
+                        },
+                        false,
+                    );
+                    assert!(matches!(state.tui_state, TuiRuntimeState::Idle));
+                    let block = state.blocks.block(block_id).expect("finished block");
+                    assert_eq!(block.kind, BlockKind::NormalCommand);
+                    assert!(!state.render_state.needs_cleanup);
+                }
+                Scenario::PendingThenUnrelatedExitThenPrecmd => {
+                    on_alt_screen_exit(&mut state);
+                    assert!(matches!(state.tui_state, TuiRuntimeState::Pending { .. }));
+                    apply_shell_hook_event(
+                        &mut state,
+                        ShellHookEvent::Precmd {
+                            exit_code: 0,
+                            cwd: None,
+                        },
+                        false,
+                    );
+                    assert!(matches!(state.tui_state, TuiRuntimeState::Idle));
+                    let block = state.blocks.block(block_id).expect("finished block");
+                    assert_eq!(block.kind, BlockKind::NormalCommand);
+                    assert!(!state.render_state.needs_cleanup);
+                }
+                Scenario::PendingEnterExitPrecmd => {
+                    on_alt_screen_enter(&mut state);
+                    assert!(matches!(
+                        state.tui_state,
+                        TuiRuntimeState::InAltScreen { .. }
+                    ));
+                    on_alt_screen_exit(&mut state);
+                    assert!(matches!(
+                        state.tui_state,
+                        TuiRuntimeState::ExitedAltScreen { .. }
+                    ));
+                    apply_shell_hook_event(
+                        &mut state,
+                        ShellHookEvent::Precmd {
+                            exit_code: 0,
+                            cwd: None,
+                        },
+                        false,
+                    );
+                    assert!(matches!(state.tui_state, TuiRuntimeState::Idle));
+                    let block = state.blocks.block(block_id).expect("finished block");
+                    assert_eq!(block.kind, BlockKind::TuiSession);
+                    assert!(state.render_state.needs_cleanup);
+                    assert!(!state.render_state.force_pty_alt_screen_cleanup);
+                }
+                Scenario::PendingEnterPrecmdNoExit => {
+                    on_alt_screen_enter(&mut state);
+                    assert!(state.pty_alt_screen_active);
+                    apply_shell_hook_event(
+                        &mut state,
+                        ShellHookEvent::Precmd {
+                            exit_code: 1,
+                            cwd: None,
+                        },
+                        false,
+                    );
+                    assert!(matches!(state.tui_state, TuiRuntimeState::Idle));
+                    let block = state.blocks.block(block_id).expect("finished block");
+                    assert_eq!(block.kind, BlockKind::TuiSession);
+                    assert!(state.render_state.needs_cleanup);
+                    assert!(state.render_state.force_pty_alt_screen_cleanup);
+                }
+                Scenario::NonTuiPrecmd => {
+                    assert!(matches!(state.tui_state, TuiRuntimeState::Idle));
+                    apply_shell_hook_event(
+                        &mut state,
+                        ShellHookEvent::Precmd {
+                            exit_code: 0,
+                            cwd: None,
+                        },
+                        false,
+                    );
+                    assert!(matches!(state.tui_state, TuiRuntimeState::Idle));
+                    let block = state.blocks.block(block_id).expect("finished block");
+                    assert_eq!(block.kind, BlockKind::NormalCommand);
+                    assert!(!state.render_state.needs_cleanup);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn advance_tui_state_transition_table() {
+        let app_match = TuiAppMatch {
+            app_name: "nvim".to_string(),
+            command_name: "nvim".to_string(),
+            source: TuiAppMatchSource::Builtin,
+        };
+        let block_id = BlockId(42);
+
+        let (state, finalize) = advance_tui_state(
+            TuiRuntimeState::Idle,
+            TuiLifecycleEvent::PreexecMatch {
+                app_match: app_match.clone(),
+                command: "nvim".to_string(),
+            },
+        );
+        assert!(matches!(state, TuiRuntimeState::Pending { .. }));
+        assert!(finalize.is_none());
+
+        let (state, finalize) = advance_tui_state(
+            TuiRuntimeState::Pending {
+                app_match: app_match.clone(),
+                command: "nvim".to_string(),
+            },
+            TuiLifecycleEvent::AltScreenEnter { block_id },
+        );
+        assert!(matches!(
+            state,
+            TuiRuntimeState::InAltScreen {
+                block_id: BlockId(42)
+            }
+        ));
+        assert!(finalize.is_none());
+
+        let (state, finalize) = advance_tui_state(
+            TuiRuntimeState::InAltScreen { block_id },
+            TuiLifecycleEvent::AltScreenExit,
+        );
+        assert!(matches!(
+            state,
+            TuiRuntimeState::ExitedAltScreen {
+                block_id: BlockId(42)
+            }
+        ));
+        assert!(finalize.is_none());
+
+        let (state, finalize) =
+            advance_tui_state(TuiRuntimeState::ExitedAltScreen { block_id }, TuiLifecycleEvent::Precmd);
+        assert!(matches!(state, TuiRuntimeState::Idle));
+        assert_eq!(finalize, Some(block_id));
+
+        let (state, finalize) = advance_tui_state(
+            TuiRuntimeState::Pending {
+                app_match,
+                command: "nvim".to_string(),
+            },
+            TuiLifecycleEvent::AltScreenExit,
+        );
+        assert!(matches!(state, TuiRuntimeState::Pending { .. }));
+        assert!(finalize.is_none());
     }
 
     #[test]

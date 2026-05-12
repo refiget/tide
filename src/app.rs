@@ -601,12 +601,6 @@ pub const DEFAULT_TUI_COMMANDS: &[&str] = &[
 
 // ─── Alt-Screen Lifecycle ───────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CaptureMode {
-    Normal,
-    SuspendedForTui,
-}
-
 /// States for the TUI full-screen lifecycle state machine.
 ///
 /// Transitions:
@@ -628,6 +622,15 @@ pub enum TuiRuntimeState {
     ExitedAltScreen {
         block_id: BlockId,
     },
+}
+
+impl TuiRuntimeState {
+    /// Returns true if the TUI is currently in the alternate screen,
+    /// in which case sidecar text capture should be suspended to avoid
+    /// polluting history with TUI drawing sequences.
+    pub fn is_capture_suspended(&self) -> bool {
+        matches!(self, TuiRuntimeState::InAltScreen { .. })
+    }
 }
 
 impl Default for TuiRuntimeState {
