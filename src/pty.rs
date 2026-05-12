@@ -534,11 +534,110 @@ fn is_opencode_command(command_line: &str) -> bool {
     matches!(extract_command_name(command_line).as_deref(), Some("opencode"))
 }
 
+fn is_opencode_process_command(command: &str) -> bool {
+    let Some(exe) = command.split_whitespace().next() else {
+        return false;
+    };
+    let base = exe.rsplit('/').next().unwrap_or(exe).to_ascii_lowercase();
+    base == "opencode" || base.starts_with("opencode-")
+}
+
+fn tmux_current_tty() -> Option<String> {
+    let out = Command::new("tmux")
+        .args(["display-message", "-p", "#{pane_tty}"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+fn tty_has_opencode_process(tty_path: &str) -> bool {
+    let tty = tty_path.strip_prefix("/dev/").unwrap_or(tty_path);
+    let out = Command::new("ps")
+        .args(["-axo", "tty=,command="])
+        .output();
+    let Ok(out) = out else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    stdout.lines().any(|line| {
+        let mut parts = line.split_whitespace();
+        let Some(line_tty) = parts.next() else {
+            return false;
+        };
+        if line_tty != tty {
+            return false;
+        }
+        let command = line.trim_start_matches(line_tty).trim_start();
+        is_opencode_process_command(command)
+    })
+}
+
+fn register_running_opencode_block(state: &mut RuntimeState, id: BlockId, command: &str) {
+    if state.opencode_by_block.contains_key(&id) {
+        return;
+    }
+    let Some(block) = state.blocks.block(id) else {
+        return;
+    };
+    let Some(target) = tmux_current_target() else {
+        return;
+    };
+    let project = block
+        .cwd
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "opencode".to_string());
+    if let Ok(alias) = crate::opencode_registry::register_running(
+        &state.tide_id,
+        id.0,
+        command,
+        &block.cwd.display().to_string(),
+        &project,
+        &target,
+    ) {
+        state.opencode_by_block.insert(id, alias);
+    }
+}
+
+fn detect_and_register_opencode(state: &mut RuntimeState, id: BlockId, command: &str) {
+    if let Some(tty) = tmux_current_tty() {
+        for _ in 0..8 {
+            if tty_has_opencode_process(&tty) {
+                register_running_opencode_block(state, id, command);
+                return;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    // Fallback: direct command match when process probing is unavailable.
+    if is_opencode_command(command) {
+        register_running_opencode_block(state, id, command);
+    }
+}
+
 fn is_running_opencode_block(state: &RuntimeState, id: BlockId) -> bool {
+    if state.opencode_by_block.contains_key(&id) {
+        return true;
+    }
     state
         .blocks
         .block(id)
-        .map(|b| b.status == BlockStatus::Running && is_opencode_command(&b.command))
+        .map(|b| {
+            b.status == BlockStatus::Running
+                && b
+                    .app_name
+                    .as_deref()
+                    .map(|s| s.starts_with("opencode_alias:"))
+                    .unwrap_or(false)
+        })
         .unwrap_or(false)
 }
 
@@ -777,26 +876,8 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             let (next, _) = advance_tui_state(prev, lifecycle_event);
             state.tui_state = next;
 
-            if is_opencode_command(&command)
-                && let Some(id) = state.blocks.active_block_id()
-                && let Some(block) = state.blocks.block(id)
-                && let Some(target) = tmux_current_target()
-            {
-                let project = block
-                    .cwd
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "opencode".to_string());
-                if let Ok(alias) = crate::opencode_registry::register_running(
-                    &state.tide_id,
-                    id.0,
-                    &command,
-                    &block.cwd.display().to_string(),
-                    &project,
-                    &target,
-                ) {
-                    state.opencode_by_block.insert(id, alias);
-                }
+            if let Some(id) = state.blocks.active_block_id() {
+                detect_and_register_opencode(state, id, &command);
             }
 
             // Pin running opencode blocks to the bottom in Block View.
@@ -2329,13 +2410,26 @@ fn current_pty_size() -> PtySize {
 mod tests {
     use std::{
         path::PathBuf,
+        sync::Once,
         sync::{Arc, Mutex},
     };
 
     use super::*;
     use crate::config::Config;
 
+    static TEST_REGISTRY_ENV: Once = Once::new();
+
+    fn init_test_registry_env() {
+        TEST_REGISTRY_ENV.call_once(|| {
+            let dir = std::env::temp_dir().join(format!("tide-test-registry-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            // SAFETY: tests set this process-wide env var once before runtime state creation.
+            unsafe { std::env::set_var("TIDE_REGISTRY_DIR", dir) };
+        });
+    }
+
     fn runtime_state() -> RuntimeState {
+        init_test_registry_env();
         let config = Config::default();
         let runtime_config = build_runtime_config(config.clone());
         RuntimeState {
@@ -3547,6 +3641,20 @@ mod tests {
     #[test]
     fn extract_basename_strips_path() {
         assert_eq!(extract_command_name("/usr/bin/nvim"), Some("nvim".into()));
+    }
+
+    #[test]
+    fn opencode_process_detection_matches_real_binary_path() {
+        assert!(is_opencode_process_command(
+            "/opt/homebrew/Cellar/opencode/1.14.40/libexec/lib/node_modules/opencode-ai/node_modules/opencode-darwin-arm64/bin/opencode"
+        ));
+    }
+
+    #[test]
+    fn opencode_process_detection_rejects_text_mentions() {
+        assert!(!is_opencode_process_command("vim opencode.md"));
+        assert!(!is_opencode_process_command("cat opencode.log"));
+        assert!(!is_opencode_process_command("echo opencode"));
     }
 
     // ─── detect_tui_app tests ────────────────────────────────────────────
