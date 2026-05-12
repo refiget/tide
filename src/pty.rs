@@ -665,6 +665,25 @@ fn synthetic_opencode_block_id(alias: &str) -> BlockId {
 }
 
 fn tmux_current_target() -> Option<String> {
+    if let Ok(pane_id) = std::env::var("TMUX_PANE") {
+        let out = Command::new("tmux")
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                pane_id.trim(),
+                "#{session_name}:#{window_index}.#{pane_index}",
+            ])
+            .output()
+            .ok()?;
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+
     let out = Command::new("tmux")
         .args(["display-message", "-p", "#{session_name}:#{window_index}.#{pane_index}"])
         .output()
@@ -680,7 +699,7 @@ fn tmux_target_exists(target: &str) -> bool {
     Command::new("tmux")
         .args(["display-message", "-p", "-t", target, "#{pane_id}"])
         .output()
-        .map(|o| o.status.success())
+        .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
         .unwrap_or(false)
 }
 
@@ -736,14 +755,14 @@ fn try_global_jump_back(state: &mut RuntimeState) -> bool {
     let Ok(Some(last)) = crate::opencode_registry::read_last_jump() else {
         return false;
     };
+    if !tmux_target_exists(&last.from_tmux_target) {
+        let _ = crate::opencode_registry::clear_last_jump();
+        return false;
+    }
     if last.to_tmux_target != current {
         return false;
     }
     if last.from_tmux_target == last.to_tmux_target {
-        let _ = crate::opencode_registry::clear_last_jump();
-        return false;
-    }
-    if !tmux_target_exists(&last.from_tmux_target) {
         let _ = crate::opencode_registry::clear_last_jump();
         return false;
     }
