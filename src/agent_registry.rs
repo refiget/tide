@@ -135,7 +135,8 @@ fn write_registry_unlocked(path: &Path, reg: &RegistryFile) -> Result<()> {
         .write(true)
         .open(&tmp)
         .context("open tmp registry")?;
-    f.write_all(payload.as_bytes()).context("write tmp registry")?;
+    f.write_all(payload.as_bytes())
+        .context("write tmp registry")?;
     f.sync_all().ok();
     fs::rename(&tmp, path).context("rename tmp registry")?;
     Ok(())
@@ -162,7 +163,8 @@ fn write_jump_stack_unlocked(path: &Path, stack: &JumpStackFile) -> Result<()> {
         .write(true)
         .open(&tmp)
         .context("open tmp jump file")?;
-    f.write_all(payload.as_bytes()).context("write tmp jump file")?;
+    f.write_all(payload.as_bytes())
+        .context("write tmp jump file")?;
     f.sync_all().ok();
     fs::rename(&tmp, path).context("rename tmp jump file")?;
     Ok(())
@@ -283,7 +285,11 @@ pub fn register_running(
     })
 }
 
-pub fn unregister_running(provider: AgentProvider, source_tide_id: &str, command_block_id: u64) -> Result<()> {
+pub fn unregister_running(
+    provider: AgentProvider,
+    source_tide_id: &str,
+    command_block_id: u64,
+) -> Result<()> {
     with_lock(|| {
         let path = registry_path();
         let mut reg = read_registry_unlocked(&path);
@@ -318,7 +324,8 @@ pub fn mark_stale(provider: AgentProvider, alias: &str) -> Result<()> {
         let path = registry_path();
         let mut reg = read_registry_unlocked(&path);
         for rec in &mut reg.records {
-            if rec.provider == provider && rec.alias == alias && rec.status == AgentStatus::Running {
+            if rec.provider == provider && rec.alias == alias && rec.status == AgentStatus::Running
+            {
                 rec.status = AgentStatus::Stale;
                 rec.last_seen_at_ms = now_ms();
             }
@@ -327,7 +334,11 @@ pub fn mark_stale(provider: AgentProvider, alias: &str) -> Result<()> {
     })
 }
 
-pub fn write_last_jump(from_tmux_target: &str, to_tmux_target: &str, from_zoomed: bool) -> Result<()> {
+pub fn write_last_jump(
+    from_tmux_target: &str,
+    to_tmux_target: &str,
+    from_zoomed: bool,
+) -> Result<()> {
     if from_tmux_target == to_tmux_target {
         return Ok(());
     }

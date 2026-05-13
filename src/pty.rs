@@ -18,10 +18,10 @@ use signal_hook::{consts::signal::SIGWINCH, iterator::Signals};
 
 use crate::{
     app::{
-        BlockAction, BlockActionScope, BlockId, BlockKind, BlockOrigin, BlockStatus, BlockViewAction, ConfirmKind, ConfirmState,
-        DEFAULT_TUI_COMMANDS, DetailViewAction, HelpState, InputAccumulator, RenderState,
-        ReturnPanelTarget, TuiAppMatch, TuiAppMatchSource, TuiRuntimeState, ViewAnchor, ViewKind,
-        ViewState, VisibleSource,
+        BlockAction, BlockActionScope, BlockId, BlockKind, BlockOrigin, BlockStatus,
+        BlockViewAction, ConfirmKind, ConfirmState, DEFAULT_TUI_COMMANDS, DetailViewAction,
+        HelpState, InputAccumulator, RenderState, ReturnPanelTarget, TuiAppMatch,
+        TuiAppMatchSource, TuiRuntimeState, ViewAnchor, ViewKind, ViewState, VisibleSource,
     },
     block::BlockStore,
     buffer::ShellBuffer,
@@ -181,9 +181,15 @@ pub fn run_shell(config: &Config) -> Result<()> {
                             ParsedPtyPart::Event(event) => {
                                 if let Ok(mut state) = output_state.lock() {
                                     match event {
-                                        ShellHookEvent::AltScreenEnter => on_alt_screen_enter(&mut state),
-                                        ShellHookEvent::AltScreenExit => on_alt_screen_exit(&mut state),
-                                        _ => apply_shell_hook_event(&mut state, event, debug_blocks),
+                                        ShellHookEvent::AltScreenEnter => {
+                                            on_alt_screen_enter(&mut state)
+                                        }
+                                        ShellHookEvent::AltScreenExit => {
+                                            on_alt_screen_exit(&mut state)
+                                        }
+                                        _ => {
+                                            apply_shell_hook_event(&mut state, event, debug_blocks)
+                                        }
                                     }
                                 }
                             }
@@ -537,7 +543,10 @@ fn detect_tui_app(
 }
 
 fn is_opencode_command(command_line: &str) -> bool {
-    matches!(extract_command_name(command_line).as_deref(), Some("opencode"))
+    matches!(
+        extract_command_name(command_line).as_deref(),
+        Some("opencode")
+    )
 }
 
 fn is_opencode_process_command(command: &str) -> bool {
@@ -582,9 +591,7 @@ fn tmux_current_window_id() -> Option<String> {
 
 fn tty_has_opencode_process(tty_path: &str) -> bool {
     let tty = tty_path.strip_prefix("/dev/").unwrap_or(tty_path);
-    let out = Command::new("ps")
-        .args(["-axo", "tty=,command="])
-        .output();
+    let out = Command::new("ps").args(["-axo", "tty=,command="]).output();
     let Ok(out) = out else {
         return false;
     };
@@ -677,8 +684,7 @@ fn is_running_opencode_block(state: &RuntimeState, id: BlockId) -> bool {
         .map(|b| {
             b.status == BlockStatus::Running
                 && b.origin == BlockOrigin::Shared
-                && b
-                    .app_name
+                && b.app_name
                     .as_deref()
                     .map(|s| s.starts_with("opencode_alias:"))
                     .unwrap_or(false)
@@ -728,7 +734,11 @@ fn tmux_current_target() -> Option<String> {
     }
 
     let out = Command::new("tmux")
-        .args(["display-message", "-p", "#{session_name}:#{window_index}.#{pane_index}"])
+        .args([
+            "display-message",
+            "-p",
+            "#{session_name}:#{window_index}.#{pane_index}",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -755,13 +765,21 @@ fn tmux_jump_and_zoom(target: &str) -> bool {
             .unwrap_or(false)
         {
             let zoomed = Command::new("tmux")
-                .args(["display-message", "-p", "-t", target, "#{window_zoomed_flag}"])
+                .args([
+                    "display-message",
+                    "-p",
+                    "-t",
+                    target,
+                    "#{window_zoomed_flag}",
+                ])
                 .output()
                 .ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .unwrap_or_default();
             if zoomed == "0" {
-                let _ = Command::new("tmux").args(["resize-pane", "-Z", "-t", target]).status();
+                let _ = Command::new("tmux")
+                    .args(["resize-pane", "-Z", "-t", target])
+                    .status();
             }
             return true;
         }
@@ -792,7 +810,13 @@ fn tmux_jump_and_zoom(target: &str) -> bool {
             .unwrap_or(false)
     {
         let zoomed = Command::new("tmux")
-            .args(["display-message", "-p", "-t", target, "#{window_zoomed_flag}"])
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                target,
+                "#{window_zoomed_flag}",
+            ])
             .output()
             .ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -808,7 +832,13 @@ fn tmux_jump_and_zoom(target: &str) -> bool {
 
 fn tmux_window_zoomed(target: &str) -> Option<bool> {
     let out = Command::new("tmux")
-        .args(["display-message", "-p", "-t", target, "#{window_zoomed_flag}"])
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            target,
+            "#{window_zoomed_flag}",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -866,7 +896,9 @@ fn sync_shared_opencode_blocks(state: &mut RuntimeState) {
     if !state.config.opencode_share.enabled {
         return;
     }
-    let Ok(records) = crate::agent_registry::list_all(crate::agent_registry::AgentProvider::Opencode) else {
+    let Ok(records) =
+        crate::agent_registry::list_all(crate::agent_registry::AgentProvider::Opencode)
+    else {
         return;
     };
 
@@ -895,7 +927,10 @@ fn sync_shared_opencode_blocks(state: &mut RuntimeState) {
         if rec.status == crate::agent_registry::AgentStatus::Running
             && !tmux_target_exists(&rec.tmux_target)
         {
-            let _ = crate::agent_registry::mark_stale(crate::agent_registry::AgentProvider::Opencode, &rec.alias);
+            let _ = crate::agent_registry::mark_stale(
+                crate::agent_registry::AgentProvider::Opencode,
+                &rec.alias,
+            );
         }
 
         let display_status = if tmux_target_exists(&rec.tmux_target) {
@@ -966,10 +1001,16 @@ fn move_running_opencode_to_bottom(state: &mut RuntimeState) {
             if running.is_empty() {
                 None
             } else {
-                let mut non_running: Vec<BlockId> =
-                    ids.iter().copied().filter(|id| !running.contains(id)).collect();
-                let mut running_ids: Vec<BlockId> =
-                    ids.iter().copied().filter(|id| running.contains(id)).collect();
+                let mut non_running: Vec<BlockId> = ids
+                    .iter()
+                    .copied()
+                    .filter(|id| !running.contains(id))
+                    .collect();
+                let mut running_ids: Vec<BlockId> = ids
+                    .iter()
+                    .copied()
+                    .filter(|id| running.contains(id))
+                    .collect();
                 non_running.append(&mut running_ids);
                 Some(non_running)
             }
@@ -1004,10 +1045,11 @@ fn advance_tui_state(
             other => (other, None),
         },
         TuiLifecycleEvent::Precmd => match prev {
-            TuiRuntimeState::ExitedAltScreen { block_id } | TuiRuntimeState::InAltScreen { block_id } => {
-                (TuiRuntimeState::Idle, Some(block_id))
+            TuiRuntimeState::ExitedAltScreen { block_id }
+            | TuiRuntimeState::InAltScreen { block_id } => (TuiRuntimeState::Idle, Some(block_id)),
+            TuiRuntimeState::Pending { .. } | TuiRuntimeState::Idle => {
+                (TuiRuntimeState::Idle, None)
             }
-            TuiRuntimeState::Pending { .. } | TuiRuntimeState::Idle => (TuiRuntimeState::Idle, None),
         },
     }
 }
@@ -1016,6 +1058,10 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
     match event {
         ShellHookEvent::AltScreenEnter => on_alt_screen_enter(state),
         ShellHookEvent::AltScreenExit => on_alt_screen_exit(state),
+        ShellHookEvent::CwdChanged { cwd } => {
+            state.blocks.set_cwd(cwd.clone());
+            let _ = std::env::set_current_dir(cwd);
+        }
         ShellHookEvent::Preexec { command } => {
             state.shell_command_running = true;
             let start_line = state.shell.line_count();
@@ -1088,7 +1134,11 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             }
             if let Some(id) = active_id {
                 if state.opencode_by_block.remove(&id).is_some() {
-                    let _ = crate::agent_registry::unregister_running(crate::agent_registry::AgentProvider::Opencode, &state.tide_id, id.0);
+                    let _ = crate::agent_registry::unregister_running(
+                        crate::agent_registry::AgentProvider::Opencode,
+                        &state.tide_id,
+                        id.0,
+                    );
                 }
                 if let Some(cwd) = finished_cwd {
                     if let Some(block) = state.blocks.block_mut(id) {
@@ -1154,7 +1204,8 @@ fn perform_block_action(state: &mut RuntimeState, action: BlockAction) {
         return;
     };
     if !block_allows_standard_actions(block) {
-        state.render_state.flash_message = Some(("shared block: jump only".to_string(), Instant::now()));
+        state.render_state.flash_message =
+            Some(("shared block: jump only".to_string(), Instant::now()));
         state.render_state.dirty = true;
         state.render_state.force_render = true;
         return;
@@ -1213,7 +1264,8 @@ fn copy_blocks(state: &mut RuntimeState, part: CopyPart) {
         .filter(|b| block_allows_standard_actions(b))
         .collect();
     if blocks.is_empty() {
-        state.render_state.flash_message = Some(("shared block: jump only".to_string(), Instant::now()));
+        state.render_state.flash_message =
+            Some(("shared block: jump only".to_string(), Instant::now()));
         return;
     }
     let text = format_blocks(&blocks, part, fmt);
@@ -1877,7 +1929,13 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
         BlockViewAction::Rerun => {
             let ids: Vec<BlockId> = visual_range_ids(state)
                 .into_iter()
-                .filter(|id| state.blocks.block(*id).map(block_allows_standard_actions).unwrap_or(false))
+                .filter(|id| {
+                    state
+                        .blocks
+                        .block(*id)
+                        .map(block_allows_standard_actions)
+                        .unwrap_or(false)
+                })
                 .collect();
             if ids.len() > 1 {
                 state.view.confirm = Some(ConfirmState::multi(ConfirmKind::RerunBlocks, ids));
@@ -1896,7 +1954,8 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                     state.render_state.needs_cleanup = true;
                     state.render_state.pending_paste = Some(cmd);
                 } else {
-                    state.render_state.flash_message = Some(("shared block: jump only".to_string(), Instant::now()));
+                    state.render_state.flash_message =
+                        Some(("shared block: jump only".to_string(), Instant::now()));
                 }
             }
             true
@@ -1905,7 +1964,10 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
             if let Some(selected) = state.view.selected_block {
                 if let Some(block) = state.blocks.block(selected)
                     && let Some(alias) = is_shared_opencode_block(block)
-                    && let Ok(Some(rec)) = crate::agent_registry::find_by_alias(crate::agent_registry::AgentProvider::Opencode, &alias)
+                    && let Ok(Some(rec)) = crate::agent_registry::find_by_alias(
+                        crate::agent_registry::AgentProvider::Opencode,
+                        &alias,
+                    )
                 {
                     let jump_target = if !rec.tmux_pane_id.is_empty() {
                         rec.tmux_pane_id.clone()
@@ -1916,8 +1978,11 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                         if let Some(cur) = tmux_current_target() {
                             state.opencode_jump_stack.push(cur.clone());
                             let from_zoomed = tmux_window_zoomed(&cur).unwrap_or(false);
-                            let _ =
-                                crate::agent_registry::write_last_jump(&cur, &jump_target, from_zoomed);
+                            let _ = crate::agent_registry::write_last_jump(
+                                &cur,
+                                &jump_target,
+                                from_zoomed,
+                            );
                         }
                         if tmux_jump_and_zoom(&jump_target) {
                             state.render_state.flash_message =
@@ -1963,7 +2028,13 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
         BlockViewAction::Delete => {
             let ids: Vec<BlockId> = visual_range_ids(state)
                 .into_iter()
-                .filter(|id| state.blocks.block(*id).map(block_allows_standard_actions).unwrap_or(false))
+                .filter(|id| {
+                    state
+                        .blocks
+                        .block(*id)
+                        .map(block_allows_standard_actions)
+                        .unwrap_or(false)
+                })
                 .collect();
             if !ids.is_empty() {
                 let kind = if ids.len() == 1 {
@@ -1975,7 +2046,8 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
             } else {
-                state.render_state.flash_message = Some(("shared block: jump only".to_string(), Instant::now()));
+                state.render_state.flash_message =
+                    Some(("shared block: jump only".to_string(), Instant::now()));
             }
             true
         }
@@ -2106,7 +2178,8 @@ fn execute_detail_view_action(action: DetailViewAction, state: &mut RuntimeState
                 .map(block_allows_standard_actions)
                 .unwrap_or(false);
             if !allowed {
-                state.render_state.flash_message = Some(("shared block: jump only".to_string(), Instant::now()));
+                state.render_state.flash_message =
+                    Some(("shared block: jump only".to_string(), Instant::now()));
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
                 return;
@@ -2131,7 +2204,8 @@ fn execute_detail_view_action(action: DetailViewAction, state: &mut RuntimeState
                 .map(block_allows_standard_actions)
                 .unwrap_or(false);
             if !allowed {
-                state.render_state.flash_message = Some(("shared block: jump only".to_string(), Instant::now()));
+                state.render_state.flash_message =
+                    Some(("shared block: jump only".to_string(), Instant::now()));
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
                 return;
@@ -2162,20 +2236,25 @@ fn execute_detail_view_action(action: DetailViewAction, state: &mut RuntimeState
             state.render_state.force_render = true;
         }
         DetailViewAction::Rerun => {
-            let command = state.view.expanded_block.and_then(|id| {
-                state
-                    .blocks
-                    .block(id)
-                    .filter(|b| block_allows_standard_actions(b))
-                    .map(|b| b.command.clone())
-            }).filter(|cmd| !cmd.is_empty());
+            let command = state
+                .view
+                .expanded_block
+                .and_then(|id| {
+                    state
+                        .blocks
+                        .block(id)
+                        .filter(|b| block_allows_standard_actions(b))
+                        .map(|b| b.command.clone())
+                })
+                .filter(|cmd| !cmd.is_empty());
             if let Some(cmd) = command {
                 state.view = ViewState::default();
                 state.input_accumulator.pending_block_delta = 0;
                 state.render_state.needs_cleanup = true;
                 state.render_state.pending_paste = Some(cmd);
             } else {
-                state.render_state.flash_message = Some(("shared block: jump only".to_string(), Instant::now()));
+                state.render_state.flash_message =
+                    Some(("shared block: jump only".to_string(), Instant::now()));
             }
         }
         DetailViewAction::VisualMode => {
@@ -2257,9 +2336,11 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
         }
         if let Some(target) = state.opencode_jump_stack.pop() {
             if tmux_target_exists(&target) && tmux_jump_and_zoom(&target) {
-                state.render_state.flash_message = Some(("jumped back".to_string(), Instant::now()));
+                state.render_state.flash_message =
+                    Some(("jumped back".to_string(), Instant::now()));
             } else {
-                state.render_state.flash_message = Some(("back target missing".to_string(), Instant::now()));
+                state.render_state.flash_message =
+                    Some(("back target missing".to_string(), Instant::now()));
             }
             state.render_state.dirty = true;
             state.render_state.force_render = true;
@@ -2607,7 +2688,7 @@ fn finalize_exited_tui_on_precmd(state: &mut RuntimeState, block_id: BlockId) {
             state.view.return_panel = None;
             state.view.view = ViewKind::Plain;
             state.render_state.needs_cleanup = true;
-            
+
             // If the TUI process exited but we still think it's in the alt screen,
             // it likely crashed without cleaning up. Force cleanup.
             if state.pty_alt_screen_active {
@@ -2652,7 +2733,8 @@ mod tests {
 
     fn init_test_registry_env() {
         TEST_REGISTRY_ENV.call_once(|| {
-            let dir = std::env::temp_dir().join(format!("tide-test-registry-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("tide-test-registry-{}", std::process::id()));
             let _ = std::fs::create_dir_all(&dir);
             // SAFETY: tests set this process-wide env var once before runtime state creation.
             unsafe { std::env::set_var("TIDE_REGISTRY_DIR", dir) };
@@ -3105,24 +3187,42 @@ mod tests {
         on_alt_screen_exit(&mut state);
         assert!(!state.pty_alt_screen_active);
 
-        let block_id = state.blocks.start_command("yazi".to_string(), 0, BlockKind::TuiSession);
+        let block_id = state
+            .blocks
+            .start_command("yazi".to_string(), 0, BlockKind::TuiSession);
         state.tui_state = TuiRuntimeState::InAltScreen { block_id };
         // Simulated alt-screen exit happened before precmd
-        on_alt_screen_exit(&mut state); 
+        on_alt_screen_exit(&mut state);
 
-        apply_shell_hook_event(&mut state, ShellHookEvent::Precmd { exit_code: 0, cwd: None }, false);
-        // If pty_alt_screen_active is false, renderer::leave_block_render(stdout, false) 
+        apply_shell_hook_event(
+            &mut state,
+            ShellHookEvent::Precmd {
+                exit_code: 0,
+                cwd: None,
+            },
+            false,
+        );
+        // If pty_alt_screen_active is false, renderer::leave_block_render(stdout, false)
         // would be called in the real loop, which is idempotent.
         assert!(!state.pty_alt_screen_active);
         assert!(!state.render_state.force_pty_alt_screen_cleanup);
 
         // Case B: Crashed TUI (no leave sequence observed)
-        let block_id = state.blocks.start_command("crash".to_string(), 0, BlockKind::TuiSession);
+        let block_id = state
+            .blocks
+            .start_command("crash".to_string(), 0, BlockKind::TuiSession);
         state.tui_state = TuiRuntimeState::InAltScreen { block_id };
         // We set pty_alt_screen_active to true manually to simulate what on_alt_screen_enter does
-        state.pty_alt_screen_active = true; 
+        state.pty_alt_screen_active = true;
 
-        apply_shell_hook_event(&mut state, ShellHookEvent::Precmd { exit_code: 1, cwd: None }, false);
+        apply_shell_hook_event(
+            &mut state,
+            ShellHookEvent::Precmd {
+                exit_code: 1,
+                cwd: None,
+            },
+            false,
+        );
         // Precmd should have set force_pty_alt_screen_cleanup because pty_alt_screen_active was true.
         assert!(state.render_state.needs_cleanup);
         assert!(state.pty_alt_screen_active);
@@ -3163,7 +3263,10 @@ mod tests {
                 false,
             );
 
-            let block_id = state.blocks.active_block_id().expect("active block after preexec");
+            let block_id = state
+                .blocks
+                .active_block_id()
+                .expect("active block after preexec");
 
             match scenario {
                 Scenario::PendingThenPrecmdNoAlt => {
@@ -3304,8 +3407,10 @@ mod tests {
         ));
         assert!(finalize.is_none());
 
-        let (state, finalize) =
-            advance_tui_state(TuiRuntimeState::ExitedAltScreen { block_id }, TuiLifecycleEvent::Precmd);
+        let (state, finalize) = advance_tui_state(
+            TuiRuntimeState::ExitedAltScreen { block_id },
+            TuiLifecycleEvent::Precmd,
+        );
         assert!(matches!(state, TuiRuntimeState::Idle));
         assert_eq!(finalize, Some(block_id));
 

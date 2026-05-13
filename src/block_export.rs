@@ -33,15 +33,25 @@ pub fn format_block_json(block: &CommandBlock, part: ExportPart) -> String {
     let mut fields: Vec<String> = Vec::new();
     fields.push(format!("\"{KEY_SCHEMA_VERSION}\":\"{SCHEMA_VERSION}\""));
     fields.push(format!("\"{KEY_ID}\":{}", block.id.0));
-    fields.push(format!("\"{KEY_KIND}\":{}", json_string(block.kind.as_str())));
-    fields.push(format!("\"{KEY_STATUS}\":{}", json_string(block.status.as_str())));
+    fields.push(format!(
+        "\"{KEY_KIND}\":{}",
+        json_string(block.kind.as_str())
+    ));
+    fields.push(format!(
+        "\"{KEY_STATUS}\":{}",
+        json_string(block.status.as_str())
+    ));
     fields.push(format!(
         "\"{KEY_OUTPUT_SEMANTICS}\":{}",
         json_string(output_semantics(block.kind.clone()))
     ));
     fields.push(format!(
         "\"{KEY_OUTPUT_TRUNCATED}\":{}",
-        if block.output_truncated { "true" } else { "false" }
+        if block.output_truncated {
+            "true"
+        } else {
+            "false"
+        }
     ));
     fields.push(format!(
         "\"{KEY_CWD}\":{}",
@@ -141,7 +151,11 @@ fn build_summary_json(block: &CommandBlock) -> String {
             .exit_code
             .map(|v| v.to_string())
             .unwrap_or_else(|| "null".to_string()),
-        if block.output_truncated { "true" } else { "false" }
+        if block.output_truncated {
+            "true"
+        } else {
+            "false"
+        }
     )
 }
 

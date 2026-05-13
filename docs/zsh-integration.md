@@ -38,16 +38,36 @@ _tide_preexec() {
   printf '\033]777;block_start;cmd=hex:%s\a' "$cmd"
 }
 
+_tide_emit_cwd() {
+  local cwd="$PWD"
+  cwd="$(_tide_escape_osc "$cwd")"
+  printf '\033]777;cwd;cwd=hex:%s\a' "$cwd"
+  printf '\033]7;file://%s%s\a' "${HOST:-localhost}" "$PWD"
+}
+
 _tide_precmd() {
   local ec=$?
   local cwd="$PWD"
   cwd="$(_tide_escape_osc "$cwd")"
+  _tide_emit_cwd
   printf '\033]777;block_end;exit=%d;cwd=hex:%s\a' "$ec" "$cwd"
 }
 
 add-zsh-hook preexec _tide_preexec
 add-zsh-hook precmd _tide_precmd
+add-zsh-hook chpwd _tide_emit_cwd
 ```
+
+`_tide_emit_cwd` exists because Tide is the process tmux sees for the pane.
+When the inner zsh changes directory, Tide must update its own process cwd so
+tmux `split-window -c "#{pane_current_path}"` and `new-window -c
+"#{pane_current_path}"` inherit the expected directory. The `chpwd` hook emits
+this immediately after `cd`; `precmd` repeats it as a final synchronization
+point before command completion.
+
+The OSC 777 `cwd` marker is stripped by Tide and used internally. The OSC 7
+`file://...` marker is passed through for terminals/tmux versions that track
+working directories via standard terminal cwd reporting.
 
 ## Prompt Redraw Widget
 
@@ -77,5 +97,5 @@ correctly.  Users and developers can invoke it manually for debugging.
 - Do not overwrite existing `preexec` or `precmd` functions.
 - Use `add-zsh-hook` to append hooks.
 - Rust must strip markers before text enters `ShellBuffer`.
+- Non-Tide OSC sequences such as OSC 7 must pass through unchanged.
 - Markers must never appear in Normal View.
-

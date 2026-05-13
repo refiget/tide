@@ -120,7 +120,7 @@ Shared agent integration (MVP):
 - Inject shared synthetic blocks (`origin=shared`, `synthetic=true`, `actions=jump_only`).
 - `i` on shared block jumps by tmux target and records jump stack entry.
 - `Ctrl-B` first attempts jump-back; only enters Block View in shell-normal state.
-- On shell `precmd` with cwd, Tide also updates its own process cwd so tmux pane path tracking stays aligned.
+- On shell `chpwd` and `precmd` cwd markers, Tide updates its own process cwd so tmux pane path tracking stays aligned. The zsh integration also emits OSC 7 cwd sequences, which Tide passes through unchanged.
 
 ### block.rs
 
@@ -158,7 +158,7 @@ Also exposes `enter_block_render()` / `leave_block_render()` for alternate scree
 
 ### shell_hooks.rs
 
-Owns zsh hook definitions (`install_script()`), the `Osc777Parser` that strips invisible OSC 777 markers from PTY output, and marker parsing (`parse_block_marker`).
+Owns zsh hook definitions (`install_script()`), the `Osc777Parser` that strips invisible OSC 777 markers from PTY output, and marker parsing (`parse_block_marker`). Tide markers include command start/end and immediate cwd updates; non-Tide OSC sequences remain visible to the terminal.
 
 ### agent_registry.rs
 

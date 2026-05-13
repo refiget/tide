@@ -2,6 +2,7 @@
 pub enum ShellHookEvent {
     Preexec { command: String },
     Precmd { exit_code: i32, cwd: Option<String> },
+    CwdChanged { cwd: String },
     AltScreenEnter,
     AltScreenExit,
 }
@@ -37,7 +38,9 @@ impl Osc777Parser {
 
             // Drain anything before the ESC as visible.
             if esc_pos > 0 {
-                parts.push(ParsedPtyPart::Visible(self.pending.drain(..esc_pos).collect()));
+                parts.push(ParsedPtyPart::Visible(
+                    self.pending.drain(..esc_pos).collect(),
+                ));
             }
 
             // We are at the start of an ESC sequence.
@@ -56,7 +59,9 @@ impl Osc777Parser {
                         None => {
                             if self.pending.len() > MAX_PENDING_ESC {
                                 // Buffer overflow or malformed. Flush the ESC and continue.
-                                parts.push(ParsedPtyPart::Visible(self.pending.drain(..1).collect()));
+                                parts.push(ParsedPtyPart::Visible(
+                                    self.pending.drain(..1).collect(),
+                                ));
                                 continue;
                             }
                             break; // Incomplete sequence.
@@ -73,7 +78,9 @@ impl Osc777Parser {
                         None => {
                             if self.pending.len() > MAX_PENDING_ESC {
                                 // Buffer overflow or malformed. Flush the ESC and continue.
-                                parts.push(ParsedPtyPart::Visible(self.pending.drain(..1).collect()));
+                                parts.push(ParsedPtyPart::Visible(
+                                    self.pending.drain(..1).collect(),
+                                ));
                                 continue;
                             }
                             break; // Incomplete sequence.
@@ -96,7 +103,11 @@ impl Osc777Parser {
     fn try_parse_csi(&mut self) -> Option<Vec<ParsedPtyPart>> {
         // Find the terminator (usually 'h', 'l', 'm', etc.)
         // CSI sequences end with a byte in the range 0x40-0x7E.
-        let end_pos = self.pending.iter().skip(2).position(|&b| (0x40..=0x7E).contains(&b))?;
+        let end_pos = self
+            .pending
+            .iter()
+            .skip(2)
+            .position(|&b| (0x40..=0x7E).contains(&b))?;
         let end_pos = end_pos + 2;
         let terminator = self.pending[end_pos];
         let raw_seq = self.pending.drain(..=end_pos).collect::<Vec<u8>>();
@@ -107,7 +118,7 @@ impl Osc777Parser {
         if raw_seq.starts_with(b"\x1b[?") && (terminator == b'h' || terminator == b'l') {
             let is_enter = terminator == b'h';
             let params_str = std::str::from_utf8(&raw_seq[3..raw_seq.len() - 1]).ok()?;
-            
+
             let mut affects_alt = false;
             for param in params_str.split(';') {
                 if param == "47" || param == "1047" || param == "1049" {
@@ -115,7 +126,7 @@ impl Osc777Parser {
                     break;
                 }
             }
-            
+
             if affects_alt {
                 parts.push(ParsedPtyPart::Event(if is_enter {
                     ShellHookEvent::AltScreenEnter
@@ -173,10 +184,18 @@ _tide_preexec() {
   printf '\033]777;block_start;cmd=hex:%s\a' "$cmd"
 }
 
+_tide_emit_cwd() {
+  local cwd="$PWD"
+  cwd="$(_tide_escape_osc "$cwd")"
+  printf '\033]777;cwd;cwd=hex:%s\a' "$cwd"
+  printf '\033]7;file://%s%s\a' "${HOST:-localhost}" "$PWD"
+}
+
 _tide_precmd() {
   local ec=$?
   local cwd="$PWD"
   cwd="$(_tide_escape_osc "$cwd")"
+  _tide_emit_cwd
   printf '\033]777;block_end;exit=%d;cwd=hex:%s\a' "$ec" "$cwd"
 }
 
@@ -191,6 +210,7 @@ bindkey '^X^R' _tide_redraw_prompt 2>/dev/null
 
 add-zsh-hook preexec _tide_preexec
 add-zsh-hook precmd _tide_precmd
+add-zsh-hook chpwd _tide_emit_cwd
 "#
 }
 
@@ -209,6 +229,12 @@ fn parse_block_marker(text: &str) -> Option<ShellHookEvent> {
     if let Some(payload) = text.strip_prefix("block_start;cmd=") {
         return Some(ShellHookEvent::Preexec {
             command: decode_payload(payload)?,
+        });
+    }
+
+    if let Some(payload) = text.strip_prefix("cwd;cwd=") {
+        return Some(ShellHookEvent::CwdChanged {
+            cwd: decode_payload(payload)?,
         });
     }
 
@@ -257,6 +283,8 @@ mod tests {
 
         assert!(script.contains("add-zsh-hook preexec _tide_preexec"));
         assert!(script.contains("add-zsh-hook precmd _tide_precmd"));
+        assert!(script.contains("add-zsh-hook chpwd _tide_emit_cwd"));
+        assert!(script.contains("file://"));
         assert!(script.contains("block_start"));
         assert!(script.contains("block_end"));
         assert!(!script.contains("PROMPT="));
@@ -292,6 +320,29 @@ mod tests {
                 cwd: Some("/tmp".to_string()),
             })]
         );
+    }
+
+    #[test]
+    fn strips_cwd_marker_from_visible_output() {
+        let mut parser = Osc777Parser::default();
+        let parsed =
+            parser.push(b"\x1b]777;cwd;cwd=hex:2f55736572732f626f622f50726f6a65637473\x07");
+
+        assert_eq!(
+            parsed,
+            vec![ParsedPtyPart::Event(ShellHookEvent::CwdChanged {
+                cwd: "/Users/bob/Projects".to_string(),
+            })]
+        );
+    }
+
+    #[test]
+    fn passes_osc7_cwd_sequence_through() {
+        let mut parser = Osc777Parser::default();
+        let raw = b"\x1b]7;file://host/Users/bob/Projects\x07";
+        let parsed = parser.push(raw);
+
+        assert_eq!(parsed, vec![ParsedPtyPart::Visible(raw.to_vec())]);
     }
 
     #[test]
@@ -370,59 +421,74 @@ mod tests {
     #[test]
     fn handles_fragmented_alt_screen_sequence() {
         let mut parser = Osc777Parser::default();
-        
+
         // Split ESC [ ?
         let first = parser.push(b"out\x1b[");
         assert_eq!(first, vec![ParsedPtyPart::Visible(b"out".to_vec())]);
-        
+
         // Split 1049h
         let second = parser.push(b"?10");
         assert_eq!(second, vec![]);
-        
+
         let third = parser.push(b"49hmore");
-        assert_eq!(third, vec![
-            ParsedPtyPart::Visible(b"\x1b[?1049h".to_vec()),
-            ParsedPtyPart::Event(ShellHookEvent::AltScreenEnter),
-            ParsedPtyPart::Visible(b"more".to_vec())
-        ]);
+        assert_eq!(
+            third,
+            vec![
+                ParsedPtyPart::Visible(b"\x1b[?1049h".to_vec()),
+                ParsedPtyPart::Event(ShellHookEvent::AltScreenEnter),
+                ParsedPtyPart::Visible(b"more".to_vec())
+            ]
+        );
     }
 
     #[test]
     fn handles_batched_csi_private_parameters() {
         let mut parser = Osc777Parser::default();
-        
+
         // Batched Enter: 1047;1048h -> AltScreenEnter (1047 wins)
         let parsed = parser.push(b"\x1b[?1047;1048h");
-        assert_eq!(parsed, vec![
-            ParsedPtyPart::Visible(b"\x1b[?1047;1048h".to_vec()),
-            ParsedPtyPart::Event(ShellHookEvent::AltScreenEnter)
-        ]);
-        
+        assert_eq!(
+            parsed,
+            vec![
+                ParsedPtyPart::Visible(b"\x1b[?1047;1048h".to_vec()),
+                ParsedPtyPart::Event(ShellHookEvent::AltScreenEnter)
+            ]
+        );
+
         // Batched Exit: 47;1048;1049l -> AltScreenExit (47 and 1049 win)
         let parsed = parser.push(b"\x1b[?47;1048;1049l");
-        assert_eq!(parsed, vec![
-            ParsedPtyPart::Visible(b"\x1b[?47;1048;1049l".to_vec()),
-            ParsedPtyPart::Event(ShellHookEvent::AltScreenExit)
-        ]);
+        assert_eq!(
+            parsed,
+            vec![
+                ParsedPtyPart::Visible(b"\x1b[?47;1048;1049l".to_vec()),
+                ParsedPtyPart::Event(ShellHookEvent::AltScreenExit)
+            ]
+        );
     }
 
     #[test]
     fn non_alt_screen_csi_preserved_as_raw_bytes() {
         let mut parser = Osc777Parser::default();
         let parsed = parser.push(b"\x1b[?1048h");
-        assert_eq!(parsed, vec![ParsedPtyPart::Visible(b"\x1b[?1048h".to_vec())]);
+        assert_eq!(
+            parsed,
+            vec![ParsedPtyPart::Visible(b"\x1b[?1048h".to_vec())]
+        );
     }
 
     #[test]
     fn interleaved_text_and_csi() {
         let mut parser = Osc777Parser::default();
         let parsed = parser.push(b"text\x1b[?1049hmore");
-        assert_eq!(parsed, vec![
-            ParsedPtyPart::Visible(b"text".to_vec()),
-            ParsedPtyPart::Visible(b"\x1b[?1049h".to_vec()),
-            ParsedPtyPart::Event(ShellHookEvent::AltScreenEnter),
-            ParsedPtyPart::Visible(b"more".to_vec()),
-        ]);
+        assert_eq!(
+            parsed,
+            vec![
+                ParsedPtyPart::Visible(b"text".to_vec()),
+                ParsedPtyPart::Visible(b"\x1b[?1049h".to_vec()),
+                ParsedPtyPart::Event(ShellHookEvent::AltScreenEnter),
+                ParsedPtyPart::Visible(b"more".to_vec()),
+            ]
+        );
     }
 
     #[test]

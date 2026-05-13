@@ -1,5 +1,5 @@
-mod ansi;
 mod agent_registry;
+mod ansi;
 mod app;
 mod block;
 mod block_export;

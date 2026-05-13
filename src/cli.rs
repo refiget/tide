@@ -94,10 +94,7 @@ fn parse_export_args_from_iter(raw: Vec<String>) -> Result<ExportArgs> {
             }
             "--truncated" => truncated = parse_bool(val)?,
             _ => {
-                return Err(anyhow!(
-                    "unknown option `{key}`\n\n{}",
-                    export_help()
-                ));
+                return Err(anyhow!("unknown option `{key}`\n\n{}", export_help()));
             }
         }
         i += 2;
@@ -128,7 +125,9 @@ fn parse_part(s: &str) -> Result<ExportPart> {
         "command" => Ok(ExportPart::Command),
         "output" => Ok(ExportPart::Output),
         "both" => Ok(ExportPart::Both),
-        _ => Err(anyhow!("invalid --part `{s}` (expected command|output|both)")),
+        _ => Err(anyhow!(
+            "invalid --part `{s}` (expected command|output|both)"
+        )),
     }
 }
 
