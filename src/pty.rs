@@ -78,8 +78,11 @@ pub fn run_shell(config: &Config) -> Result<()> {
         .openpty(current_pty_size())
         .context("failed to open PTY")?;
 
+    let initial_cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+
     let mut command = CommandBuilder::new(&config.shell.program);
     command.arg("-i");
+    command.cwd(initial_cwd.clone());
     command.env(
         "TERM",
         std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string()),
@@ -116,7 +119,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
     let state = Arc::new(Mutex::new(RuntimeState {
         shell: ShellBuffer::new(),
         blocks: BlockStore::new(
-            std::env::current_dir().unwrap_or_else(|_| ".".into()),
+            initial_cwd,
             runtime_config.max_blocks,
             config.blocks.max_output_bytes_per_block,
         ),
