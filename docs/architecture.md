@@ -114,11 +114,13 @@ Block View uses a visual-line viewport: selection moves by block, but the viewpo
 
 Input handler dispatches through configurable keymaps (`resolved_block_keymap`, `resolved_detail_keymap`) for single-byte actions. Esc sequences (`\x1b[A`, `\x1b[B`) are hardcoded.
 
-Shared agent integration (MVP):
-- Detect provider runtime (`opencode` currently) from command/process context.
-- Register running sessions into `agent_registry`.
-- Inject shared synthetic blocks (`origin=shared`, `synthetic=true`, `actions=jump_only`).
-- `i` on shared block jumps by tmux target and records jump stack entry.
+Shared agent integration:
+- Per-provider config in `RuntimeConfig.agents: HashMap<AgentProvider, AgentShareConfig>`.
+- Detect provider runtime from command name or TTY process scan (`detect_and_register_agents`).
+- Register running sessions into `agent_registry`; unregister on `precmd`.
+- Inject synthetic shared blocks (`origin=Shared`, `synthetic=true`, `actions=JumpOnly`, `agent_ref=Some(AgentRef{provider,alias})`).
+- `i` on a shared block reads `block.agent_ref`, looks up tmux target via registry, and jumps.
+- Jump-back via file-backed `agent_registry` jump stack (`write_last_jump` / `pop_jump_for_target`).
 - `Ctrl-B` first attempts jump-back; only enters Block View in shell-normal state.
 - On shell `chpwd` and `precmd` cwd markers, Tide updates its own process cwd so tmux pane path tracking stays aligned. The zsh integration also emits OSC 7 cwd sequences, which Tide passes through unchanged.
 

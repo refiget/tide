@@ -9,10 +9,32 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentProvider {
     Opencode,
+}
+
+impl AgentProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentProvider::Opencode => "opencode",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "opencode" => Some(AgentProvider::Opencode),
+            _ => None,
+        }
+    }
+}
+
+/// Lightweight reference to a running agent session (provider + registry alias).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRef {
+    pub provider: AgentProvider,
+    pub alias: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

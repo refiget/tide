@@ -17,6 +17,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use signal_hook::{consts::signal::SIGWINCH, iterator::Signals};
 
 use crate::{
+    agent_registry::{AgentProvider, AgentRef},
     app::{
         BlockAction, BlockActionScope, BlockId, BlockKind, BlockOrigin, BlockStatus,
         BlockViewAction, ConfirmKind, ConfirmState, DEFAULT_TUI_COMMANDS, DetailViewAction,
@@ -26,7 +27,7 @@ use crate::{
     block::BlockStore,
     buffer::ShellBuffer,
     compositor::Compositor,
-    config::{Config, RuntimeConfig, build_runtime_config},
+    config::{AgentShareConfig, Config, RuntimeConfig, build_runtime_config},
     format::{CopyFormat, CopyPart, format_blocks},
     renderer::{self, BLOCK_HELP_ENTRIES, DETAIL_HELP_ENTRIES},
     shell_hooks::{Osc777Parser, ParsedPtyPart, ShellHookEvent},
@@ -49,8 +50,8 @@ struct RuntimeState {
     /// Whether Tide's own UI (Block View) is currently in an alternate screen buffer.
     tide_alt_screen_active: bool,
     tide_id: String,
-    opencode_by_block: HashMap<BlockId, String>,
-    opencode_jump_stack: Vec<String>,
+    /// Tracks blocks in this Tide session that are running agent processes.
+    agent_blocks: HashMap<BlockId, AgentRef>,
     shell_command_running: bool,
 }
 
@@ -134,8 +135,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
         pty_alt_screen_active: false,
         tide_alt_screen_active: false,
         tide_id: format!("tide-{}", std::process::id()),
-        opencode_by_block: HashMap::new(),
-        opencode_jump_stack: Vec::new(),
+        agent_blocks: HashMap::new(),
         shell_command_running: false,
     }));
     let stdout = Arc::new(Mutex::new(io::stdout()));
@@ -545,19 +545,26 @@ fn detect_tui_app(
     None
 }
 
-fn is_opencode_command(command_line: &str) -> bool {
-    matches!(
-        extract_command_name(command_line).as_deref(),
-        Some("opencode")
-    )
+fn is_agent_command(command_line: &str, cfg: &AgentShareConfig) -> bool {
+    if let Some(name) = extract_command_name(command_line) {
+        cfg.command_match.iter().any(|m| m == &name)
+    } else {
+        false
+    }
 }
 
-fn is_opencode_process_command(command: &str) -> bool {
+fn is_agent_process_command(command: &str, cfg: &AgentShareConfig) -> bool {
     let Some(exe) = command.split_whitespace().next() else {
         return false;
     };
     let base = exe.rsplit('/').next().unwrap_or(exe).to_ascii_lowercase();
-    base == "opencode" || base.starts_with("opencode-")
+    cfg.process_prefixes.iter().any(|prefix| {
+        if prefix.ends_with('-') {
+            base.starts_with(prefix.as_str())
+        } else {
+            base == prefix.as_str() || base.starts_with(&format!("{}-", prefix))
+        }
+    })
 }
 
 fn tmux_current_tty() -> Option<String> {
@@ -592,10 +599,9 @@ fn tmux_current_window_id() -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-fn tty_has_opencode_process(tty_path: &str) -> bool {
+fn tty_has_agent_process(tty_path: &str, cfg: &AgentShareConfig) -> bool {
     let tty = tty_path.strip_prefix("/dev/").unwrap_or(tty_path);
-    let out = Command::new("ps").args(["-axo", "tty=,command="]).output();
-    let Ok(out) = out else {
+    let Ok(out) = Command::new("ps").args(["-axo", "tty=,command="]).output() else {
         return false;
     };
     if !out.status.success() {
@@ -611,15 +617,21 @@ fn tty_has_opencode_process(tty_path: &str) -> bool {
             return false;
         }
         let command = line.trim_start_matches(line_tty).trim_start();
-        is_opencode_process_command(command)
+        is_agent_process_command(command, cfg)
     })
 }
 
-fn register_running_opencode_block(state: &mut RuntimeState, id: BlockId, command: &str) {
-    if !state.config.opencode_share.enabled {
+fn register_running_agent_block(
+    state: &mut RuntimeState,
+    id: BlockId,
+    command: &str,
+    provider: AgentProvider,
+    cfg: &AgentShareConfig,
+) {
+    if !cfg.enabled {
         return;
     }
-    if state.opencode_by_block.contains_key(&id) {
+    if state.agent_blocks.contains_key(&id) {
         return;
     }
     let Some(block) = state.blocks.block(id) else {
@@ -634,19 +646,19 @@ fn register_running_opencode_block(state: &mut RuntimeState, id: BlockId, comman
         .cwd
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "opencode".to_string());
-    let share_command = if state.config.opencode_share.command {
+        .unwrap_or_else(|| cfg.display_name.clone());
+    let share_command = if cfg.command {
         command.to_string()
     } else {
-        "opencode".to_string()
+        cfg.display_name.clone()
     };
-    let share_cwd = match state.config.opencode_share.cwd {
+    let share_cwd = match cfg.cwd {
         crate::config::ShareCwdMode::Full => block.cwd.display().to_string(),
         crate::config::ShareCwdMode::Basename => project.clone(),
         crate::config::ShareCwdMode::None => String::new(),
     };
     if let Ok(alias) = crate::agent_registry::register_running(
-        crate::agent_registry::AgentProvider::Opencode,
+        provider,
         &state.tide_id,
         id.0,
         &share_command,
@@ -656,60 +668,67 @@ fn register_running_opencode_block(state: &mut RuntimeState, id: BlockId, comman
         &pane_id,
         &window_id,
     ) {
-        state.opencode_by_block.insert(id, alias);
+        state.agent_blocks.insert(id, AgentRef { provider, alias });
     }
 }
 
-fn detect_and_register_opencode(state: &mut RuntimeState, id: BlockId, command: &str) {
+fn detect_and_register_agents(state: &mut RuntimeState, id: BlockId, command: &str) {
+    let providers: Vec<(AgentProvider, AgentShareConfig)> = state
+        .config
+        .agents
+        .iter()
+        .map(|(&p, c)| (p, c.clone()))
+        .collect();
+    for (provider, cfg) in providers {
+        detect_and_register_agent(state, id, command, provider, cfg);
+    }
+}
+
+fn detect_and_register_agent(
+    state: &mut RuntimeState,
+    id: BlockId,
+    command: &str,
+    provider: AgentProvider,
+    cfg: AgentShareConfig,
+) {
+    if !cfg.enabled {
+        return;
+    }
     if let Some(tty) = tmux_current_tty() {
         for _ in 0..8 {
-            if tty_has_opencode_process(&tty) {
-                register_running_opencode_block(state, id, command);
+            if tty_has_agent_process(&tty, &cfg) {
+                register_running_agent_block(state, id, command, provider, &cfg);
                 return;
             }
             thread::sleep(Duration::from_millis(25));
         }
     }
-
     // Fallback: direct command match when process probing is unavailable.
-    if is_opencode_command(command) {
-        register_running_opencode_block(state, id, command);
+    if is_agent_command(command, &cfg) {
+        register_running_agent_block(state, id, command, provider, &cfg);
     }
 }
 
-fn is_running_opencode_block(state: &RuntimeState, id: BlockId) -> bool {
-    if state.opencode_by_block.contains_key(&id) {
+fn is_running_agent_block(state: &RuntimeState, id: BlockId) -> bool {
+    if state.agent_blocks.contains_key(&id) {
         return true;
     }
+    // Synthetic shared blocks injected by sync_shared_agent_blocks also count.
     state
         .blocks
         .block(id)
-        .map(|b| {
-            b.status == BlockStatus::Running
-                && b.origin == BlockOrigin::Shared
-                && b.app_name
-                    .as_deref()
-                    .map(|s| s.starts_with("opencode_alias:"))
-                    .unwrap_or(false)
-        })
+        .map(|b| b.synthetic && b.origin == BlockOrigin::Shared && b.agent_ref.is_some())
         .unwrap_or(false)
-}
-
-fn is_shared_opencode_block(block: &crate::app::CommandBlock) -> Option<String> {
-    block
-        .app_name
-        .as_deref()
-        .and_then(|a| a.strip_prefix("opencode_alias:"))
-        .map(|s| s.to_string())
 }
 
 fn block_allows_standard_actions(block: &crate::app::CommandBlock) -> bool {
     block.origin == BlockOrigin::Local && block.actions == BlockActionScope::Full
 }
 
-fn synthetic_opencode_block_id(alias: &str) -> BlockId {
+fn synthetic_agent_block_id(provider: AgentProvider, alias: &str) -> BlockId {
+    let key = format!("{}:{}", provider.as_str(), alias);
     let mut h: u64 = 1469598103934665603;
-    for b in alias.as_bytes() {
+    for b in key.as_bytes() {
         h ^= u64::from(*b);
         h = h.wrapping_mul(1099511628211);
     }
@@ -895,31 +914,48 @@ fn try_global_jump_back(state: &mut RuntimeState) -> bool {
     false
 }
 
-fn sync_shared_opencode_blocks(state: &mut RuntimeState) {
-    if !state.config.opencode_share.enabled {
-        return;
+fn sync_shared_agent_blocks(state: &mut RuntimeState) {
+    let providers: Vec<(AgentProvider, bool)> = state
+        .config
+        .agents
+        .iter()
+        .map(|(&p, c)| (p, c.enabled))
+        .collect();
+    for (provider, enabled) in providers {
+        if enabled {
+            sync_shared_agent_blocks_for_provider(state, provider);
+        }
     }
-    let Ok(records) =
-        crate::agent_registry::list_all(crate::agent_registry::AgentProvider::Opencode)
-    else {
+}
+
+fn sync_shared_agent_blocks_for_provider(state: &mut RuntimeState, provider: AgentProvider) {
+    let Ok(records) = crate::agent_registry::list_all(provider) else {
         return;
     };
 
-    let existing_ids: std::collections::HashSet<BlockId> = state
+    let display_name = state
+        .config
+        .agents
+        .get(&provider)
+        .map(|c| c.display_name.clone())
+        .unwrap_or_else(|| provider.as_str().to_string());
+
+    // Remove existing synthetic blocks for this provider.
+    let to_remove: Vec<BlockId> = state
         .blocks
         .timeline
         .iter()
         .copied()
-        .filter(|id| {
+        .filter(|&id| {
             state
                 .blocks
-                .block(*id)
-                .and_then(is_shared_opencode_block)
-                .is_some()
+                .block(id)
+                .and_then(|b| b.agent_ref.as_ref())
+                .map(|r| r.provider == provider)
+                .unwrap_or(false)
         })
         .collect();
-
-    for id in existing_ids {
+    for id in to_remove {
         state.blocks.remove(id);
     }
 
@@ -930,10 +966,7 @@ fn sync_shared_opencode_blocks(state: &mut RuntimeState) {
         if rec.status == crate::agent_registry::AgentStatus::Running
             && !tmux_target_exists(&rec.tmux_target)
         {
-            let _ = crate::agent_registry::mark_stale(
-                crate::agent_registry::AgentProvider::Opencode,
-                &rec.alias,
-            );
+            let _ = crate::agent_registry::mark_stale(provider, &rec.alias);
         }
 
         let display_status = if tmux_target_exists(&rec.tmux_target) {
@@ -941,13 +974,13 @@ fn sync_shared_opencode_blocks(state: &mut RuntimeState) {
         } else {
             BlockStatus::Unknown
         };
-        let id = synthetic_opencode_block_id(&rec.alias);
+        let id = synthetic_agent_block_id(provider, &rec.alias);
         let cwd = std::path::PathBuf::from(&rec.cwd);
         let project = if rec.project_name.is_empty() {
             Path::new(&rec.cwd)
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "opencode".to_string())
+                .unwrap_or_else(|| display_name.clone())
         } else {
             rec.project_name.clone()
         };
@@ -956,14 +989,17 @@ fn sync_shared_opencode_blocks(state: &mut RuntimeState) {
             id,
             crate::app::CommandBlock {
                 id,
-                command: format!("[{}] opencode {}", rec.alias, project),
+                command: format!("[{}] {} {}", rec.alias, display_name, project),
                 cwd,
                 status: display_status,
                 kind: BlockKind::SystemEvent,
-                app_name: Some(format!("opencode_alias:{}", rec.alias)),
                 origin: BlockOrigin::Shared,
                 synthetic: true,
                 actions: BlockActionScope::JumpOnly,
+                agent_ref: Some(AgentRef {
+                    provider,
+                    alias: rec.alias.clone(),
+                }),
                 ..crate::app::CommandBlock::default()
             },
         );
@@ -971,48 +1007,48 @@ fn sync_shared_opencode_blocks(state: &mut RuntimeState) {
     }
 }
 
-fn move_running_opencode_to_bottom(state: &mut RuntimeState) {
+fn move_running_agents_to_bottom(state: &mut RuntimeState) {
     if state.blocks.timeline.len() < 2 {
         return;
     }
 
     let mut normal = Vec::with_capacity(state.blocks.timeline.len());
-    let mut running_opencode = Vec::new();
+    let mut running = Vec::new();
 
     for &id in &state.blocks.timeline {
-        if is_running_opencode_block(state, id) {
-            running_opencode.push(id);
+        if is_running_agent_block(state, id) {
+            running.push(id);
         } else {
             normal.push(id);
         }
     }
 
-    if running_opencode.is_empty() {
+    if running.is_empty() {
         return;
     }
 
-    normal.extend(running_opencode);
+    normal.extend(running);
     state.blocks.timeline = normal;
 
     let reordered_filtered = match &state.view.visible {
         VisibleSource::Filtered(ids) => {
-            let running: std::collections::HashSet<BlockId> = ids
+            let running_set: std::collections::HashSet<BlockId> = ids
                 .iter()
                 .copied()
-                .filter(|id| is_running_opencode_block(state, *id))
+                .filter(|id| is_running_agent_block(state, *id))
                 .collect();
-            if running.is_empty() {
+            if running_set.is_empty() {
                 None
             } else {
                 let mut non_running: Vec<BlockId> = ids
                     .iter()
                     .copied()
-                    .filter(|id| !running.contains(id))
+                    .filter(|id| !running_set.contains(id))
                     .collect();
                 let mut running_ids: Vec<BlockId> = ids
                     .iter()
                     .copied()
-                    .filter(|id| running.contains(id))
+                    .filter(|id| running_set.contains(id))
                     .collect();
                 non_running.append(&mut running_ids);
                 Some(non_running)
@@ -1092,12 +1128,10 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             state.tui_state = next;
 
             if let Some(id) = state.blocks.active_block_id() {
-                detect_and_register_opencode(state, id, &command);
+                detect_and_register_agents(state, id, &command);
             }
-
-            // Pin running opencode blocks to the bottom in Block View.
-            sync_shared_opencode_blocks(state);
-            move_running_opencode_to_bottom(state);
+            sync_shared_agent_blocks(state);
+            move_running_agents_to_bottom(state);
             sync_block_viewport_after_history_change(state);
         }
         ShellHookEvent::Precmd { exit_code, cwd } => {
@@ -1136,9 +1170,9 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
                 }
             }
             if let Some(id) = active_id {
-                if state.opencode_by_block.remove(&id).is_some() {
+                if let Some(agent_ref) = state.agent_blocks.remove(&id) {
                     let _ = crate::agent_registry::unregister_running(
-                        crate::agent_registry::AgentProvider::Opencode,
+                        agent_ref.provider,
                         &state.tide_id,
                         id.0,
                     );
@@ -1162,8 +1196,8 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
                     }
                 }
             }
-            sync_shared_opencode_blocks(state);
-            move_running_opencode_to_bottom(state);
+            sync_shared_agent_blocks(state);
+            move_running_agents_to_bottom(state);
         }
     }
 }
@@ -1486,8 +1520,8 @@ fn flush_render_state(state: &mut RuntimeState) -> bool {
 }
 
 fn enter_block_view(state: &mut RuntimeState) {
-    sync_shared_opencode_blocks(state);
-    move_running_opencode_to_bottom(state);
+    sync_shared_agent_blocks(state);
+    move_running_agents_to_bottom(state);
     state.view.view = ViewKind::Blocks;
     state.view.expanded_block = None;
     select_tail_block(state);
@@ -1673,9 +1707,8 @@ fn rebuild_visible(state: &mut RuntimeState) {
         }
     }
 
-    // Keep running opencode blocks at the end even in filtered lists.
-    sync_shared_opencode_blocks(state);
-    move_running_opencode_to_bottom(state);
+    sync_shared_agent_blocks(state);
+    move_running_agents_to_bottom(state);
 }
 
 fn restore_or_clamp_selection(state: &mut RuntimeState) {
@@ -1965,12 +1998,12 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
         }
         BlockViewAction::DetailView => {
             if let Some(selected) = state.view.selected_block {
-                if let Some(block) = state.blocks.block(selected)
-                    && let Some(alias) = is_shared_opencode_block(block)
-                    && let Ok(Some(rec)) = crate::agent_registry::find_by_alias(
-                        crate::agent_registry::AgentProvider::Opencode,
-                        &alias,
-                    )
+                if let Some(agent_ref) = state
+                    .blocks
+                    .block(selected)
+                    .and_then(|b| b.agent_ref.clone())
+                    && let Ok(Some(rec)) =
+                        crate::agent_registry::find_by_alias(agent_ref.provider, &agent_ref.alias)
                 {
                     let jump_target = if !rec.tmux_pane_id.is_empty() {
                         rec.tmux_pane_id.clone()
@@ -1979,7 +2012,6 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                     };
                     if tmux_target_exists(&jump_target) {
                         if let Some(cur) = tmux_current_target() {
-                            state.opencode_jump_stack.push(cur.clone());
                             let from_zoomed = tmux_window_zoomed(&cur).unwrap_or(false);
                             let _ = crate::agent_registry::write_last_jump(
                                 &cur,
@@ -1989,14 +2021,16 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                         }
                         if tmux_jump_and_zoom(&jump_target) {
                             state.render_state.flash_message =
-                                Some((format!("jumped [{}]", alias), Instant::now()));
+                                Some((format!("jumped [{}]", agent_ref.alias), Instant::now()));
                         } else {
-                            state.render_state.flash_message =
-                                Some((format!("jump failed [{}]", alias), Instant::now()));
+                            state.render_state.flash_message = Some((
+                                format!("jump failed [{}]", agent_ref.alias),
+                                Instant::now(),
+                            ));
                         }
                     } else {
                         state.render_state.flash_message =
-                            Some((format!("stale [{}]", alias), Instant::now()));
+                            Some((format!("stale [{}]", agent_ref.alias), Instant::now()));
                     }
                     state.render_state.dirty = true;
                     state.render_state.force_render = true;
@@ -2333,18 +2367,6 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
 
     if byte == b'b' {
         if try_global_jump_back(state) {
-            state.render_state.dirty = true;
-            state.render_state.force_render = true;
-            return true;
-        }
-        if let Some(target) = state.opencode_jump_stack.pop() {
-            if tmux_target_exists(&target) && tmux_jump_and_zoom(&target) {
-                state.render_state.flash_message =
-                    Some(("jumped back".to_string(), Instant::now()));
-            } else {
-                state.render_state.flash_message =
-                    Some(("back target missing".to_string(), Instant::now()));
-            }
             state.render_state.dirty = true;
             state.render_state.force_render = true;
             return true;
@@ -2766,8 +2788,7 @@ mod tests {
             pty_alt_screen_active: false,
             tide_alt_screen_active: false,
             tide_id: "test".to_string(),
-            opencode_by_block: HashMap::new(),
-            opencode_jump_stack: Vec::new(),
+            agent_blocks: HashMap::new(),
             shell_command_running: false,
         }
     }
@@ -3983,18 +4004,27 @@ mod tests {
         assert_eq!(extract_command_name("/usr/bin/nvim"), Some("nvim".into()));
     }
 
+    fn opencode_agent_cfg() -> crate::config::AgentShareConfig {
+        let mut cfg = crate::config::AgentShareConfig::default();
+        crate::config::fill_agent_defaults_pub(AgentProvider::Opencode, &mut cfg);
+        cfg
+    }
+
     #[test]
-    fn opencode_process_detection_matches_real_binary_path() {
-        assert!(is_opencode_process_command(
-            "/opt/homebrew/Cellar/opencode/1.14.40/libexec/lib/node_modules/opencode-ai/node_modules/opencode-darwin-arm64/bin/opencode"
+    fn agent_process_detection_matches_real_binary_path() {
+        let cfg = opencode_agent_cfg();
+        assert!(is_agent_process_command(
+            "/opt/homebrew/Cellar/opencode/1.14.40/libexec/lib/node_modules/opencode-ai/node_modules/opencode-darwin-arm64/bin/opencode",
+            &cfg
         ));
     }
 
     #[test]
-    fn opencode_process_detection_rejects_text_mentions() {
-        assert!(!is_opencode_process_command("vim opencode.md"));
-        assert!(!is_opencode_process_command("cat opencode.log"));
-        assert!(!is_opencode_process_command("echo opencode"));
+    fn agent_process_detection_rejects_text_mentions() {
+        let cfg = opencode_agent_cfg();
+        assert!(!is_agent_process_command("vim opencode.md", &cfg));
+        assert!(!is_agent_process_command("cat opencode.log", &cfg));
+        assert!(!is_agent_process_command("echo opencode", &cfg));
     }
 
     // ─── detect_tui_app tests ────────────────────────────────────────────

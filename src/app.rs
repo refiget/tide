@@ -6,6 +6,8 @@ use std::{
     time::{Instant, SystemTime},
 };
 
+pub use crate::agent_registry::AgentRef;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BlockId(pub u64);
 
@@ -422,6 +424,8 @@ pub struct CommandBlock {
     pub synthetic: bool,
     /// Action boundary for UI operations.
     pub actions: BlockActionScope,
+    /// Set when this block represents a shared agent session from another Tide instance.
+    pub agent_ref: Option<AgentRef>,
 }
 
 impl Default for CommandBlock {
@@ -447,6 +451,7 @@ impl Default for CommandBlock {
             origin: BlockOrigin::Local,
             synthetic: false,
             actions: BlockActionScope::Full,
+            agent_ref: None,
         }
     }
 }

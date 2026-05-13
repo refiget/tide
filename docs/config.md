@@ -243,20 +243,43 @@ Future versions may use this or a replacement setting as metadata for labeling i
 
 ## Shared Agent Registry
 
-Tide supports sharing minimal agent navigation state between instances (current provider: `opencode`).
+Tide supports sharing minimal agent navigation state between instances. Each agent provider is configured independently under `[agents.<provider>]`.
 
 ```toml
-[opencode_share]
+[agents.opencode]
 enabled = true
-cwd = "basename"   # "full" | "basename" | "none"
+cwd = "basename"           # "full" | "basename" | "none"
 command = true
+command_match = ["opencode"]          # command names that trigger detection
+process_prefixes = ["opencode", "opencode-"]  # TTY process-scan prefixes
+display_name = "opencode"             # label shown in Block View
 ```
 
-- `enabled` — enable shared agent block sync and jump behavior.
-- `cwd` — privacy level for shared cwd in registry:
-  - `"full"` stores full cwd path
-  - `"basename"` stores only last path component
-  - `"none"` stores no cwd
-- `command` — whether to share original command text (`false` stores generic `"opencode"`).
+All fields have sensible provider defaults and can be omitted. The minimal config is just:
+
+```toml
+[agents.opencode]
+enabled = true
+```
+
+### Fields
+
+- `enabled` — enable shared block sync and tmux jump behavior for this provider.
+- `cwd` — privacy level for the cwd stored in the registry:
+  - `"full"` — full path
+  - `"basename"` — last path component only (default)
+  - `"none"` — no cwd stored
+- `command` — share the original command text; `false` stores only the display name.
+- `command_match` — list of command names that identify this agent on `preexec`. When empty, the provider default is used.
+- `process_prefixes` — binary name prefixes used for TTY process scanning (handles versioned / platform-suffixed binaries). When empty, the provider default is used.
+- `display_name` — label used in Block View synthetic block titles. When empty, the provider name is used.
+
+### Adding a new provider
+
+Add a new `[agents.<name>]` section. The provider name must match a variant in `AgentProvider` (currently: `opencode`).
+
+### Backward compatibility
+
+The legacy `[opencode_share]` section is still accepted and maps to `[agents.opencode]`. It is ignored when `[agents.opencode]` is present.
 
 The shared registry stores navigation state only (alias, tmux target, status metadata). It does not store command output, prompt/reply content, or full session context.

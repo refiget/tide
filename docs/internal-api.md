@@ -27,8 +27,7 @@ struct RuntimeState {
     pty_alt_screen_active: bool,
     tide_alt_screen_active: bool,
     tide_id: String,
-    opencode_by_block: HashMap<BlockId, String>,
-    opencode_jump_stack: Vec<String>,
+    agent_blocks: HashMap<BlockId, AgentRef>,
     shell_command_running: bool,
     rows: u16,
     cols: u16,
@@ -112,6 +111,7 @@ pub struct CommandBlock {
     pub origin: BlockOrigin,
     pub synthetic: bool,
     pub actions: BlockActionScope,
+    pub agent_ref: Option<AgentRef>,
 }
 ```
 
@@ -165,10 +165,22 @@ pub enum BlockActionScope {
 }
 ```
 
-Shared synthetic blocks are marked `origin=Shared`, `synthetic=true`, `actions=JumpOnly`.
+Shared synthetic blocks are marked `origin=Shared`, `synthetic=true`, `actions=JumpOnly`, and carry a typed `agent_ref: Some(AgentRef { provider, alias })`.
 They are rendered in Block View but are excluded from local-history operations such as copy/rerun/delete/export flows.
 
-## Agent Registry (MVP)
+## AgentRef
+
+```rust
+pub struct AgentRef {
+    pub provider: AgentProvider,
+    pub alias: String,
+}
+```
+
+Lightweight reference stored on `CommandBlock.agent_ref` for synthetic shared agent blocks.
+Replaces the old `app_name: Some("opencode_alias:…")` string-prefix hack.
+
+## Agent Registry
 
 ```rust
 pub enum AgentProvider { Opencode }

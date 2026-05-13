@@ -69,6 +69,7 @@ impl BlockStore {
                 origin: BlockOrigin::Local,
                 synthetic: false,
                 actions: BlockActionScope::Full,
+                agent_ref: None,
                 kind,
                 status: BlockStatus::Running,
                 git_context: None,

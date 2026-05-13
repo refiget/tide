@@ -9,6 +9,7 @@ use std::{
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::agent_registry::AgentProvider;
 use crate::app::{BlockViewAction, DetailViewAction, ReturnPanelTarget};
 use crate::format::CopyFormat;
 
@@ -34,8 +35,12 @@ pub struct Config {
     pub tui: TuiConfig,
     #[serde(default)]
     pub keymap: KeymapConfig,
+    /// New-style per-provider agent config: `[agents.opencode]`, `[agents.aider]`, …
     #[serde(default)]
-    pub opencode_share: OpencodeShareConfig,
+    pub agents: BTreeMap<String, AgentShareConfig>,
+    /// Backward-compat alias for `[agents.opencode]`. Ignored when `[agents.opencode]` is present.
+    #[serde(default)]
+    pub opencode_share: Option<AgentShareConfig>,
 }
 
 impl Config {
@@ -93,7 +98,8 @@ impl Default for Config {
             tui_apps: BTreeMap::new(),
             tui: TuiConfig::default(),
             keymap: KeymapConfig::default(),
-            opencode_share: OpencodeShareConfig::default(),
+            agents: BTreeMap::new(),
+            opencode_share: None,
         }
     }
 }
@@ -117,8 +123,8 @@ pub struct RuntimeConfig {
     pub tui_extra_commands: Vec<String>,
     /// Per-app TUI configuration from `[tui.apps]` or `[tui_apps]`.
     pub tui_apps: BTreeMap<String, TuiAppConfig>,
-    /// Shared opencode registry privacy controls.
-    pub opencode_share: OpencodeShareConfig,
+    /// Per-provider agent share configs, keyed by provider.
+    pub agents: HashMap<AgentProvider, AgentShareConfig>,
 }
 
 fn deserialize_block_action(s: &str) -> Option<BlockViewAction> {
@@ -263,6 +269,23 @@ pub fn build_runtime_config(config: Config) -> RuntimeConfig {
         merged_apps.insert(name, app);
     }
 
+    // Build per-provider agent configs.
+    // New-style `[agents.opencode]` takes precedence; fall back to legacy `[opencode_share]`.
+    let mut agents: HashMap<AgentProvider, AgentShareConfig> = HashMap::new();
+    for (name, mut cfg) in config.agents {
+        if let Some(provider) = AgentProvider::from_str(&name) {
+            fill_agent_defaults(provider, &mut cfg);
+            agents.insert(provider, cfg);
+        }
+    }
+    if !agents.contains_key(&AgentProvider::Opencode) {
+        let mut cfg = config
+            .opencode_share
+            .unwrap_or_else(AgentShareConfig::default);
+        fill_agent_defaults(AgentProvider::Opencode, &mut cfg);
+        agents.insert(AgentProvider::Opencode, cfg);
+    }
+
     RuntimeConfig {
         block_layout: config.block_layout,
         block_view: config.block_view,
@@ -271,26 +294,64 @@ pub fn build_runtime_config(config: Config) -> RuntimeConfig {
         resolved_detail_keymap: build_resolved_detail_keymap(&config.keymap.detail),
         tui_extra_commands: config.tui.extra_commands,
         tui_apps: merged_apps,
-        opencode_share: config.opencode_share,
+        agents,
+    }
+}
+
+/// Fill provider-specific detection defaults for fields left empty in config.
+pub fn fill_agent_defaults_pub(provider: AgentProvider, cfg: &mut AgentShareConfig) {
+    fill_agent_defaults(provider, cfg);
+}
+
+fn fill_agent_defaults(provider: AgentProvider, cfg: &mut AgentShareConfig) {
+    if cfg.command_match.is_empty() {
+        cfg.command_match = match provider {
+            AgentProvider::Opencode => vec!["opencode".to_string()],
+        };
+    }
+    if cfg.process_prefixes.is_empty() {
+        cfg.process_prefixes = match provider {
+            AgentProvider::Opencode => {
+                vec!["opencode".to_string(), "opencode-".to_string()]
+            }
+        };
+    }
+    if cfg.display_name.is_empty() {
+        cfg.display_name = provider.as_str().to_string();
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct OpencodeShareConfig {
+pub struct AgentShareConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
     pub cwd: ShareCwdMode,
     #[serde(default = "default_true")]
     pub command: bool,
+    /// Command names that trigger agent detection (e.g. `["opencode"]`).
+    /// When empty, provider defaults are used.
+    #[serde(default)]
+    pub command_match: Vec<String>,
+    /// Process name prefixes used for TTY process scan (e.g. `["opencode", "opencode-"]`).
+    /// When empty, provider defaults are used.
+    #[serde(default)]
+    pub process_prefixes: Vec<String>,
+    /// Label shown in Block View for shared sessions (e.g. `"opencode"`).
+    /// When empty, the provider name is used.
+    #[serde(default)]
+    pub display_name: String,
 }
 
-impl Default for OpencodeShareConfig {
+impl Default for AgentShareConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             cwd: ShareCwdMode::Basename,
             command: true,
+            command_match: Vec::new(),
+            process_prefixes: Vec::new(),
+            display_name: String::new(),
         }
     }
 }
