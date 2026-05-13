@@ -70,6 +70,7 @@ impl BlockStore {
                 synthetic: false,
                 actions: BlockActionScope::Full,
                 agent_ref: None,
+                live_snapshot: None,
                 kind,
                 status: BlockStatus::Running,
                 git_context: None,

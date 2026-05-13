@@ -121,6 +121,8 @@ pub struct RuntimeConfig {
     pub resolved_detail_keymap: HashMap<u8, DetailViewAction>,
     /// Extra TUI commands from user config (merged with builtins).
     pub tui_extra_commands: Vec<String>,
+    /// Commands that should suspend capture immediately.
+    pub tui_always_suspend_commands: Vec<String>,
     /// Per-app TUI configuration from `[tui.apps]` or `[tui_apps]`.
     pub tui_apps: BTreeMap<String, TuiAppConfig>,
     /// Per-provider agent share configs, keyed by provider.
@@ -293,6 +295,7 @@ pub fn build_runtime_config(config: Config) -> RuntimeConfig {
         resolved_block_keymap: build_resolved_block_keymap(&config.keymap.blocks),
         resolved_detail_keymap: build_resolved_detail_keymap(&config.keymap.detail),
         tui_extra_commands: config.tui.extra_commands,
+        tui_always_suspend_commands: config.tui.always_suspend_commands,
         tui_apps: merged_apps,
         agents,
     }
@@ -304,8 +307,8 @@ pub fn fill_agent_defaults_pub(provider: AgentProvider, cfg: &mut AgentShareConf
 }
 
 fn fill_agent_defaults(provider: AgentProvider, cfg: &mut AgentShareConfig) {
-    if cfg.command_match.is_empty() {
-        cfg.command_match = match provider {
+    if cfg.start_aliases.is_empty() {
+        cfg.start_aliases = match provider {
             AgentProvider::Opencode => vec!["opencode".to_string()],
         };
     }
@@ -329,10 +332,11 @@ pub struct AgentShareConfig {
     pub cwd: ShareCwdMode,
     #[serde(default = "default_true")]
     pub command: bool,
-    /// Command names that trigger agent detection (e.g. `["opencode"]`).
+    /// Shell command names or aliases that trigger agent detection on preexec.
+    /// Add your own aliases here (e.g. `["opencode", "oc"]`).
     /// When empty, provider defaults are used.
-    #[serde(default)]
-    pub command_match: Vec<String>,
+    #[serde(default, alias = "command_match")]
+    pub start_aliases: Vec<String>,
     /// Process name prefixes used for TTY process scan (e.g. `["opencode", "opencode-"]`).
     /// When empty, provider defaults are used.
     #[serde(default)]
@@ -349,7 +353,7 @@ impl Default for AgentShareConfig {
             enabled: true,
             cwd: ShareCwdMode::Basename,
             command: true,
-            command_match: Vec::new(),
+            start_aliases: Vec::new(),
             process_prefixes: Vec::new(),
             display_name: String::new(),
         }
@@ -531,6 +535,8 @@ pub struct TuiAppConfig {
 pub struct TuiConfig {
     #[serde(default)]
     pub extra_commands: Vec<String>,
+    #[serde(default)]
+    pub always_suspend_commands: Vec<String>,
     #[serde(default)]
     pub apps: BTreeMap<String, TuiAppConfig>,
 }

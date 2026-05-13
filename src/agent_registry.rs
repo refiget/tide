@@ -89,7 +89,7 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
-fn registry_dir() -> PathBuf {
+pub fn registry_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("TIDE_REGISTRY_DIR") {
         return PathBuf::from(dir);
     }

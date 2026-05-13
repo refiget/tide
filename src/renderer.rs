@@ -355,6 +355,7 @@ fn render_line<W: Write>(
             in_visual,
             label,
             match_query,
+            is_agent,
         } => {
             let _ = block_id;
             render_top_border(
@@ -364,6 +365,7 @@ fn render_line<W: Write>(
                 &BlockSelectionStyle::from_state(*selected, *in_visual),
                 width,
                 block_view,
+                *is_agent,
             )?;
         }
         VisualLine::BlockBottomBorder {
@@ -371,6 +373,7 @@ fn render_line<W: Write>(
             selected,
             in_visual,
             label,
+            is_agent,
         } => {
             let _ = block_id;
             render_border(
@@ -380,7 +383,11 @@ fn render_line<W: Write>(
                 false,
                 width,
                 block_view,
+                *is_agent,
             )?;
+        }
+        VisualLine::AgentSectionHeader => {
+            render_agent_section_header(w, width, block_view)?;
         }
         VisualLine::BlockDetailLine {
             block_id,
@@ -538,6 +545,7 @@ fn render_top_border<W: Write>(
     style: &BlockSelectionStyle,
     width: usize,
     block_view: &BlockViewConfig,
+    is_agent: bool,
 ) -> io::Result<()> {
     let bw = block_width(width, block_view);
     if bw < 2 {
@@ -546,7 +554,11 @@ fn render_top_border<W: Write>(
     let inner_w = bw.saturating_sub(2);
     let margin = block_view.horizontal_margin;
 
-    let (left, right) = ('╭', '╮');
+    let (left, right) = if is_agent {
+        ('┌', '┐')
+    } else {
+        ('╭', '╮')
+    };
     let border_fg = style.border_fg;
     let command_fg = match label.status {
         BlockStatus::Success => Theme::STATUS_OK_FG,
@@ -610,14 +622,39 @@ fn render_border<W: Write>(
     top: bool,
     width: usize,
     block_view: &BlockViewConfig,
+    is_agent: bool,
 ) -> io::Result<()> {
-    let (left, right) = if top { ('╭', '╮') } else { ('╰', '╯') };
+    let (left, right) = if is_agent {
+        if top { ('┌', '┐') } else { ('└', '┘') }
+    } else if top {
+        ('╭', '╮')
+    } else {
+        ('╰', '╯')
+    };
     let content = with_margin(
         &titled_border(left, right, label, block_width(width, block_view)),
         block_view,
     );
     queue!(w, SetForegroundColor(style.border_fg))?;
     queue!(w, Print(content))?;
+    queue!(w, ResetColor)?;
+    Ok(())
+}
+
+fn render_agent_section_header<W: Write>(
+    w: &mut W,
+    width: usize,
+    block_view: &BlockViewConfig,
+) -> io::Result<()> {
+    let bw = block_width(width, block_view);
+    if bw < 4 {
+        return Ok(());
+    }
+    let margin = block_view.horizontal_margin;
+    let label = "Shared Agents";
+    let border = titled_border('╭', '╮', label, bw);
+    queue!(w, SetForegroundColor(Theme::META_HEADER_FG))?;
+    queue!(w, Print(format!("{}{border}", " ".repeat(margin))))?;
     queue!(w, ResetColor)?;
     Ok(())
 }

@@ -8,6 +8,66 @@ use std::{
 
 pub use crate::agent_registry::AgentRef;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentLiveStatus {
+    #[default]
+    Idle,
+    Thinking,
+    ToolCall,
+    ExecutingCommand,
+    Request,
+    Question,
+    Replying,
+    Error,
+    Exited,
+    Unknown,
+}
+
+impl AgentLiveStatus {
+    /// Short label for Block View display. Returns `None` for Idle (no suffix shown).
+    pub fn display_label(self) -> Option<&'static str> {
+        match self {
+            AgentLiveStatus::Idle => None,
+            AgentLiveStatus::Thinking => Some("thinking"),
+            AgentLiveStatus::ToolCall => Some("tool"),
+            AgentLiveStatus::ExecutingCommand => Some("running"),
+            AgentLiveStatus::Request => Some("request"),
+            AgentLiveStatus::Question => Some("question"),
+            AgentLiveStatus::Replying => Some("replying"),
+            AgentLiveStatus::Error => Some("error"),
+            AgentLiveStatus::Exited => Some("exited"),
+            AgentLiveStatus::Unknown => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentToolCall {
+    pub tool_name: String,
+    pub command: Option<String>,
+}
+
+/// One conversation turn: user message → tool calls → reply.
+#[derive(Debug, Clone)]
+pub struct AgentHistoryRecord {
+    pub at_ms: u64,
+    pub user_message: Option<String>,
+    pub tool_calls: Vec<AgentToolCall>,
+    pub reply_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentLiveSnapshot {
+    pub status: AgentLiveStatus,
+    pub at_ms: Option<u64>,
+    /// Tool name from the most recent tool_call event.
+    pub current_tool: Option<String>,
+    /// Shell command from the most recent bash/exec tool_call event.
+    pub current_command: Option<String>,
+    /// Session title from session.json. Shown as the second line in Block View.
+    pub title: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BlockId(pub u64);
 
@@ -426,6 +486,8 @@ pub struct CommandBlock {
     pub actions: BlockActionScope,
     /// Set when this block represents a shared agent session from another Tide instance.
     pub agent_ref: Option<AgentRef>,
+    /// Live status snapshot read from the agent's events.jsonl (synthetic blocks only).
+    pub live_snapshot: Option<AgentLiveSnapshot>,
 }
 
 impl Default for CommandBlock {
@@ -452,6 +514,7 @@ impl Default for CommandBlock {
             synthetic: false,
             actions: BlockActionScope::Full,
             agent_ref: None,
+            live_snapshot: None,
         }
     }
 }
@@ -587,11 +650,20 @@ pub enum FooterSegment {
 
 // ─── TUI App Detection ──────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TuiCommandClass {
+    KnownTui,
+    AgentCli,
+    AlwaysSuspend,
+}
+
 #[derive(Debug, Clone)]
 pub struct TuiAppMatch {
     pub app_name: String,
     pub command_name: String,
     pub source: TuiAppMatchSource,
+    pub class: TuiCommandClass,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -605,86 +677,125 @@ pub enum TuiAppMatchSource {
 pub const DEFAULT_TUI_COMMANDS: &[&str] = &[
     // editors
     "vim",
-    "vi",
     "nvim",
+    "vi",
+    "view",
     "nano",
-    "emacs",
-    "hx",
     "micro",
+    "helix",
+    "hx",
+    "kak",
+    "emacs",
+    "emacsclient",
     // git / dev TUI
     "lazygit",
     "tig",
     "gitui",
-    "gh-dash",
-    // file managers
-    "ranger",
-    "lf",
-    "nnn",
-    "yazi",
-    "vifm",
-    "mc",
-    // fuzzy finders
-    "fzf",
-    "sk",
-    "peco",
-    // pagers / docs
-    "less",
-    "more",
-    "most",
-    "man",
-    "info",
+    "gitu",
+    "lazydocker",
+    "k9s",
+    "ctop",
+    "dive",
     // monitors
     "htop",
     "btop",
-    "btm",
+    "top",
     "glances",
+    "iftop",
+    "nethogs",
+    "ncdu",
+    // file managers / TUI
+    "ranger",
+    "lf",
+    "yazi",
+    "mc",
+    "broot",
+    "nnn",
     // multiplexers
     "tmux",
     "screen",
     "zellij",
-    // infra TUIs
-    "lazydocker",
-    "k9s",
-    "ctop",
+    // db / api / network
+    "posting",
+    "atac",
+    "rainfrog",
+    "termshark",
+    // fuzzy finders
+    "fzf",
+    "sk",
+    "skim",
+    "peco",
+];
+
+pub const DEFAULT_AGENT_CLI_COMMANDS: &[&str] = &[
+    "opencode",
+    "claude",
+    "claude-code",
+    "gemini",
+    "gemini-cli",
+    "aider",
+    "aider-chat",
+    "cursor-agent",
+    "codex",
+    "openai",
+    "goose",
+    "crush",
+    "amp",
+    "qwen",
+    "qwen-code",
+    "codebuff",
+    "continue",
+    "cody",
 ];
 
 // ─── Alt-Screen Lifecycle ───────────────────────────────────────────────────
 
 /// States for the TUI full-screen lifecycle state machine.
-///
-/// Transitions:
-///   Idle → preexec matched TUI → Pending
-///   Pending → alt-screen enter → InAltScreen
-///   Pending → precmd no alt-screen → Idle (normal command)
-///   InAltScreen → alt-screen exit → ExitedAltScreen
-///   ExitedAltScreen → precmd → Idle (finalized)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum TuiRuntimeState {
+    #[default]
     Idle,
-    Pending {
+    /// Hit a known TUI or Agent CLI during preexec.
+    /// Capture is NOT suspended yet.
+    PendingKnownTui {
+        block_id: BlockId,
         app_match: TuiAppMatch,
-        command: String,
     },
-    InAltScreen {
+    PendingAgentCli {
         block_id: BlockId,
+        app_match: TuiAppMatch,
     },
-    ExitedAltScreen {
+    /// Hit a command that should suspend capture immediately.
+    SuspendedNoAltScreen {
         block_id: BlockId,
+        app_match: TuiAppMatch,
     },
+    /// Currently in the alternate screen. Capture IS suspended.
+    InAltScreen { block_id: BlockId },
+    /// Exited alternate screen but command hasn't finished (precmd) yet.
+    ExitedAltScreen { block_id: BlockId },
 }
 
 impl TuiRuntimeState {
-    /// Returns true if the TUI is currently in the alternate screen,
-    /// in which case sidecar text capture should be suspended to avoid
-    /// polluting history with TUI drawing sequences.
+    /// Returns true if sidecar text capture should be suspended.
     pub fn is_capture_suspended(&self) -> bool {
-        matches!(self, TuiRuntimeState::InAltScreen { .. })
+        match self {
+            TuiRuntimeState::InAltScreen { .. } | TuiRuntimeState::SuspendedNoAltScreen { .. } => {
+                true
+            }
+            _ => false,
+        }
     }
-}
 
-impl Default for TuiRuntimeState {
-    fn default() -> Self {
-        Self::Idle
+    pub fn active_block_id(&self) -> Option<BlockId> {
+        match self {
+            TuiRuntimeState::Idle => None,
+            TuiRuntimeState::PendingKnownTui { block_id, .. } => Some(*block_id),
+            TuiRuntimeState::PendingAgentCli { block_id, .. } => Some(*block_id),
+            TuiRuntimeState::SuspendedNoAltScreen { block_id, .. } => Some(*block_id),
+            TuiRuntimeState::InAltScreen { block_id } => Some(*block_id),
+            TuiRuntimeState::ExitedAltScreen { block_id } => Some(*block_id),
+        }
     }
 }
 

@@ -129,6 +129,8 @@ pub struct TopLabel {
     pub command: String,
     pub cwd: Option<String>,
     pub status: BlockStatus,
+    /// Agent blocks use square corners and a plain (unlabeled) top border.
+    pub is_agent: bool,
 }
 
 /// Build structured top border label parts for a CommandBlock.
@@ -148,12 +150,24 @@ pub fn build_top_label_parts(
 
     let status = block.status.clone();
 
+    // Agent blocks use a plain top border (no label); body line carries the info.
+    if block.agent_ref.is_some() {
+        return TopLabel {
+            id_marker: String::new(),
+            command: String::new(),
+            cwd: None,
+            status,
+            is_agent: true,
+        };
+    }
+
     if available_width <= id_w {
         return TopLabel {
             id_marker: truncate_label(&id_str, available_width),
             command: String::new(),
             cwd: None,
             status,
+            is_agent: false,
         };
     }
 
@@ -168,6 +182,7 @@ pub fn build_top_label_parts(
             command: String::new(),
             cwd: None,
             status,
+            is_agent: false,
         };
     }
 
@@ -195,6 +210,7 @@ pub fn build_top_label_parts(
                     command: cmd_str,
                     cwd: Some(cwd_str),
                     status,
+                    is_agent: false,
                 };
             }
         }
@@ -215,6 +231,7 @@ pub fn build_top_label_parts(
                 command: cmd_str,
                 cwd: None,
                 status,
+                is_agent: false,
             };
         }
     }
@@ -228,6 +245,7 @@ pub fn build_top_label_parts(
         command: String::new(),
         cwd: None,
         status,
+        is_agent: false,
     }
 }
 

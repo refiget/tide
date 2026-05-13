@@ -248,11 +248,11 @@ Tide supports sharing minimal agent navigation state between instances. Each age
 ```toml
 [agents.opencode]
 enabled = true
-cwd = "basename"           # "full" | "basename" | "none"
+cwd = "basename"                               # "full" | "basename" | "none"
 command = true
-command_match = ["opencode"]          # command names that trigger detection
-process_prefixes = ["opencode", "opencode-"]  # TTY process-scan prefixes
-display_name = "opencode"             # label shown in Block View
+start_aliases = ["opencode", "oc"]             # shell commands/aliases that launch this agent
+process_prefixes = ["opencode", "opencode-"]   # TTY process-scan prefixes
+display_name = "opencode"                      # label shown in Block View
 ```
 
 All fields have sensible provider defaults and can be omitted. The minimal config is just:
@@ -260,6 +260,14 @@ All fields have sensible provider defaults and can be omitted. The minimal confi
 ```toml
 [agents.opencode]
 enabled = true
+```
+
+To add your own shell aliases:
+
+```toml
+[agents.opencode]
+enabled = true
+start_aliases = ["opencode", "oc", "ai"]
 ```
 
 ### Fields
@@ -270,9 +278,9 @@ enabled = true
   - `"basename"` — last path component only (default)
   - `"none"` — no cwd stored
 - `command` — share the original command text; `false` stores only the display name.
-- `command_match` — list of command names that identify this agent on `preexec`. When empty, the provider default is used.
+- `start_aliases` — shell command names or aliases that trigger detection on `preexec` (e.g. `["opencode", "oc"]`). When empty, the provider default is used. The legacy key `command_match` is accepted as an alias.
 - `process_prefixes` — binary name prefixes used for TTY process scanning (handles versioned / platform-suffixed binaries). When empty, the provider default is used.
-- `display_name` — label used in Block View synthetic block titles. When empty, the provider name is used.
+- `display_name` — label used in Block View for this agent's blocks (e.g. `[a] opencode ~/path`). When empty, the provider name is used.
 
 ### Adding a new provider
 
@@ -283,3 +291,86 @@ Add a new `[agents.<name>]` section. The provider name must match a variant in `
 The legacy `[opencode_share]` section is still accepted and maps to `[agents.opencode]`. It is ignored when `[agents.opencode]` is present.
 
 The shared registry stores navigation state only (alias, tmux target, status metadata). It does not store command output, prompt/reply content, or full session context.
+
+## Agent Live Events
+
+When Tide is running inside tmux, it injects two environment variables into the shell:
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `TIDE_AGENT_EVENTS_DIR` | `~/.tide/agents` | Base directory for per-pane event files |
+| `TIDE_TMUX_PANE` | e.g. `%117` | Tmux pane ID of the Tide shell |
+
+Agent plugins write real-time status events to:
+
+```
+$TIDE_AGENT_EVENTS_DIR/$TIDE_TMUX_PANE/events.jsonl
+```
+
+For example: `~/.tide/agents/%117/events.jsonl`
+
+Both variables must be present for agent live status to work. In non-tmux environments they are not set and agent monitoring is silently disabled.
+
+### File layout
+
+```
+~/.tide/agents/{pane_id}/
+  events.jsonl   — real-time event stream (append-only)
+  history.json   — last 5 conversation turns (rewritten after each reply)
+```
+
+### events.jsonl format
+
+Each event is a single JSON line. Required fields: `type` and `at_ms` (Unix milliseconds).
+
+```jsonl
+{"type":"started","at_ms":1715000000000,"cwd":"/projects/myapp"}
+{"type":"thinking","at_ms":1715000001000}
+{"type":"tool_call","at_ms":1715000002000,"tool_name":"bash","command":"cargo test"}
+{"type":"tool_result","at_ms":1715000003000,"tool_name":"bash","exit_code":0}
+{"type":"reply","at_ms":1715000004000,"text":"All tests passed."}
+{"type":"idle","at_ms":1715000005000}
+```
+
+| Event type | Block View label | Key fields |
+|------------|-----------------|------------|
+| `started` | _(none)_ | `cwd`, `model` |
+| `thinking` | `· thinking` | — |
+| `tool_call` | `· tool` or `· running: <cmd>` | `tool_name`, `command` (bash/exec tools) |
+| `tool_result` | _(no label change)_ | `tool_name`, `exit_code` |
+| `reply` | `· replying` | `text` |
+| `question` | `· question` | `text` |
+| `request` | `· request` | `summary` |
+| `idle` | _(none)_ | — |
+| `exit` | `· exited` | `code` |
+| `error` | `· error` | — |
+
+### history.json format
+
+Written by the plugin after every assistant reply. Contains the last 5 conversation turns, newest last.
+
+```json
+{
+  "records": [
+    {
+      "at_ms": 1715000000000,
+      "user_message": "fix the failing tests",
+      "tool_calls": [
+        { "tool_name": "bash", "command": "cargo test" },
+        { "tool_name": "bash", "command": "cargo fix --allow-dirty" }
+      ],
+      "reply_summary": "I ran the tests and applied the fixes…"
+    }
+  ]
+}
+```
+
+Each record maps to an `AgentHistoryRecord` in Tide's `AgentLiveSnapshot.recent_history`.
+
+### Update trigger
+
+Tide polls event file mtimes every 500 ms while Block View is open. A sync and re-render fires only when a mtime changes — no updates happen when no events are written.
+
+### Reading strategy
+
+Tide reads only the last 64 KB of `events.jsonl` (max 200 lines), scanning newest-to-oldest. Partial lines at the seek boundary are silently skipped. `history.json` is read in full (always small: ≤5 records).

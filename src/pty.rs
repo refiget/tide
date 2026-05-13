@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     io::{self, Read, Write},
-    path::Path,
     process::Command,
     sync::{
         Arc, Mutex,
@@ -20,9 +19,9 @@ use crate::{
     agent_registry::{AgentProvider, AgentRef},
     app::{
         BlockAction, BlockActionScope, BlockId, BlockKind, BlockOrigin, BlockStatus,
-        BlockViewAction, ConfirmKind, ConfirmState, DEFAULT_TUI_COMMANDS, DetailViewAction,
-        HelpState, InputAccumulator, RenderState, ReturnPanelTarget, TuiAppMatch,
-        TuiAppMatchSource, TuiRuntimeState, ViewAnchor, ViewKind, ViewState, VisibleSource,
+        BlockViewAction, ConfirmKind, ConfirmState, DetailViewAction, HelpState, InputAccumulator,
+        RenderState, ReturnPanelTarget, TuiAppMatch, TuiRuntimeState, ViewAnchor, ViewKind,
+        ViewState, VisibleSource,
     },
     block::BlockStore,
     buffer::ShellBuffer,
@@ -53,13 +52,16 @@ struct RuntimeState {
     /// Tracks blocks in this Tide session that are running agent processes.
     agent_blocks: HashMap<BlockId, AgentRef>,
     shell_command_running: bool,
+    /// Last-seen mtime (seconds) per tmux pane_id for agent event files.
+    /// Used by the watcher thread to detect when opencode writes new events.
+    agent_event_mtimes: HashMap<String, u64>,
 }
 
 #[derive(Clone)]
 enum TuiLifecycleEvent {
     PreexecMatch {
         app_match: TuiAppMatch,
-        command: String,
+        block_id: BlockId,
     },
     PreexecNoMatch,
     AltScreenEnter {
@@ -90,6 +92,13 @@ pub fn run_shell(config: &Config) -> Result<()> {
     );
     command.env("TIDE", "1");
     command.env("TIDE_SESSION_ID", std::process::id().to_string());
+    command.env(
+        "TIDE_AGENT_EVENTS_DIR",
+        crate::agent_registry::registry_dir().join("agents"),
+    );
+    if let Ok(pane) = std::env::var("TMUX_PANE") {
+        command.env("TIDE_TMUX_PANE", pane);
+    }
 
     let mut child = pair
         .slave
@@ -137,6 +146,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
         tide_id: format!("tide-{}", std::process::id()),
         agent_blocks: HashMap::new(),
         shell_command_running: false,
+        agent_event_mtimes: HashMap::new(),
     }));
     let stdout = Arc::new(Mutex::new(io::stdout()));
     let debug_blocks = std::env::var_os("TIDE_DEBUG_BLOCKS").is_some();
@@ -420,6 +430,48 @@ pub fn run_shell(config: &Config) -> Result<()> {
         }
     });
 
+    // Watcher thread: polls agent event file mtimes every 500 ms while Block View
+    // is open. Triggers a sync + re-render when opencode writes new events.
+    let watcher_running = Arc::clone(&running);
+    let watcher_state = Arc::clone(&state);
+    let watcher_stdout = Arc::clone(&stdout);
+    let watcher_thread = thread::spawn(move || {
+        while watcher_running.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(500));
+
+            let should_sync = {
+                let Ok(state) = watcher_state.lock() else {
+                    continue;
+                };
+                if !matches!(state.view.view, ViewKind::Blocks) {
+                    false
+                } else {
+                    let agents_dir = crate::agent_registry::registry_dir().join("agents");
+                    state.agent_event_mtimes.iter().any(|(pane_id, &known)| {
+                        crate::agent_events::agent_events_mtime(&agents_dir, pane_id)
+                            .map(|m| m > known)
+                            .unwrap_or(false)
+                    })
+                }
+            };
+
+            if should_sync {
+                let should_render = if let Ok(mut state) = watcher_state.lock() {
+                    sync_shared_agent_blocks(&mut state);
+                    move_running_agents_to_bottom(&mut state);
+                    state.render_state.dirty = true;
+                    state.render_state.force_render = true;
+                    true
+                } else {
+                    false
+                };
+                if should_render {
+                    let _ = render_runtime(&watcher_state, &watcher_stdout);
+                }
+            }
+        }
+    });
+
     let status = child.wait().context("failed to wait for shell process")?;
     running.store(false, Ordering::SeqCst);
 
@@ -428,6 +480,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
     let _ = output_thread.join();
     let _ = signal_hook::low_level::raise(SIGWINCH);
     let _ = resize_thread.join();
+    let _ = watcher_thread.join();
 
     if !status.success() {
         std::process::exit(status.exit_code() as i32);
@@ -440,6 +493,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
 ///
 /// Handles common prefixes: sudo, doas, env, command, noglob, builtin, time,
 /// and `KEY=value` environment variable assignments.
+/// Also handles package runners like npx, bunx, pnpm dlx, uvx.
 fn extract_command_name(command_line: &str) -> Option<String> {
     let tokens: Vec<&str> = command_line.split_whitespace().collect();
     let mut i = 0;
@@ -483,7 +537,39 @@ fn extract_command_name(command_line: &str) -> Option<String> {
                 }
                 continue;
             }
-            _ if token.contains('=') && !token.starts_with('/') => {
+            "npx" | "bunx" | "uvx" => {
+                i += 1;
+                while i < tokens.len() {
+                    let t = tokens[i];
+                    if t.starts_with('-') {
+                        i += 1;
+                        if (t == "-p" || t == "--package") && i < tokens.len() {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    break;
+                }
+                continue;
+            }
+            "pnpm" => {
+                i += 1;
+                if i < tokens.len() && tokens[i] == "dlx" {
+                    i += 1;
+                    while i < tokens.len() {
+                        let t = tokens[i];
+                        if t.starts_with('-') {
+                            i += 1;
+                            continue;
+                        }
+                        break;
+                    }
+                    continue;
+                }
+                // If not pnpm dlx, treat pnpm as the command.
+                return Some("pnpm".to_string());
+            }
+            _ if token.contains('=') && !token.starts_with('/') && !token.starts_with('.') => {
                 // Handles: FOO=bar nvim
                 i += 1;
                 continue;
@@ -497,48 +583,79 @@ fn extract_command_name(command_line: &str) -> Option<String> {
 }
 
 fn basename_command(command: &str) -> String {
+    // Handle paths: /usr/local/bin/nvim -> nvim, ./foo -> foo
     command.rsplit('/').next().unwrap_or(command).to_string()
 }
 
 /// Match a command name against known TUI apps.
 ///
 /// Priority:
-/// 1. User-configured app in `tui_apps` (exact command match)
-/// 2. User `tui_extra_commands` list
-/// 3. Builtin default list (`DEFAULT_TUI_COMMANDS`)
+/// 1. AlwaysSuspend commands (user config)
+/// 2. User-configured app in `tui_apps` (exact command match)
+/// 3. User `tui_extra_commands` list
+/// 4. Builtin default TUI list
+/// 5. Builtin default Agent CLI list
 fn detect_tui_app(
     command_line: &str,
     extra_commands: &[String],
+    always_suspend_commands: &[String],
     tui_apps: &std::collections::BTreeMap<String, crate::config::TuiAppConfig>,
 ) -> Option<TuiAppMatch> {
+    use crate::app::{
+        DEFAULT_AGENT_CLI_COMMANDS, DEFAULT_TUI_COMMANDS, TuiAppMatchSource, TuiCommandClass,
+    };
+
     let command_name = extract_command_name(command_line)?;
 
-    // 1. User app config exact match
+    // 1. AlwaysSuspend
+    if always_suspend_commands.iter().any(|c| c == &command_name) {
+        return Some(TuiAppMatch {
+            app_name: command_name.clone(),
+            command_name,
+            source: TuiAppMatchSource::UserConfig,
+            class: TuiCommandClass::AlwaysSuspend,
+        });
+    }
+
+    // 2. User app config exact match
     for (app_name, app_cfg) in tui_apps {
         if app_cfg.commands.iter().any(|c| c == &command_name) {
             return Some(TuiAppMatch {
                 app_name: app_name.clone(),
                 command_name: command_name.clone(),
                 source: TuiAppMatchSource::UserConfig,
+                class: TuiCommandClass::KnownTui,
             });
         }
     }
 
-    // 2. User extra_commands list
+    // 3. User extra_commands list
     if extra_commands.iter().any(|c| c == &command_name) {
         return Some(TuiAppMatch {
             app_name: command_name.clone(),
             command_name,
             source: TuiAppMatchSource::UserConfig,
+            class: TuiCommandClass::KnownTui,
         });
     }
 
-    // 3. Builtin default list
+    // 4. Builtin default TUI list
     if DEFAULT_TUI_COMMANDS.contains(&command_name.as_str()) {
         return Some(TuiAppMatch {
             app_name: command_name.clone(),
             command_name,
             source: TuiAppMatchSource::Builtin,
+            class: TuiCommandClass::KnownTui,
+        });
+    }
+
+    // 5. Builtin default Agent CLI list
+    if DEFAULT_AGENT_CLI_COMMANDS.contains(&command_name.as_str()) {
+        return Some(TuiAppMatch {
+            app_name: command_name.clone(),
+            command_name,
+            source: TuiAppMatchSource::Builtin,
+            class: TuiCommandClass::AgentCli,
         });
     }
 
@@ -547,7 +664,7 @@ fn detect_tui_app(
 
 fn is_agent_command(command_line: &str, cfg: &AgentShareConfig) -> bool {
     if let Some(name) = extract_command_name(command_line) {
-        cfg.command_match.iter().any(|m| m == &name)
+        cfg.start_aliases.iter().any(|m| m == &name)
     } else {
         false
     }
@@ -894,8 +1011,9 @@ fn is_shell_normal_mode(state: &RuntimeState) -> bool {
 }
 
 fn try_global_jump_back(state: &mut RuntimeState) -> bool {
-    let Some(current) = tmux_current_target() else {
-        return false;
+    let current = match tmux_current_pane_id().or_else(tmux_current_target) {
+        Some(c) => c,
+        None => return false,
     };
     let Ok(Some(last)) = crate::agent_registry::pop_jump_for_target(&current) else {
         return false;
@@ -963,34 +1081,70 @@ fn sync_shared_agent_blocks_for_provider(state: &mut RuntimeState, provider: Age
         if rec.status == crate::agent_registry::AgentStatus::Exited {
             continue;
         }
-        if rec.status == crate::agent_registry::AgentStatus::Running
-            && !tmux_target_exists(&rec.tmux_target)
-        {
+        // Use pane_id (%N) for existence check — pane indices can be reused by new panes,
+        // so tmux_target (session:window.index) would falsely match a different pane.
+        let pane_alive = if !rec.tmux_pane_id.is_empty() {
+            tmux_target_exists(&rec.tmux_pane_id)
+        } else {
+            tmux_target_exists(&rec.tmux_target)
+        };
+        if rec.status == crate::agent_registry::AgentStatus::Running && !pane_alive {
             let _ = crate::agent_registry::mark_stale(provider, &rec.alias);
         }
+        if rec.status == crate::agent_registry::AgentStatus::Stale && !pane_alive {
+            continue;
+        }
 
-        let display_status = if tmux_target_exists(&rec.tmux_target) {
+        let display_status = if pane_alive {
             BlockStatus::Running
         } else {
             BlockStatus::Unknown
         };
         let id = synthetic_agent_block_id(provider, &rec.alias);
         let cwd = std::path::PathBuf::from(&rec.cwd);
-        let project = if rec.project_name.is_empty() {
-            Path::new(&rec.cwd)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| display_name.clone())
+
+        let agents_dir = crate::agent_registry::registry_dir().join("agents");
+        let snapshot = if !rec.tmux_pane_id.is_empty() {
+            let snap =
+                crate::agent_events::read_agent_live_snapshot(&agents_dir, &rec.tmux_pane_id);
+            // Record the mtime so the watcher thread can detect future changes.
+            if let Some(mtime) =
+                crate::agent_events::agent_events_mtime(&agents_dir, &rec.tmux_pane_id)
+            {
+                state
+                    .agent_event_mtimes
+                    .insert(rec.tmux_pane_id.clone(), mtime);
+            }
+            snap
         } else {
-            rec.project_name.clone()
+            None
+        };
+
+        // command = just the display name (used for search/index); the compositor
+        // builds the full header line ([alias] name  ~/cwd  · status) at render time.
+        let command = display_name.clone();
+
+        // output_text = session title, rendered as the second body line by the compositor.
+        let title = snapshot
+            .as_ref()
+            .and_then(|s| s.title.as_deref())
+            .unwrap_or("")
+            .to_string();
+        let output_text = title.clone();
+        let output_raw = if title.is_empty() {
+            Vec::new()
+        } else {
+            title.as_bytes().to_vec()
         };
 
         state.blocks.executions.insert(
             id,
             crate::app::CommandBlock {
                 id,
-                command: format!("[{}] {} {}", rec.alias, display_name, project),
+                command,
                 cwd,
+                output_raw,
+                output_text,
                 status: display_status,
                 kind: BlockKind::SystemEvent,
                 origin: BlockOrigin::Shared,
@@ -1000,6 +1154,7 @@ fn sync_shared_agent_blocks_for_provider(state: &mut RuntimeState, provider: Age
                     provider,
                     alias: rec.alias.clone(),
                 }),
+                live_snapshot: snapshot,
                 ..crate::app::CommandBlock::default()
             },
         );
@@ -1068,27 +1223,57 @@ fn advance_tui_state(
     prev: TuiRuntimeState,
     event: TuiLifecycleEvent,
 ) -> (TuiRuntimeState, Option<BlockId>) {
+    use crate::app::TuiCommandClass;
+
     match event {
-        TuiLifecycleEvent::PreexecMatch { app_match, command } => {
-            (TuiRuntimeState::Pending { app_match, command }, None)
-        }
+        TuiLifecycleEvent::PreexecMatch {
+            app_match,
+            block_id,
+        } => match app_match.class {
+            TuiCommandClass::KnownTui => (
+                TuiRuntimeState::PendingKnownTui {
+                    block_id,
+                    app_match,
+                },
+                None,
+            ),
+            TuiCommandClass::AgentCli => (
+                TuiRuntimeState::PendingAgentCli {
+                    block_id,
+                    app_match,
+                },
+                None,
+            ),
+            TuiCommandClass::AlwaysSuspend => (
+                TuiRuntimeState::SuspendedNoAltScreen {
+                    block_id,
+                    app_match,
+                },
+                None,
+            ),
+        },
         TuiLifecycleEvent::PreexecNoMatch => (TuiRuntimeState::Idle, None),
         TuiLifecycleEvent::AltScreenEnter { block_id } => {
             (TuiRuntimeState::InAltScreen { block_id }, None)
         }
         TuiLifecycleEvent::AltScreenExit => match prev {
-            // Preserve non-InAltScreen states to avoid clobbering Pending on unrelated exits.
             TuiRuntimeState::InAltScreen { block_id } => {
                 (TuiRuntimeState::ExitedAltScreen { block_id }, None)
             }
             other => (other, None),
         },
         TuiLifecycleEvent::Precmd => match prev {
-            TuiRuntimeState::ExitedAltScreen { block_id }
-            | TuiRuntimeState::InAltScreen { block_id } => (TuiRuntimeState::Idle, Some(block_id)),
-            TuiRuntimeState::Pending { .. } | TuiRuntimeState::Idle => {
-                (TuiRuntimeState::Idle, None)
+            // Alt-screen was used (or suspended): finalize the TUI block.
+            TuiRuntimeState::InAltScreen { block_id }
+            | TuiRuntimeState::ExitedAltScreen { block_id }
+            | TuiRuntimeState::SuspendedNoAltScreen { block_id, .. } => {
+                (TuiRuntimeState::Idle, Some(block_id))
             }
+            // Pending: TUI was detected but alt-screen was never entered.
+            // Treat as a normal command — no finalize needed.
+            TuiRuntimeState::PendingKnownTui { .. }
+            | TuiRuntimeState::PendingAgentCli { .. }
+            | TuiRuntimeState::Idle => (TuiRuntimeState::Idle, None),
         },
     }
 }
@@ -1114,22 +1299,29 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             let lifecycle_event = if let Some(app_match) = detect_tui_app(
                 &command,
                 &state.config.tui_extra_commands,
+                &state.config.tui_always_suspend_commands,
                 &state.config.tui_apps,
             ) {
                 TuiLifecycleEvent::PreexecMatch {
                     app_match,
-                    command: command.clone(),
+                    block_id,
                 }
             } else {
                 TuiLifecycleEvent::PreexecNoMatch
             };
+
             let prev = std::mem::take(&mut state.tui_state);
             let (next, _) = advance_tui_state(prev, lifecycle_event);
             state.tui_state = next;
 
-            if let Some(id) = state.blocks.active_block_id() {
-                detect_and_register_agents(state, id, &command);
+            // Handle immediate suspension for AlwaysSuspend class.
+            if let TuiRuntimeState::SuspendedNoAltScreen { .. } = &state.tui_state {
+                if let Some(block) = state.blocks.block_mut(block_id) {
+                    block.kind = BlockKind::TuiSession;
+                }
             }
+
+            detect_and_register_agents(state, block_id, &command);
             sync_shared_agent_blocks(state);
             move_running_agents_to_bottom(state);
             sync_block_viewport_after_history_change(state);
@@ -2011,7 +2203,7 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                         rec.tmux_target.clone()
                     };
                     if tmux_target_exists(&jump_target) {
-                        if let Some(cur) = tmux_current_target() {
+                        if let Some(cur) = tmux_current_pane_id().or_else(tmux_current_target) {
                             let from_zoomed = tmux_window_zoomed(&cur).unwrap_or(false);
                             let _ = crate::agent_registry::write_last_jump(
                                 &cur,
@@ -2647,12 +2839,18 @@ fn content_height(state: &RuntimeState) -> usize {
 
 fn on_alt_screen_enter(state: &mut RuntimeState) {
     state.pty_alt_screen_active = true;
-    // Extract app_name from Pending state (immutable borrow scope).
-    let (is_known_tui, app_name) = {
-        match &state.tui_state {
-            TuiRuntimeState::Pending { app_match, .. } => (true, Some(app_match.app_name.clone())),
-            _ => (false, None),
+    // Extract app_name and categorization from Pending state.
+    let (is_known_tui, app_name) = match &state.tui_state {
+        TuiRuntimeState::PendingKnownTui { app_match, .. } => {
+            (true, Some(app_match.app_name.clone()))
         }
+        TuiRuntimeState::PendingAgentCli { app_match, .. } => {
+            (true, Some(app_match.app_name.clone()))
+        }
+        TuiRuntimeState::SuspendedNoAltScreen { app_match, .. } => {
+            (true, Some(app_match.app_name.clone()))
+        }
+        _ => (false, None),
     };
     // The block was already created by preexec as NormalCommand.
     // Promote it to TuiSession or RawProgram based on detection.
@@ -2752,6 +2950,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::app::{TuiAppMatchSource, TuiCommandClass};
     use crate::config::Config;
 
     static TEST_REGISTRY_ENV: Once = Once::new();
@@ -2790,6 +2989,7 @@ mod tests {
             tide_id: "test".to_string(),
             agent_blocks: HashMap::new(),
             shell_command_running: false,
+            agent_event_mtimes: HashMap::new(),
         }
     }
 
@@ -3184,14 +3384,18 @@ mod tests {
     #[test]
     fn unrelated_alt_screen_exit_preserves_pending_tui_state() {
         let mut state = runtime_state();
+        let block_id = state
+            .blocks
+            .start_command("nvim".to_string(), 0, BlockKind::TuiSession);
         let app_match = TuiAppMatch {
             app_name: "nvim".to_string(),
             command_name: "nvim".to_string(),
             source: TuiAppMatchSource::Builtin,
+            class: TuiCommandClass::KnownTui,
         };
-        state.tui_state = TuiRuntimeState::Pending {
+        state.tui_state = TuiRuntimeState::PendingKnownTui {
+            block_id,
             app_match,
-            command: "nvim".to_string(),
         };
 
         // Unrelated alt-screen exit observed before the TUI actually starts (or even if it's unrelated)
@@ -3199,7 +3403,10 @@ mod tests {
 
         // State must still be Pending so precmd can finalize it correctly if it never enters alt-screen,
         // or so that it can still transition to InAltScreen later.
-        assert!(matches!(state.tui_state, TuiRuntimeState::Pending { .. }));
+        assert!(matches!(
+            state.tui_state,
+            TuiRuntimeState::PendingKnownTui { .. }
+        ));
     }
 
     #[test]
@@ -3294,7 +3501,11 @@ mod tests {
 
             match scenario {
                 Scenario::PendingThenPrecmdNoAlt => {
-                    assert!(matches!(state.tui_state, TuiRuntimeState::Pending { .. }));
+                    assert!(matches!(
+                        state.tui_state,
+                        TuiRuntimeState::PendingKnownTui { .. }
+                            | TuiRuntimeState::PendingAgentCli { .. }
+                    ));
                     apply_shell_hook_event(
                         &mut state,
                         ShellHookEvent::Precmd {
@@ -3310,7 +3521,11 @@ mod tests {
                 }
                 Scenario::PendingThenUnrelatedExitThenPrecmd => {
                     on_alt_screen_exit(&mut state);
-                    assert!(matches!(state.tui_state, TuiRuntimeState::Pending { .. }));
+                    assert!(matches!(
+                        state.tui_state,
+                        TuiRuntimeState::PendingKnownTui { .. }
+                            | TuiRuntimeState::PendingAgentCli { .. }
+                    ));
                     apply_shell_hook_event(
                         &mut state,
                         ShellHookEvent::Precmd {
@@ -3391,6 +3606,7 @@ mod tests {
             app_name: "nvim".to_string(),
             command_name: "nvim".to_string(),
             source: TuiAppMatchSource::Builtin,
+            class: TuiCommandClass::KnownTui,
         };
         let block_id = BlockId(42);
 
@@ -3398,16 +3614,16 @@ mod tests {
             TuiRuntimeState::Idle,
             TuiLifecycleEvent::PreexecMatch {
                 app_match: app_match.clone(),
-                command: "nvim".to_string(),
+                block_id,
             },
         );
-        assert!(matches!(state, TuiRuntimeState::Pending { .. }));
+        assert!(matches!(state, TuiRuntimeState::PendingKnownTui { .. }));
         assert!(finalize.is_none());
 
         let (state, finalize) = advance_tui_state(
-            TuiRuntimeState::Pending {
+            TuiRuntimeState::PendingKnownTui {
+                block_id,
                 app_match: app_match.clone(),
-                command: "nvim".to_string(),
             },
             TuiLifecycleEvent::AltScreenEnter { block_id },
         );
@@ -3439,13 +3655,13 @@ mod tests {
         assert_eq!(finalize, Some(block_id));
 
         let (state, finalize) = advance_tui_state(
-            TuiRuntimeState::Pending {
+            TuiRuntimeState::PendingKnownTui {
+                block_id,
                 app_match,
-                command: "nvim".to_string(),
             },
             TuiLifecycleEvent::AltScreenExit,
         );
-        assert!(matches!(state, TuiRuntimeState::Pending { .. }));
+        assert!(matches!(state, TuiRuntimeState::PendingKnownTui { .. }));
         assert!(finalize.is_none());
     }
 
@@ -4035,12 +4251,12 @@ mod tests {
 
     #[test]
     fn detect_non_tui_returns_none() {
-        assert!(detect_tui_app("ls", &[], &empty_tui_apps()).is_none());
+        assert!(detect_tui_app("ls", &[], &[], &empty_tui_apps()).is_none());
     }
 
     #[test]
     fn detect_default_tui_command() {
-        let result = detect_tui_app("lazygit", &[], &empty_tui_apps());
+        let result = detect_tui_app("lazygit", &[], &[], &empty_tui_apps());
         assert!(result.is_some());
         assert_eq!(result.as_ref().unwrap().command_name, "lazygit");
         assert_eq!(result.as_ref().unwrap().source, TuiAppMatchSource::Builtin);
@@ -4048,14 +4264,14 @@ mod tests {
 
     #[test]
     fn detect_sudo_default_tui() {
-        let result = detect_tui_app("sudo -u alice lazygit", &[], &empty_tui_apps());
+        let result = detect_tui_app("sudo -u alice lazygit", &[], &[], &empty_tui_apps());
         assert!(result.is_some());
         assert_eq!(result.as_ref().unwrap().command_name, "lazygit");
     }
 
     #[test]
     fn detect_extra_commands() {
-        let result = detect_tui_app("myapp", &["myapp".into()], &empty_tui_apps());
+        let result = detect_tui_app("myapp", &["myapp".into()], &[], &empty_tui_apps());
         assert!(result.is_some());
         assert_eq!(result.as_ref().unwrap().command_name, "myapp");
         assert_eq!(
@@ -4075,7 +4291,7 @@ mod tests {
         };
         let mut apps = std::collections::BTreeMap::new();
         apps.insert("my-custom-app".into(), cfg);
-        let result = detect_tui_app("custom-tui", &[], &apps);
+        let result = detect_tui_app("custom-tui", &[], &[], &apps);
         assert!(result.is_some());
         assert_eq!(result.as_ref().unwrap().app_name, "my-custom-app");
         assert_eq!(
@@ -4086,14 +4302,14 @@ mod tests {
 
     #[test]
     fn detect_env_with_tui() {
-        let result = detect_tui_app("env FOO=bar nvim", &[], &empty_tui_apps());
+        let result = detect_tui_app("env FOO=bar nvim", &[], &[], &empty_tui_apps());
         assert!(result.is_some());
         assert_eq!(result.as_ref().unwrap().command_name, "nvim");
     }
 
     #[test]
     fn detect_env_unset_with_tui() {
-        let result = detect_tui_app("env -u HOME lazygit", &[], &empty_tui_apps());
+        let result = detect_tui_app("env -u HOME lazygit", &[], &[], &empty_tui_apps());
         assert!(result.is_some());
         assert_eq!(result.as_ref().unwrap().command_name, "lazygit");
     }

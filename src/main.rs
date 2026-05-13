@@ -1,3 +1,4 @@
+mod agent_events;
 mod agent_registry;
 mod ansi;
 mod app;

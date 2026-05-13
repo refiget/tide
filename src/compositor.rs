@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::{
     app::{
         BlockId, BlockKind, CommandBlock, FooterSegment, ReturnPanelLineKind, ViewAnchor, ViewKind,
@@ -30,13 +32,17 @@ pub enum VisualLine {
         in_visual: bool,
         label: crate::format::TopLabel,
         match_query: String,
+        is_agent: bool,
     },
     BlockBottomBorder {
         block_id: BlockId,
         selected: bool,
         in_visual: bool,
         label: String,
+        is_agent: bool,
     },
+    /// Separator row injected once before the first shared-agent block.
+    AgentSectionHeader,
     BlockDetailLine {
         block_id: BlockId,
         text: String,
@@ -264,10 +270,17 @@ impl Compositor {
             Some((a_idx.min(b_idx), a_idx.max(b_idx)))
         });
 
+        let mut agent_section_started = false;
         for (block_index, block_id) in view.visible.ids(blocks).iter().copied().enumerate() {
             let Some(block) = blocks.block(block_id) else {
                 continue;
             };
+
+            if block.agent_ref.is_some() && !agent_section_started {
+                agent_section_started = true;
+                lines.push(VisualLine::AgentSectionHeader);
+            }
+
             let start_line = lines.len();
             let in_visual =
                 visual_range.map_or(false, |(lo, hi)| block_index >= lo && block_index <= hi);
@@ -368,6 +381,7 @@ impl Compositor {
             (width as usize).saturating_sub(block_view.horizontal_margin.saturating_mul(2));
         let available_label_width = block_frame_width.saturating_sub(5);
 
+        let is_agent = block.agent_ref.is_some();
         let mut lines = Vec::new();
         lines.push(VisualLine::BlockTopBorder {
             block_id,
@@ -379,9 +393,65 @@ impl Compositor {
                 .as_deref()
                 .unwrap_or(&view.filter.command_query)
                 .to_string(),
+            is_agent,
         });
 
-        if matches!(block.kind, BlockKind::RawProgram | BlockKind::TuiSession) {
+        if is_agent {
+            // Agent block body: header line (alias/name/cwd/status) + optional title line.
+            let inner_w = block_frame_width.saturating_sub(2);
+            let content_w = inner_w.saturating_sub(block_view.body_padding);
+            let alias_str = block
+                .agent_ref
+                .as_ref()
+                .map(|r| r.alias.as_str())
+                .unwrap_or("");
+            let cwd_str = format::compact_cwd(&block.cwd, home, 32);
+            let display_name = block.command.as_str();
+            let left_part = format!("[{alias_str}] {display_name}  {cwd_str}");
+
+            let status_str = block
+                .live_snapshot
+                .as_ref()
+                .and_then(|s| s.status.display_label())
+                .map(|label| {
+                    let cmd = block
+                        .live_snapshot
+                        .as_ref()
+                        .and_then(|s| s.current_command.as_deref());
+                    match cmd {
+                        Some(c) => {
+                            let trimmed = if c.len() > 30 { &c[..30] } else { c };
+                            format!("· {label}: {trimmed}")
+                        }
+                        None => format!("· {label}"),
+                    }
+                })
+                .unwrap_or_default();
+
+            let left_w = UnicodeWidthStr::width(left_part.as_str());
+            let right_w = UnicodeWidthStr::width(status_str.as_str());
+            let fill = content_w.saturating_sub(left_w + right_w);
+            let header_text = if status_str.is_empty() {
+                left_part
+            } else {
+                format!("{left_part}{}{status_str}", " ".repeat(fill))
+            };
+            lines.push(VisualLine::BlockBodyLine {
+                text: header_text,
+                block_id,
+                selected,
+                in_visual,
+            });
+
+            if !block.output_text.is_empty() {
+                lines.push(VisualLine::BlockBodyLine {
+                    text: format!("    {}", block.output_text),
+                    block_id,
+                    selected,
+                    in_visual,
+                });
+            }
+        } else if matches!(block.kind, BlockKind::RawProgram | BlockKind::TuiSession) {
             lines.push(VisualLine::BlockBodyLine {
                 text: "interactive program; screen output was not captured".to_string(),
                 block_id,
@@ -458,6 +528,7 @@ impl Compositor {
             selected,
             in_visual,
             label: bottom_label(block),
+            is_agent,
         });
 
         for _ in 0..block_view.block_gap {
