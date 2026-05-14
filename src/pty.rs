@@ -52,6 +52,10 @@ struct RuntimeState {
     /// Tracks blocks in this Tide session that are running agent processes.
     agent_blocks: HashMap<BlockId, AgentRef>,
     shell_command_running: bool,
+    /// Bytes received after preexec for an unclassified command.
+    /// Committed to the block store on the first non-interactive monitor poll or on precmd.
+    /// Discarded when alt-screen or raw/cbreak mode is detected (TUI / REPL startup bytes).
+    capture_pending: Option<Vec<u8>>,
     /// Last-seen mtime (seconds) per tmux pane_id for agent event files.
     /// Used by the watcher thread to detect when opencode writes new events.
     agent_event_mtimes: HashMap<String, u64>,
@@ -150,6 +154,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
         tide_id: format!("tide-{}", std::process::id()),
         agent_blocks: HashMap::new(),
         shell_command_running: false,
+        capture_pending: None,
         agent_event_mtimes: HashMap::new(),
     }));
     let stdout = Arc::new(Mutex::new(io::stdout()));
@@ -194,7 +199,11 @@ pub fn run_shell(config: &Config) -> Result<()> {
                                 if let Ok(mut state) = output_state.lock() {
                                     let active_block_id = state.blocks.active_block_id();
                                     if !state.tui_state.is_capture_suspended() {
-                                        state.blocks.append_output(&visible);
+                                        if let Some(pending) = &mut state.capture_pending {
+                                            pending.extend_from_slice(&visible);
+                                        } else {
+                                            state.blocks.append_output(&visible);
+                                        }
                                         state.shell.append(&visible, active_block_id);
                                     }
                                 } else {
@@ -505,6 +514,14 @@ pub fn run_shell(config: &Config) -> Result<()> {
                 prev_mode = mode;
                 if let Ok(mut st) = monitor_state.lock() {
                     apply_pty_raw_mode_change(&mut st, mode);
+                }
+            } else if !mode.is_interactive() {
+                // Non-interactive mode confirmed for this poll cycle:
+                // commit any pending capture buffer into the block store.
+                if let Ok(mut st) = monitor_state.lock() {
+                    if st.capture_pending.is_some() {
+                        commit_pending_capture(&mut st);
+                    }
                 }
             }
         }
@@ -1394,6 +1411,13 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
                 }
             }
 
+            // For unclassified commands (Idle after preexec), buffer initial bytes
+            // so that REPL startup sequences can be discarded if raw mode is detected.
+            // Known TUI/Agent states already suspend capture, so no pending needed.
+            if matches!(state.tui_state, TuiRuntimeState::Idle) {
+                state.capture_pending = Some(Vec::new());
+            }
+
             detect_and_register_agents(state, block_id, &command);
             sync_shared_agent_blocks(state);
             move_running_agents_to_bottom(state);
@@ -1415,6 +1439,8 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             state.tui_state = next;
 
             let active_id = state.blocks.active_block_id();
+            // Flush any pending capture before finalizing the block.
+            commit_pending_capture(state);
             let end_line = state.shell.line_count().saturating_sub(1);
             state.blocks.finish_command(exit_code, end_line);
             sync_block_viewport_after_history_change(state);
@@ -2912,6 +2938,8 @@ fn content_height(state: &RuntimeState) -> usize {
 
 fn on_alt_screen_enter(state: &mut RuntimeState) {
     state.pty_alt_screen_active = true;
+    // Discard any pending capture — TUI startup bytes before alt-screen are not block content.
+    state.capture_pending = None;
 
     // Special case: a job that was Ctrl-Z'd is now resuming.
     // Use the stored block_id and don't change the block kind (already TuiSession).
@@ -3024,6 +3052,17 @@ fn current_pty_size() -> PtySize {
     }
 }
 
+/// Flush any pending capture buffer into the active block.
+/// Called when a non-interactive monitor poll confirms the command is normal,
+/// or on precmd before finalizing the block.
+fn commit_pending_capture(state: &mut RuntimeState) {
+    if let Some(pending) = state.capture_pending.take() {
+        if !pending.is_empty() {
+            state.blocks.append_output(&pending);
+        }
+    }
+}
+
 #[cfg(unix)]
 fn read_termios_mode(fd: std::os::unix::io::RawFd) -> crate::app::TermiosMode {
     use crate::app::TermiosMode;
@@ -3062,6 +3101,7 @@ fn apply_pty_raw_mode_change(state: &mut RuntimeState, mode: crate::app::Termios
         return; // Already tracked by the existing TUI state machine.
     }
     if let Some(block_id) = state.blocks.active_block_id() {
+        state.capture_pending = None; // discard startup bytes before raw mode
         state.tui_state = TuiRuntimeState::MonitorDetectedInteractive { block_id };
     }
 }
@@ -3114,6 +3154,7 @@ mod tests {
             tide_id: "test".to_string(),
             agent_blocks: HashMap::new(),
             shell_command_running: false,
+            capture_pending: None,
             agent_event_mtimes: HashMap::new(),
         }
     }
@@ -4692,6 +4733,145 @@ mod tests {
             state.tui_state,
             TuiRuntimeState::InAltScreen { .. }
         ));
+    }
+
+    // ── CommandPending / capture_pending tests ───────────────────────────────
+
+    #[test]
+    fn preexec_no_match_starts_pending_capture() {
+        let mut state = runtime_state();
+        state.shell_command_running = true;
+        apply_shell_hook_event(
+            &mut state,
+            ShellHookEvent::Preexec {
+                command: "ls".to_string(),
+            },
+            false,
+        );
+        assert!(state.capture_pending.is_some());
+        assert!(matches!(state.tui_state, TuiRuntimeState::Idle));
+    }
+
+    #[test]
+    fn preexec_known_tui_does_not_start_pending_capture() {
+        let mut state = runtime_state();
+        apply_shell_hook_event(
+            &mut state,
+            ShellHookEvent::Preexec {
+                command: "vim".to_string(),
+            },
+            false,
+        );
+        // Known TUI goes to PendingKnownTui — no pending buffer needed (capture suspended)
+        assert!(state.capture_pending.is_none());
+        assert!(matches!(
+            state.tui_state,
+            TuiRuntimeState::PendingKnownTui { .. }
+        ));
+    }
+
+    #[test]
+    fn pending_bytes_committed_on_precmd() {
+        let mut state = runtime_state();
+        apply_shell_hook_event(
+            &mut state,
+            ShellHookEvent::Preexec {
+                command: "echo hi".to_string(),
+            },
+            false,
+        );
+        let block_id = state.blocks.active_block_id().unwrap();
+        // Simulate bytes arriving while pending
+        state
+            .capture_pending
+            .as_mut()
+            .unwrap()
+            .extend_from_slice(b"hi\n");
+        assert_eq!(state.blocks.block(block_id).unwrap().output_raw.len(), 0);
+
+        apply_shell_hook_event(
+            &mut state,
+            ShellHookEvent::Precmd {
+                exit_code: 0,
+                cwd: None,
+            },
+            false,
+        );
+        // Pending bytes must now be in the block
+        assert_eq!(state.blocks.block(block_id).unwrap().output_raw, b"hi\n");
+        assert!(state.capture_pending.is_none());
+    }
+
+    #[test]
+    fn pending_bytes_discarded_on_monitor_interactive() {
+        let mut state = runtime_state();
+        state.shell_command_running = true;
+        apply_shell_hook_event(
+            &mut state,
+            ShellHookEvent::Preexec {
+                command: "python".to_string(),
+            },
+            false,
+        );
+        let block_id = state.blocks.active_block_id().unwrap();
+        // Python banner arrives while pending
+        state
+            .capture_pending
+            .as_mut()
+            .unwrap()
+            .extend_from_slice(b"Python 3.11.0\n");
+
+        // Monitor detects raw mode → discard banner
+        apply_pty_raw_mode_change(&mut state, crate::app::TermiosMode::Raw);
+
+        assert!(state.capture_pending.is_none());
+        assert_eq!(state.blocks.block(block_id).unwrap().output_raw.len(), 0);
+    }
+
+    #[test]
+    fn pending_bytes_discarded_on_alt_screen_enter() {
+        let mut state = runtime_state();
+        state.shell_command_running = true;
+        apply_shell_hook_event(
+            &mut state,
+            ShellHookEvent::Preexec {
+                command: "unknown_tui".to_string(),
+            },
+            false,
+        );
+        state
+            .capture_pending
+            .as_mut()
+            .unwrap()
+            .extend_from_slice(b"\x1b[?25l"); // cursor hide before alt-screen
+        on_alt_screen_enter(&mut state);
+        assert!(state.capture_pending.is_none());
+    }
+
+    #[test]
+    fn pending_tui_known_capture_suspended_immediately() {
+        let mut state = runtime_state();
+        apply_shell_hook_event(
+            &mut state,
+            ShellHookEvent::Preexec {
+                command: "nvim".to_string(),
+            },
+            false,
+        );
+        // PendingKnownTui must already have capture suspended
+        assert!(state.tui_state.is_capture_suspended());
+    }
+
+    #[test]
+    fn commit_pending_capture_flushes_to_block() {
+        let mut state = runtime_state();
+        let block_id = state
+            .blocks
+            .start_command("echo".to_string(), 0, BlockKind::NormalCommand);
+        state.capture_pending = Some(b"hello\n".to_vec());
+        commit_pending_capture(&mut state);
+        assert!(state.capture_pending.is_none());
+        assert_eq!(state.blocks.block(block_id).unwrap().output_raw, b"hello\n");
     }
 }
 

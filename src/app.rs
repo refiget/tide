@@ -818,7 +818,11 @@ impl TuiRuntimeState {
     /// Returns true if sidecar text capture should be suspended.
     pub fn is_capture_suspended(&self) -> bool {
         match self {
-            TuiRuntimeState::InAltScreen { .. }
+            // Known TUI: suspend immediately — startup cursor/mode sequences before alt-screen
+            // enter are noise, not block content.
+            TuiRuntimeState::PendingKnownTui { .. }
+            | TuiRuntimeState::PendingAgentCli { .. }
+            | TuiRuntimeState::InAltScreen { .. }
             | TuiRuntimeState::SuspendedNoAltScreen { .. }
             | TuiRuntimeState::MonitorDetectedInteractive { .. } => true,
             _ => false,
