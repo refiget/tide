@@ -5,6 +5,7 @@ use std::{
     path::PathBuf,
     time::Instant,
 };
+use std::fmt::Write as _;
 
 #[derive(Debug, Clone, Copy)]
 pub enum LogLevel {
@@ -103,31 +104,28 @@ impl DebugLog {
         context: Option<&str>,
     ) {
         let ms = self.start.elapsed().as_millis();
-        let context_str = if let Some(c) = context {
-            format!(" | Context: {{{}}}", c)
-        } else {
-            String::new()
-        };
-        let _ = writeln!(
-            self.writer,
-            "[+{}ms][{}][{}] {}{}",
-            ms, level, cat, msg, context_str
-        );
+        let _ = write!(self.writer, "[+{}ms][{}][{}] {}", ms, level, cat, msg);
+        if let Some(c) = context {
+            let _ = write!(self.writer, " | Context: {{{}}}", c);
+        }
+        let _ = writeln!(self.writer);
         let _ = self.writer.flush();
     }
 
     /// Escapes non-printable ASCII characters for trace logging.
     pub fn escape_bytes(bytes: &[u8]) -> String {
-        let mut escaped = String::new();
+        let mut escaped = String::with_capacity(bytes.len() * 4);
         for &b in bytes {
-            if b >= 0x20 && b <= 0x7E {
+            if (0x20..=0x7E).contains(&b) {
                 escaped.push(b as char);
             } else {
                 match b {
                     b'\n' => escaped.push_str("\\n"),
                     b'\r' => escaped.push_str("\\r"),
                     b'\t' => escaped.push_str("\\t"),
-                    _ => escaped.push_str(&format!("\\x{:02x}", b)),
+                    _ => {
+                        let _ = write!(escaped, "\\x{:02x}", b);
+                    }
                 }
             }
         }
@@ -143,4 +141,78 @@ macro_rules! dlog {
             __log.log(&format!($($arg)*));
         }
     };
+}
+
+/// Write an INFO level structured log entry.
+#[macro_export]
+macro_rules! tinfo {
+    ($log:expr, $cat:expr, $($arg:tt)*) => {
+        if let Some(ref mut __log) = $log {
+            __log.log_structured(
+                $crate::debug_log::LogLevel::INFO,
+                $cat,
+                &format!($($arg)*),
+                None,
+            );
+        }
+    };
+}
+
+/// Write a DEBUG level structured log entry with JSON context.
+#[macro_export]
+macro_rules! tdebug {
+    ($log:expr, $cat:expr, $msg:expr, $context:expr) => {
+        if let Some(ref mut __log) = $log {
+            let __ctx_json = serde_json::to_string($context).unwrap_or_else(|_| "{}".to_string());
+            __log.log_structured(
+                $crate::debug_log::LogLevel::DEBUG,
+                $cat,
+                $msg,
+                Some(&__ctx_json),
+            );
+        }
+    };
+}
+
+/// Write a TRACE level structured log entry for byte sequences.
+#[macro_export]
+macro_rules! ttrace {
+    ($log:expr, $cat:expr, $msg:expr, $bytes:expr) => {
+        if let Some(ref mut __log) = $log {
+            let __escaped = $crate::debug_log::DebugLog::escape_bytes($bytes);
+            __log.log_structured(
+                $crate::debug_log::LogLevel::TRACE,
+                $cat,
+                $msg,
+                Some(&__escaped),
+            );
+        }
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_escape_bytes() {
+        let input = b"Hello\nWorld\r\t\x01\x7F";
+        let escaped = DebugLog::escape_bytes(input);
+        assert_eq!(escaped, "Hello\\nWorld\\r\\t\\x01\\x7f");
+    }
+
+    #[test]
+    fn test_macros_compilation() {
+        // This test primarily ensures the macros compile and can be called.
+        // We use a mock-like approach or just check if it compiles.
+        let mut log = DebugLog::open_if_enabled(); // Likely None in tests unless env set
+        
+        tinfo!(log, LogCategory::APP, "Test info message");
+        tinfo!(log, LogCategory::APP, "Test info message with arg: {}", 42);
+        
+        let context = serde_json::json!({"key": "value"});
+        tdebug!(log, LogCategory::APP, "Test debug message", &context);
+        
+        ttrace!(log, LogCategory::APP, "Test trace message", b"data\x00");
+    }
 }
