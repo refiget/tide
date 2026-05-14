@@ -95,10 +95,11 @@ impl ShellBuffer {
             return;
         }
 
-        let mut chars = self.current_line.chars().collect::<Vec<_>>();
-        if self.current_col < self.current_line_chars {
-            chars[self.current_col] = ch;
-            self.current_line = chars.into_iter().collect();
+        if let Some((start, next_char)) = self.current_line.char_indices().nth(self.current_col) {
+            let end = start + next_char.len_utf8();
+            let mut b = [0; 4];
+            self.current_line
+                .replace_range(start..end, ch.encode_utf8(&mut b));
         }
         self.current_col += 1;
     }
@@ -109,10 +110,10 @@ impl ShellBuffer {
         }
 
         self.current_col -= 1;
-        let mut chars = self.current_line.chars().collect::<Vec<_>>();
         if self.current_col < self.current_line_chars {
-            chars.remove(self.current_col);
-            self.current_line = chars.into_iter().collect();
+            if let Some((start, _)) = self.current_line.char_indices().nth(self.current_col) {
+                self.current_line.remove(start);
+            }
             self.current_line_chars = self.current_line_chars.saturating_sub(1);
         }
     }
@@ -194,5 +195,80 @@ impl ShellBuffer {
             .take(self.current_col)
             .collect::<String>();
         self.current_line_chars = self.current_line.chars().count();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_put_char_append() {
+        let mut buffer = ShellBuffer::new();
+        buffer.put_char('a');
+        buffer.put_char('b');
+        assert_eq!(buffer.current_line, "ab");
+        assert_eq!(buffer.current_col, 2);
+        assert_eq!(buffer.current_line_chars, 2);
+    }
+
+    #[test]
+    fn test_put_char_replace() {
+        let mut buffer = ShellBuffer::new();
+        buffer.put_char('a');
+        buffer.put_char('b');
+        buffer.put_char('c');
+        buffer.current_col = 1;
+        buffer.put_char('x');
+        assert_eq!(buffer.current_line, "axc");
+        assert_eq!(buffer.current_col, 2);
+        assert_eq!(buffer.current_line_chars, 3);
+    }
+
+    #[test]
+    fn test_put_char_multibyte() {
+        let mut buffer = ShellBuffer::new();
+        buffer.put_char('🦀');
+        for ch in " Ferris".chars() {
+            buffer.put_char(ch);
+        }
+        buffer.current_col = 0;
+        buffer.put_char('🦞');
+        assert_eq!(buffer.current_line, "🦞 Ferris");
+        assert_eq!(buffer.current_col, 1);
+        assert_eq!(buffer.current_line_chars, 8); // 🦀 + " Ferris" = 1 + 7 = 8 chars
+
+        buffer.current_col = 1;
+        buffer.put_char('!');
+        assert_eq!(buffer.current_line, "🦞!Ferris");
+    }
+
+    #[test]
+    fn test_backspace() {
+        let mut buffer = ShellBuffer::new();
+        buffer.put_char('a');
+        buffer.put_char('b');
+        buffer.put_char('c');
+        buffer.backspace();
+        assert_eq!(buffer.current_line, "ab");
+        assert_eq!(buffer.current_col, 2);
+        assert_eq!(buffer.current_line_chars, 2);
+
+        buffer.current_col = 1;
+        buffer.backspace();
+        assert_eq!(buffer.current_line, "b");
+        assert_eq!(buffer.current_col, 0);
+        assert_eq!(buffer.current_line_chars, 1);
+    }
+
+    #[test]
+    fn test_backspace_multibyte() {
+        let mut buffer = ShellBuffer::new();
+        buffer.put_char('🦀');
+        buffer.put_char('🦞');
+        buffer.backspace();
+        assert_eq!(buffer.current_line, "🦀");
+        assert_eq!(buffer.current_col, 1);
+        assert_eq!(buffer.current_line_chars, 1);
     }
 }
