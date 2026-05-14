@@ -199,7 +199,7 @@ pub fn enter_block_render<W: Write>(w: &mut W) -> io::Result<()> {
 /// screen that is about to be discarded.
 pub fn leave_block_render<W: Write>(w: &mut W, was_alt_screen: bool) -> io::Result<()> {
     if was_alt_screen {
-        execute!(w, LeaveAlternateScreen, ResetColor, Show)
+        execute!(w, LeaveAlternateScreen, Show)
     } else {
         execute!(w, ResetColor, Show)
     }
