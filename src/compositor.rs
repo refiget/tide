@@ -43,6 +43,8 @@ pub enum VisualLine {
     },
     /// Separator row injected once before the first shared-agent block.
     AgentSectionHeader,
+    /// Closing border injected once after the last shared-agent block.
+    AgentSectionFooter,
     BlockDetailLine {
         block_id: BlockId,
         text: String,
@@ -279,6 +281,7 @@ impl Compositor {
             if block.agent_ref.is_some() && !agent_section_started {
                 agent_section_started = true;
                 lines.push(VisualLine::AgentSectionHeader);
+                // No empty line — header flows directly into the first block.
             }
 
             let start_line = lines.len();
@@ -301,6 +304,10 @@ impl Compositor {
                 start_line,
                 end_line: lines.len(),
             });
+        }
+
+        if agent_section_started {
+            lines.push(VisualLine::AgentSectionFooter);
         }
 
         let total_height = lines.len();
@@ -397,35 +404,18 @@ impl Compositor {
         });
 
         if is_agent {
-            // Agent block body: header line (alias/name/cwd/status) + optional title line.
+            // Agent block body: header line (name/cwd/status) + optional title line.
             let inner_w = block_frame_width.saturating_sub(2);
             let content_w = inner_w.saturating_sub(block_view.body_padding);
-            let alias_str = block
-                .agent_ref
-                .as_ref()
-                .map(|r| r.alias.as_str())
-                .unwrap_or("");
             let cwd_str = format::compact_cwd(&block.cwd, home, 32);
             let display_name = block.command.as_str();
-            let left_part = format!("[{alias_str}] {display_name}  {cwd_str}");
+            let left_part = format!("{display_name}  {cwd_str}");
 
             let status_str = block
                 .live_snapshot
                 .as_ref()
                 .and_then(|s| s.status.display_label())
-                .map(|label| {
-                    let cmd = block
-                        .live_snapshot
-                        .as_ref()
-                        .and_then(|s| s.current_command.as_deref());
-                    match cmd {
-                        Some(c) => {
-                            let trimmed = if c.len() > 30 { &c[..30] } else { c };
-                            format!("· {label}: {trimmed}")
-                        }
-                        None => format!("· {label}"),
-                    }
-                })
+                .map(|label| format!("· {label}"))
                 .unwrap_or_default();
 
             let left_w = UnicodeWidthStr::width(left_part.as_str());

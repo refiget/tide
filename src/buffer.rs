@@ -5,6 +5,7 @@ pub struct ShellBuffer {
     pub lines: Vec<ShellLine>,
     current_line: String,
     current_col: usize,
+    current_line_chars: usize,
     current_block_id: Option<BlockId>,
 }
 
@@ -74,17 +75,30 @@ impl ShellBuffer {
             block_id: self.current_block_id,
         });
         self.current_col = 0;
+        self.current_line_chars = 0;
     }
 
     fn put_char(&mut self, ch: char) {
-        let mut chars = self.current_line.chars().collect::<Vec<_>>();
-        if self.current_col < chars.len() {
-            chars[self.current_col] = ch;
-            self.current_line = chars.into_iter().collect();
-        } else {
-            let padding = self.current_col.saturating_sub(chars.len());
+        if self.current_col == self.current_line_chars {
+            self.current_line.push(ch);
+            self.current_col += 1;
+            self.current_line_chars += 1;
+            return;
+        }
+
+        if self.current_col > self.current_line_chars {
+            let padding = self.current_col - self.current_line_chars;
             self.current_line.push_str(&" ".repeat(padding));
             self.current_line.push(ch);
+            self.current_col += 1;
+            self.current_line_chars += padding + 1;
+            return;
+        }
+
+        let mut chars = self.current_line.chars().collect::<Vec<_>>();
+        if self.current_col < self.current_line_chars {
+            chars[self.current_col] = ch;
+            self.current_line = chars.into_iter().collect();
         }
         self.current_col += 1;
     }
@@ -96,9 +110,10 @@ impl ShellBuffer {
 
         self.current_col -= 1;
         let mut chars = self.current_line.chars().collect::<Vec<_>>();
-        if self.current_col < chars.len() {
+        if self.current_col < self.current_line_chars {
             chars.remove(self.current_col);
             self.current_line = chars.into_iter().collect();
+            self.current_line_chars = self.current_line_chars.saturating_sub(1);
         }
     }
 
@@ -159,10 +174,12 @@ impl ShellBuffer {
                         .skip(self.current_col)
                         .collect::<String>();
                     self.current_col = 0;
+                    self.current_line_chars = self.current_line.chars().count();
                 }
                 2 => {
                     self.current_line.clear();
                     self.current_col = 0;
+                    self.current_line_chars = 0;
                 }
                 _ => {}
             },
@@ -176,5 +193,6 @@ impl ShellBuffer {
             .chars()
             .take(self.current_col)
             .collect::<String>();
+        self.current_line_chars = self.current_line.chars().count();
     }
 }

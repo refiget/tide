@@ -389,6 +389,9 @@ fn render_line<W: Write>(
         VisualLine::AgentSectionHeader => {
             render_agent_section_header(w, width, block_view)?;
         }
+        VisualLine::AgentSectionFooter => {
+            render_agent_section_footer(w, width, block_view)?;
+        }
         VisualLine::BlockDetailLine {
             block_id,
             text,
@@ -560,6 +563,17 @@ fn render_top_border<W: Write>(
         ('╭', '╮')
     };
     let border_fg = style.border_fg;
+
+    if is_agent {
+        queue!(w, Print(" ".repeat(margin)))?;
+        queue!(w, SetForegroundColor(border_fg))?;
+        queue!(w, Print(left))?;
+        queue!(w, Print("─".repeat(inner_w)))?;
+        queue!(w, Print(right))?;
+        queue!(w, ResetColor)?;
+        return Ok(());
+    }
+
     let command_fg = match label.status {
         BlockStatus::Success => Theme::STATUS_OK_FG,
         BlockStatus::Failed => Theme::STATUS_FAILED_FG,
@@ -651,8 +665,26 @@ fn render_agent_section_header<W: Write>(
         return Ok(());
     }
     let margin = block_view.horizontal_margin;
-    let label = "Shared Agents";
+    let label = "Agents";
     let border = titled_border('╭', '╮', label, bw);
+    queue!(w, SetForegroundColor(Theme::META_HEADER_FG))?;
+    queue!(w, Print(format!("{}{border}", " ".repeat(margin))))?;
+    queue!(w, ResetColor)?;
+    Ok(())
+}
+
+fn render_agent_section_footer<W: Write>(
+    w: &mut W,
+    width: usize,
+    block_view: &BlockViewConfig,
+) -> io::Result<()> {
+    let bw = block_width(width, block_view);
+    if bw < 4 {
+        return Ok(());
+    }
+    let margin = block_view.horizontal_margin;
+    let inner = bw.saturating_sub(2);
+    let border = format!("╰{}╯", "─".repeat(inner));
     queue!(w, SetForegroundColor(Theme::META_HEADER_FG))?;
     queue!(w, Print(format!("{}{border}", " ".repeat(margin))))?;
     queue!(w, ResetColor)?;

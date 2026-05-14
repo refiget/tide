@@ -82,6 +82,7 @@ cargo fmt --check && cargo check && cargo test
 - ANSI output is parsed by `ansi::parse_ansi_lines()` into `StyledText` spans; rendered by `render_styled_framed_text()`
 - Navigation functions use `view.visible.ids(blocks)` instead of `blocks.timeline` directly (supports filters)
 - `build_detail_lines` in compositor renders Detail View (not `build_detail_layout`)
+- Agent block header line format: `name  ~/cwd  · status` (no alias prefix); second body line shows the agent's live current command, falling back to session title when idle
 
 ## Renderer Maintenance Groups
 
@@ -110,7 +111,7 @@ Changes to Help appearance touch: `render_help_overlay` + `BLOCK_HELP_ENTRIES` /
 | `pty.rs` | PTY session, 3-thread runtime (output reader, input reader, resize handler), `Osc777Parser` integration, frame-limited render loop, keyboard dispatch via `execute_block_view_action`/`execute_detail_view_action`, navigation, `TerminalGuard` |
 | `block.rs` | `BlockStore` — `Vec<BlockId>` timeline + `HashMap<BlockId, CommandBlock>` lookup, retention cap, output byte cap |
 | `buffer.rs` | `ShellBuffer` — text storage with ANSI escape handling (CSI cursor/erase, OSC strings, CR, backspace, tab) |
-| `compositor.rs` | `Compositor` + `VisualLine` enum (Empty, ShellText, BlockBodyLine, StyledBlockBodyLine, BlockTopBorder, BlockBottomBorder, BlockDetailLine, DetailTopBorder, DetailBottomBorder, StyledDetailBodyLine, Footer) — builds `VisualLayout` from `ShellBuffer + BlockStore + ViewState`; viewport math; Detail View pager |
+| `compositor.rs` | `Compositor` + `VisualLine` enum (Empty, ShellText, BlockBodyLine, StyledBlockBodyLine, BlockTopBorder, BlockBottomBorder, BlockDetailLine, DetailTopBorder, DetailBottomBorder, StyledDetailBodyLine, AgentSectionHeader, AgentSectionFooter, Footer) — builds `VisualLayout` from `ShellBuffer + BlockStore + ViewState`; viewport math; Detail View pager |
 | `renderer.rs` | Terminal drawing via crossterm — `BlockSelectionStyle` (centralised selection palette), border chars, framed text, styled span rendering, Help overlay, theme-aware colors, footer, cursor, `truncate_to_width` |
 | `config.rs` | TOML config loading (local > XDG > legacy > defaults), `BlockViewConfig`, `BlockLayoutConfig`, `KeymapConfig`, `RuntimeConfig`; `.default()` for all configs; keymap resolution (defaults overlaid by user TOML) |
 | `format.rs` | `compact_command()`, `compact_cwd()`, `build_top_label()` — ANSI stripping, whitespace normalization, unicode-aware truncation, top border label formatting |
