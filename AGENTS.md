@@ -72,7 +72,7 @@ All 12 modules declared in `main.rs` — no `mod.rs`/`lib.rs`. `app.rs` and `con
 
 ## Key Design Decisions
 
-- **Normal mode is transparent passthrough** — full-screen TUI programs (vim, fzf, less, ssh, etc.) work without a whitelist. If no linear output is captured, Block View shows `"no captured text output"`.
+- **Normal mode is transparent passthrough** — full-screen TUI programs (vim, fzf, less, ssh, etc.) work without a whitelist. Command classification is only for capture/label policy: configured `tui`, `repl`, and `agent` commands suspend sidecar capture; everything else is a normal captured command.
 - **Command boundaries from zsh hooks** (`preexec`/`precmd` via OSC 777), not prompt regexes. Integration script at `shell/zsh-integration.zsh` — user sources from `.zshrc`, not injected by Tide. Without it, Tide runs in degraded mode (no block capture).
 - **Three-thread runtime** — output thread (PTY → capture + render), input thread (stdin → dispatch), resize thread (SIGWINCH). Shared state: `Arc<Mutex<RuntimeState>>`. Lock ordering: output locks `state → stdout`; input drops state before locking stdout (avoids deadlock on Ctrl-B).
 - **Alternate screen** — Block/Detail rendering uses alt screen buffer, isolated from main terminal. `Ctrl-B` enters (input drops state lock → locks stdout → alt screen → re-acquires state). `q`/`Esc` sets `needs_cleanup` flag (separate from `dirty`/`force_render` to avoid race between output thread writes and alt-screen cleanup).
@@ -83,7 +83,7 @@ All 12 modules declared in `main.rs` — no `mod.rs`/`lib.rs`. `app.rs` and `con
 - **BlockIndex** indexes command text only (substring token match, AND semantics), not output text.
 - **Output truncation** — `max_output_bytes_per_block` (1MB); `output_truncated` flag surfaces as `"· truncated"` in bottom border label.
 - **Config search order** — `config/tide.toml` (local override) → `$XDG_CONFIG_HOME/tide/config.toml` → `~/.config/tide/config.toml` → `Config::default()`.
-- **`tui_apps` / `raw_programs`** are config fields defined but not yet wired into runtime behavior.
+- **Command classification** — `[classification.tui]`, `[classification.repl]`, and `[classification.agent]` are exception lists. There is no `normal` category; non-matches are normal by default. Legacy `tui_apps` maps to TUI classification, and `raw_programs` remains parse-only compatibility.
 
 ## What Not To Build Now
 

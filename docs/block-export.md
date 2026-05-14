@@ -71,8 +71,8 @@ CLI `--part` maps directly to this behavior:
 ## Semantics Notes
 
 - `kind` and `status` are intentionally separated:
-  - `kind` describes execution type (`normal_command`, `tui_session`, `raw_program`, ...)
+  - `kind` describes execution type (`normal_command`, `tui_session`, `interactive`, `raw_program`, ...)
   - `status` describes result (`running`, `success`, `failed`, ...)
 - `output_truncated` is a first-class semantic field and should be honored by consumers.
-- `output_semantics` is `non_linear_tui` for `raw_program`/`tui_session`; otherwise `line_oriented`.
-- For `tui_session` and `raw_program`, `views.context.output_excerpt` is intentionally empty.
+- `output_semantics` is `non_linear_tui` for `raw_program`/`tui_session`, `interactive_repl` for `interactive`, and `line_oriented` for normal commands.
+- For `tui_session`, `raw_program`, and `interactive`, `views.context.output_excerpt` is intentionally empty.

@@ -31,12 +31,13 @@ An `ExecutionBlock` should carry:
 
 Early implementations may merge stdout and stderr into one text stream, but the model should leave room to separate them later.
 
-`ExecutionKind` may later distinguish normal commands from interactive metadata:
+`ExecutionKind` distinguishes ordinary captured commands from interactive metadata:
 
 ```rust
 pub enum ExecutionKind {
     Normal,
-    RawProgram,
+    TuiSession,
+    Interactive,
 }
 ```
 
@@ -57,7 +58,7 @@ Do not store block border text in `ShellBuffer`.
 
 Do not store block border text in `ShellBuffer`.
 
-Full-screen program output is not specially classified in the first phase. Normal mode is transparent for every command. If Tide cannot capture useful linear text for a command, Block View shows a placeholder body line.
+Normal mode is transparent for every command. Classification is an exception list used only for sidecar capture and labels: configured `tui` and `agent` commands become TUI session blocks, configured `repl` commands become interactive blocks, and unmatched commands remain normal captured commands. If Tide cannot capture useful linear text for a command, Block View shows a placeholder body line.
 
 ## BlockLayout
 

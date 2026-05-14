@@ -204,6 +204,13 @@ commands = ["codex", "claude", "opencode", "aider"]
 - `classification.repl.commands` — interactive shells, language REPLs, debuggers, and database consoles. Tide suspends capture and shows a REPL placeholder block.
 - `classification.agent.commands` — coding agent CLIs. Tide suspends capture and treats the command as an agent-like interactive session.
 
+The default config contains common command lists. To remove a default category, set its command list to an empty array:
+
+```toml
+[classification.repl]
+commands = []
+```
+
 Legacy `[tui_apps]` and `[tui.apps]` entries are still parsed and treated as TUI classification for compatibility, but the classification table is the preferred interface.
 
 ## Legacy `raw_programs`

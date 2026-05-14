@@ -263,10 +263,13 @@ pub struct RuntimeConfig {
     pub block_layout: BlockLayoutConfig,
     pub block_view: BlockViewConfig,
     pub max_blocks: Option<usize>,
+    pub classification_tui_commands: Vec<String>,
+    pub classification_repl_commands: Vec<String>,
+    pub classification_agent_commands: Vec<String>,
 }
 ```
 
-Built from the user-facing `Config` struct via `build_runtime_config`, which extracts only the rendering-relevant fields and discards raw_programs etc.
+Built from the user-facing `Config` struct via `build_runtime_config`. Command classification is an exception table: matches in `classification.tui`, `classification.repl`, or `classification.agent` suspend sidecar capture and label the block; non-matches are normal captured commands. Legacy `tui_apps` entries are merged into the TUI command list for compatibility. `raw_programs` remains parse-only compatibility and is not used for passthrough or classification.
 
 ## BlockAction
 
@@ -903,8 +906,19 @@ pub struct Config {
     pub history: HistoryConfig,
     pub block_view: BlockViewConfig,
     pub block_layout: BlockLayoutConfig,
+    pub classification: ClassificationConfig,
     pub raw_programs: Vec<String>,
     pub tui_apps: BTreeMap<String, TuiAppConfig>,
+}
+
+pub struct ClassificationConfig {
+    pub tui: CommandClassification,
+    pub repl: CommandClassification,
+    pub agent: CommandClassification,
+}
+
+pub struct CommandClassification {
+    pub commands: Vec<String>,
 }
 
 pub struct BlockViewConfig {
@@ -929,7 +943,9 @@ pub struct BlockLayoutConfig {
 
 `copy_format` controls the serialization format for clipboard copy operations. Defaults to `CopyFormat::Plaintext`. Configurable via TOML as `copy_format = "markdown"` (or `"plaintext"`, `"transcript"`, `"json"`).
 
-`raw_programs` may remain as a legacy compatibility field in loaded config, but it must not be required for terminal passthrough. Full-screen programs work without a whitelist because Normal mode is transparent.
+`classification.tui.commands`, `classification.repl.commands`, and `classification.agent.commands` are capture-policy exception lists. A command that matches none of them is normal and its linear output is captured. Configured TUI and agent commands are labeled as TUI sessions; configured REPL commands are labeled as interactive sessions. Runtime termios/alt-screen detection remains a fallback for unknown interactive commands, not the primary classifier.
+
+`raw_programs` may remain as a legacy compatibility field in loaded config, but it must not be required for terminal passthrough. Full-screen programs work without a whitelist because Normal mode is transparent. Use `classification.*` to control labels and capture behavior.
 
 If no config file exists, defaults are used.
 
