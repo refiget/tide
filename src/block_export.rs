@@ -192,11 +192,17 @@ fn build_audit_json(block: &CommandBlock) -> String {
     if matches!(block.kind, BlockKind::TuiSession) {
         items.push(json_string("tui_session"));
     }
+    if matches!(block.kind, BlockKind::Interactive) {
+        items.push(json_string("interactive_repl"));
+    }
     format!("[{}]", items.join(","))
 }
 
 fn build_context_json(block: &CommandBlock) -> String {
-    let excerpt = if matches!(block.kind, BlockKind::RawProgram | BlockKind::TuiSession) {
+    let excerpt = if matches!(
+        block.kind,
+        BlockKind::RawProgram | BlockKind::TuiSession | BlockKind::Interactive
+    ) {
         String::new()
     } else {
         output_tail(&block.output_text, 4)
@@ -220,10 +226,10 @@ fn output_tail(output: &str, lines: usize) -> String {
 }
 
 fn output_semantics(kind: BlockKind) -> &'static str {
-    if matches!(kind, BlockKind::RawProgram | BlockKind::TuiSession) {
-        "non_linear_tui"
-    } else {
-        "line_oriented"
+    match kind {
+        BlockKind::RawProgram | BlockKind::TuiSession => "non_linear_tui",
+        BlockKind::Interactive => "interactive_repl",
+        _ => "line_oriented",
     }
 }
 

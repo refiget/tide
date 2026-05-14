@@ -525,6 +525,9 @@ pub type ExecutionBlock = CommandBlock;
 pub enum BlockKind {
     NormalCommand,
     TuiSession,
+    /// REPL or readline program detected by raw/cbreak mode (python, node, psql).
+    /// No alt-screen; capture suspended after detection.
+    Interactive,
     RawProgram,
     AiGenerated,
     SystemEvent,
@@ -558,6 +561,7 @@ impl BlockKind {
         match self {
             BlockKind::NormalCommand => "normal_command",
             BlockKind::TuiSession => "tui_session",
+            BlockKind::Interactive => "interactive",
             BlockKind::RawProgram => "raw_program",
             BlockKind::AiGenerated => "ai_generated",
             BlockKind::SystemEvent => "system_event",

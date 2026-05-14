@@ -443,7 +443,14 @@ impl Compositor {
             }
         } else if matches!(block.kind, BlockKind::RawProgram | BlockKind::TuiSession) {
             lines.push(VisualLine::BlockBodyLine {
-                text: "interactive program; screen output was not captured".to_string(),
+                text: "TUI session; screen output was not captured".to_string(),
+                block_id,
+                selected,
+                in_visual,
+            });
+        } else if matches!(block.kind, BlockKind::Interactive) {
+            lines.push(VisualLine::BlockBodyLine {
+                text: "interactive REPL; session input/output was not captured".to_string(),
                 block_id,
                 selected,
                 in_visual,
@@ -951,7 +958,12 @@ fn get_block_styled_output_lines(block: &CommandBlock) -> Vec<crate::ansi::Style
     use crate::ansi::StyledText;
     if matches!(block.kind, BlockKind::RawProgram | BlockKind::TuiSession) {
         return vec![StyledText::plain(
-            "interactive program; screen output was not captured",
+            "TUI session; screen output was not captured",
+        )];
+    }
+    if matches!(block.kind, BlockKind::Interactive) {
+        return vec![StyledText::plain(
+            "interactive REPL; session input/output was not captured",
         )];
     }
     if block.output_raw.is_empty() {
@@ -1028,8 +1040,14 @@ fn detail_lines(
 
     if matches!(block.kind, BlockKind::RawProgram | BlockKind::TuiSession) {
         lines.extend([
-            "type: interactive program".to_string(),
-            "capture: no linear text output was captured for this block.".to_string(),
+            "type: TUI session".to_string(),
+            "capture: screen output was not captured for this block.".to_string(),
+        ]);
+    }
+    if matches!(block.kind, BlockKind::Interactive) {
+        lines.extend([
+            "type: interactive REPL".to_string(),
+            "capture: session input/output was not captured for this block.".to_string(),
         ]);
     }
 
@@ -1061,7 +1079,10 @@ fn format_ago(t: std::time::SystemTime) -> String {
 
 fn bottom_label(block: &CommandBlock) -> String {
     if matches!(block.kind, BlockKind::RawProgram | BlockKind::TuiSession) {
-        return format!("raw · {}", format_duration_ms(block.duration_ms));
+        return format!("tui · {}", format_duration_ms(block.duration_ms));
+    }
+    if matches!(block.kind, BlockKind::Interactive) {
+        return format!("repl · {}", format_duration_ms(block.duration_ms));
     }
     let truncated = if block.output_truncated {
         " · truncated"
@@ -1330,7 +1351,7 @@ mod tests {
 
         assert_eq!(range.start, 0);
         assert!(visual.iter().any(|line| matches!(line, VisualLine::BlockBodyLine { text, .. } if text == "no captured text output")));
-        assert!(visual.iter().any(|line| matches!(line, VisualLine::BlockBodyLine { text, .. } if text == "interactive program; screen output was not captured")));
+        assert!(visual.iter().any(|line| matches!(line, VisualLine::BlockBodyLine { text, .. } if text == "TUI session; screen output was not captured")));
         assert_lines_match_range(&shell, &store, &view, &config, 20);
     }
 

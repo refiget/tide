@@ -3102,6 +3102,9 @@ fn apply_pty_raw_mode_change(state: &mut RuntimeState, mode: crate::app::Termios
     }
     if let Some(block_id) = state.blocks.active_block_id() {
         state.capture_pending = None; // discard startup bytes before raw mode
+        if let Some(block) = state.blocks.block_mut(block_id) {
+            block.kind = BlockKind::Interactive;
+        }
         state.tui_state = TuiRuntimeState::MonitorDetectedInteractive { block_id };
     }
 }
@@ -4655,6 +4658,10 @@ mod tests {
             TuiRuntimeState::MonitorDetectedInteractive { block_id: b } if b == block_id
         ));
         assert!(state.tui_state.is_capture_suspended());
+        assert_eq!(
+            state.blocks.block(block_id).unwrap().kind,
+            BlockKind::Interactive
+        );
     }
 
     #[test]
