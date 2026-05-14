@@ -2,31 +2,28 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentProvider {
-    Opencode,
-}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct AgentProvider(pub String);
 
 impl AgentProvider {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            AgentProvider::Opencode => "opencode",
-        }
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
     pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "opencode" => Some(AgentProvider::Opencode),
-            _ => None,
-        }
+        Some(AgentProvider(s.to_string()))
+    }
+
+    pub fn opencode() -> Self {
+        AgentProvider("opencode".to_string())
     }
 }
 
@@ -114,25 +111,22 @@ fn jump_path() -> PathBuf {
 fn with_lock<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     fs::create_dir_all(registry_dir()).context("create ~/.tide")?;
 
-    let mut lock_acquired = false;
-    for _ in 0..40 {
-        let open = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(lock_path());
-        if open.is_ok() {
-            lock_acquired = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(lock_path())
+        .context("open lock file")?;
 
-    if !lock_acquired {
-        anyhow::bail!("agent registry lock timeout");
-    }
+    // Block until the lock is acquired
+    lock_file.lock_exclusive().context("acquire agent registry lock")?;
 
     let result = f();
-    let _ = fs::remove_file(lock_path());
+
+    // Release the lock
+    let _ = lock_file.unlock();
+
+    // We intentionally do not remove the lock file, as removing it can
+    // cause race conditions with advisory locks.
     result
 }
 
@@ -192,14 +186,14 @@ fn write_jump_stack_unlocked(path: &Path, stack: &JumpStackFile) -> Result<()> {
     Ok(())
 }
 
-pub fn list_all(provider: AgentProvider) -> Result<Vec<AgentRecord>> {
+pub fn list_all(provider: &AgentProvider) -> Result<Vec<AgentRecord>> {
     with_lock(|| {
         let path = registry_path();
         let reg = read_registry_unlocked(&path);
         Ok(reg
             .records
             .into_iter()
-            .filter(|r| r.provider == provider)
+            .filter(|r| r.provider == *provider)
             .collect())
     })
 }
@@ -246,7 +240,7 @@ fn allocate_alias(records: &[AgentRecord]) -> String {
 }
 
 pub fn register_running(
-    provider: AgentProvider,
+    provider: &AgentProvider,
     source_tide_id: &str,
     command_block_id: u64,
     command: &str,
@@ -261,7 +255,7 @@ pub fn register_running(
         let mut reg = read_registry_unlocked(&path);
 
         if let Some(pos) = reg.records.iter().position(|r| {
-            r.provider == provider
+            r.provider == *provider
                 && r.source_tide_id == source_tide_id
                 && r.command_block_id == command_block_id
         }) {
@@ -282,12 +276,12 @@ pub fn register_running(
         let same_provider: Vec<AgentRecord> = reg
             .records
             .iter()
-            .filter(|r| r.provider == provider)
+            .filter(|r| r.provider == *provider)
             .cloned()
             .collect();
         let alias = allocate_alias(&same_provider);
         reg.records.push(AgentRecord {
-            provider,
+            provider: provider.clone(),
             alias: alias.clone(),
             source_tide_id: source_tide_id.to_string(),
             command_block_id,
@@ -308,7 +302,7 @@ pub fn register_running(
 }
 
 pub fn unregister_running(
-    provider: AgentProvider,
+    provider: &AgentProvider,
     source_tide_id: &str,
     command_block_id: u64,
 ) -> Result<()> {
@@ -317,7 +311,7 @@ pub fn unregister_running(
         let mut reg = read_registry_unlocked(&path);
         let now = now_ms();
         for rec in &mut reg.records {
-            if rec.provider == provider
+            if rec.provider == *provider
                 && rec.source_tide_id == source_tide_id
                 && rec.command_block_id == command_block_id
             {
@@ -330,23 +324,23 @@ pub fn unregister_running(
     })
 }
 
-pub fn find_by_alias(provider: AgentProvider, alias: &str) -> Result<Option<AgentRecord>> {
+pub fn find_by_alias(provider: &AgentProvider, alias: &str) -> Result<Option<AgentRecord>> {
     with_lock(|| {
         let path = registry_path();
         let reg = read_registry_unlocked(&path);
         Ok(reg
             .records
             .into_iter()
-            .find(|r| r.provider == provider && r.alias == alias))
+            .find(|r| r.provider == *provider && r.alias == alias))
     })
 }
 
-pub fn mark_stale(provider: AgentProvider, alias: &str) -> Result<()> {
+pub fn mark_stale(provider: &AgentProvider, alias: &str) -> Result<()> {
     with_lock(|| {
         let path = registry_path();
         let mut reg = read_registry_unlocked(&path);
         for rec in &mut reg.records {
-            if rec.provider == provider && rec.alias == alias && rec.status == AgentStatus::Running
+            if rec.provider == *provider && rec.alias == alias && rec.status == AgentStatus::Running
             {
                 rec.status = AgentStatus::Stale;
                 rec.last_seen_at_ms = now_ms();
