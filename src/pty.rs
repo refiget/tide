@@ -255,7 +255,9 @@ pub fn run_shell(config: &Config) -> Result<()> {
                     let should_render = output_state
                         .lock()
                         .map(|state| {
-                            !matches!(state.view.view, ViewKind::Plain | ViewKind::Help)
+                            state.tide_alt_screen_active
+                                && !state.render_state.needs_cleanup
+                                && !matches!(state.view.view, ViewKind::Plain | ViewKind::Help)
                                 && state.view.confirm.is_none()
                         })
                         .unwrap_or(false);
@@ -1698,6 +1700,16 @@ fn render_runtime(
         let mut state = state
             .lock()
             .map_err(|_| io::Error::other("runtime state lock poisoned"))?;
+
+        // Guard: if alt-screen cleanup is pending or Tide's UI is not active,
+        // do not render — the input thread may have already exited the alt-screen
+        // between the caller's `should_render` check and this lock acquisition.
+        if !state.tide_alt_screen_active
+            || state.render_state.needs_cleanup
+            || matches!(state.view.view, ViewKind::Plain)
+        {
+            return Ok(());
+        }
 
         // Clear expired flash message and extract text for compositor.
         let flash_text = state
