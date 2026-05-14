@@ -88,6 +88,7 @@ enum TuiLifecycleEvent {
 enum CaptureEvent {
     Visible(Vec<u8>),
     Hook(ShellHookEvent),
+    Barrier(mpsc::Sender<()>),
 }
 
 const FRAME_DURATION: Duration = Duration::from_millis(16);
@@ -255,6 +256,9 @@ pub fn run_shell(config: &Config) -> Result<()> {
                         let _ = render_runtime(&capture_state, &capture_stdout);
                     }
                 }
+                CaptureEvent::Barrier(done) => {
+                    let _ = done.send(());
+                }
             }
         }
     });
@@ -328,6 +332,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
     let input_state = Arc::clone(&state);
     let input_stdout = Arc::clone(&stdout);
     let input_passthrough = Arc::clone(&plain_passthrough);
+    let input_capture = capture_tx.clone();
     let _input_thread = thread::spawn(move || {
         let mut stdin = io::stdin();
         let mut buffer = [0_u8; 8192];
@@ -361,6 +366,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
                         }
 
                         if byte == 0x02 {
+                            wait_for_capture_barrier(&input_capture);
                             if let Ok(mut state) = input_state.lock() {
                                 let did_back = try_global_jump_back(&mut state);
                                 let should_enter_block = !did_back
@@ -1152,6 +1158,13 @@ fn is_shell_normal_mode(state: &RuntimeState) -> bool {
     !state.shell_command_running
         && !state.pty_alt_screen_active
         && matches!(state.tui_state, TuiRuntimeState::Idle)
+}
+
+fn wait_for_capture_barrier(capture_tx: &mpsc::Sender<CaptureEvent>) {
+    let (done_tx, done_rx) = mpsc::channel();
+    if capture_tx.send(CaptureEvent::Barrier(done_tx)).is_ok() {
+        let _ = done_rx.recv_timeout(Duration::from_millis(100));
+    }
 }
 
 fn try_global_jump_back(state: &mut RuntimeState) -> bool {
