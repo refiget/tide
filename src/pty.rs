@@ -366,13 +366,14 @@ pub fn run_shell(config: &Config) -> Result<()> {
                         }
 
                         if byte == 0x02 {
-                            wait_for_capture_barrier(&input_capture);
-                            if let Ok(mut state) = input_state.lock() {
-                                let did_back = try_global_jump_back(&mut state);
-                                let should_enter_block = !did_back
-                                    && matches!(state.view.view, ViewKind::Plain)
-                                    && is_shell_normal_mode(&state);
-                                drop(state);
+                            if let Some(should_enter_block) =
+                                with_fresh_capture_state(&input_capture, &input_state, |state| {
+                                    let did_back = try_global_jump_back(state);
+                                    !did_back
+                                        && matches!(state.view.view, ViewKind::Plain)
+                                        && is_shell_normal_mode(state)
+                                })
+                            {
                                 if should_enter_block {
                                     input_passthrough.store(false, Ordering::Release);
                                     // Enter alternate screen for Block View.
@@ -1165,6 +1166,15 @@ fn wait_for_capture_barrier(capture_tx: &mpsc::Sender<CaptureEvent>) {
     if capture_tx.send(CaptureEvent::Barrier(done_tx)).is_ok() {
         let _ = done_rx.recv_timeout(Duration::from_millis(100));
     }
+}
+
+fn with_fresh_capture_state<R>(
+    capture_tx: &mpsc::Sender<CaptureEvent>,
+    state: &Arc<Mutex<RuntimeState>>,
+    f: impl FnOnce(&mut RuntimeState) -> R,
+) -> Option<R> {
+    wait_for_capture_barrier(capture_tx);
+    state.lock().ok().map(|mut state| f(&mut state))
 }
 
 fn try_global_jump_back(state: &mut RuntimeState) -> bool {
@@ -3462,6 +3472,45 @@ mod tests {
             agent_event_mtimes: HashMap::new(),
             debug_log: None,
         }
+    }
+
+    #[test]
+    fn fresh_capture_state_waits_for_prior_capture_events() {
+        let state = Arc::new(Mutex::new(runtime_state()));
+        let worker_state = Arc::clone(&state);
+        let (tx, rx) = mpsc::channel::<CaptureEvent>();
+        let worker = thread::spawn(move || {
+            while let Ok(event) = rx.recv() {
+                match event {
+                    CaptureEvent::Hook(event) => {
+                        if let Ok(mut state) = worker_state.lock() {
+                            apply_shell_hook_event(&mut state, event, false);
+                        }
+                    }
+                    CaptureEvent::Barrier(done) => {
+                        let _ = done.send(());
+                    }
+                    CaptureEvent::Visible(_) => {}
+                }
+            }
+        });
+
+        tx.send(CaptureEvent::Hook(ShellHookEvent::Preexec {
+            command: "echo hi".to_string(),
+        }))
+        .unwrap();
+        tx.send(CaptureEvent::Hook(ShellHookEvent::Precmd {
+            exit_code: 0,
+            cwd: None,
+        }))
+        .unwrap();
+
+        let is_normal =
+            with_fresh_capture_state(&tx, &state, |state| is_shell_normal_mode(state)).unwrap();
+        assert!(is_normal);
+
+        drop(tx);
+        worker.join().unwrap();
     }
 
     fn add_block(state: &mut RuntimeState, command: &str) {
