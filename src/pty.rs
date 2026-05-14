@@ -34,40 +34,40 @@ use crate::{
     shell_hooks::{Osc777Parser, ParsedPtyPart, ShellHookEvent},
 };
 
-pub(crate) struct RuntimeState {
-    pub(crate) shell: ShellBuffer,
-    pub(crate) blocks: BlockStore,
-    pub(crate) view: ViewState,
-    pub(crate) input_accumulator: InputAccumulator,
-    pub(crate) render_state: RenderState,
-    pub(crate) config: RuntimeConfig,
-    pub(crate) rows: u16,
-    pub(crate) cols: u16,
-    pub(crate) index: crate::index::BlockIndex,
+struct RuntimeState {
+    shell: ShellBuffer,
+    blocks: BlockStore,
+    view: ViewState,
+    input_accumulator: InputAccumulator,
+    render_state: RenderState,
+    config: RuntimeConfig,
+    rows: u16,
+    cols: u16,
+    index: crate::index::BlockIndex,
     /// TUI full-screen lifecycle state machine.
-    pub(crate) tui_state: TuiRuntimeState,
+    tui_state: TuiRuntimeState,
     /// Whether the PTY (child process) is currently in an alternate screen buffer.
-    pub(crate) pty_alt_screen_active: bool,
+    pty_alt_screen_active: bool,
     /// Whether Tide's own UI (Block View) is currently in an alternate screen buffer.
-    pub(crate) tide_alt_screen_active: bool,
-    pub(crate) tide_id: String,
+    tide_alt_screen_active: bool,
+    tide_id: String,
     /// Tracks blocks in this Tide session that are running agent processes.
-    pub(crate) agent_blocks: HashMap<BlockId, AgentRef>,
-    pub(crate) shell_command_running: bool,
+    agent_blocks: HashMap<BlockId, AgentRef>,
+    shell_command_running: bool,
     /// Bytes received after preexec for an unclassified command.
     /// Committed to the block store on the first non-interactive monitor poll or on precmd.
     /// Discarded when alt-screen or raw/cbreak mode is detected (TUI / REPL startup bytes).
-    pub(crate) capture_pending: Option<Vec<u8>>,
+    capture_pending: Option<Vec<u8>>,
     /// Process group ID of the shell process itself (set once at startup).
-    pub(crate) shell_pgid: Option<libc::pid_t>,
+    shell_pgid: Option<libc::pid_t>,
     /// Foreground PGID of the PTY as of the last monitor poll.
     /// `None` if unknown or equal to shell_pgid (no non-shell foreground job).
-    pub(crate) foreground_job_pgid: Option<libc::pid_t>,
+    foreground_job_pgid: Option<libc::pid_t>,
     /// Last-seen mtime (seconds) per tmux pane_id for agent event files.
     /// Used by the watcher thread to detect when opencode writes new events.
-    pub(crate) agent_event_mtimes: HashMap<String, u64>,
+    agent_event_mtimes: HashMap<String, u64>,
     /// Per-session debug log.  `Some` when `TIDE_DEBUG=1`.
-    pub(crate) debug_log: Option<crate::debug_log::DebugLog>,
+    debug_log: Option<crate::debug_log::DebugLog>,
 }
 
 #[derive(Clone)]
@@ -637,7 +637,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
 /// Handles common prefixes: sudo, doas, env, command, noglob, builtin, time,
 /// and `KEY=value` environment variable assignments.
 /// Also handles package runners like npx, bunx, pnpm dlx, uvx.
-pub(crate) fn extract_command_name(command_line: &str) -> Option<String> {
+fn extract_command_name(command_line: &str) -> Option<String> {
     let tokens: Vec<&str> = command_line.split_whitespace().collect();
     let mut i = 0;
     while i < tokens.len() {

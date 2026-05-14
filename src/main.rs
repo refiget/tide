@@ -1,5 +1,4 @@
 mod agent_events;
-mod agent_logic;
 mod agent_registry;
 mod ansi;
 mod app;
@@ -12,12 +11,10 @@ mod config;
 mod debug_log;
 mod format;
 mod index;
-mod input_handler;
 mod pty;
 mod renderer;
 mod shell_hooks;
 mod theme;
-mod tmux;
 
 use anyhow::Result;
 use tracing::debug;

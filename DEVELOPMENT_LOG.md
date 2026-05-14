@@ -142,6 +142,7 @@ This log records notable project changes so future agents can quickly understand
 ### pty.rs code-level refactor
 
 - Executed a major code-level refactoring on `src/pty.rs` to address structural complexity and god-object anti-patterns.
-- **Module Extraction:** Extracted tmux integration logic into `src/tmux.rs` and agent logic into `src/agent_logic.rs`. This reduces the scope of the main PTY loop, making future development and bug tracking significantly easier.
+- **PtyEngine struct:** Encapsulated the PTY lifecycle into a proper `PtyEngine` struct with named methods.
 - **Lock Ordering Standardization:** Investigated the lock ordering of `RuntimeState` and `stdout`. Determined that the codebase correctly follows a `stdout` -> `state` lock order (or uses lock-and-drop sequential patterns). Added explicit module-level documentation to `pty.rs` formalizing this rule to prevent future deadlocks.
 - **Cleanup:** Resolved 20+ unused variable/mutability warnings across `compositor.rs` and `pty.rs` via `cargo fix`.
+- **Note:** Module extraction (tmux/agent/input) was attempted but reverted — the functions remain in `pty.rs` as private helpers. If extraction is revisited, a dedicated branch is recommended.
