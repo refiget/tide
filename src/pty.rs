@@ -173,7 +173,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
 
     // Open debug log if TIDE_DEBUG=1. Print path so the user knows where to tail.
     if let Some(log) = crate::debug_log::DebugLog::open_if_enabled() {
-        eprintln!("\r\ntide debug log: {}\r", log.path.display());
+        println!("\r\ntide debug log: {}\r", log.path.display());
         if let Ok(mut st) = state.lock() {
             let shell = config.shell.program.clone();
             let cwd = initial_cwd.display().to_string();
@@ -407,20 +407,27 @@ pub fn run_shell(config: &Config) -> Result<()> {
                     };
 
                     if needs_cleanup {
+                        // Mark Tide's alt-screen inactive BEFORE acquiring stdout.
+                        // render_runtime re-checks this flag after acquiring stdout,
+                        // so any concurrent render that already passed the first guard
+                        // will abort rather than writing to the main terminal.
+                        if let Ok(mut state) = input_state.lock() {
+                            state.tide_alt_screen_active = false;
+                        }
+
                         // Leave alt screen only if needed.
                         if let Ok(mut stdout) = input_stdout.lock() {
                             let _ = renderer::leave_block_render(&mut *stdout, was_alt_screen);
                         }
 
-                        // Clear cleanup flags and extract pending_paste (state lock isolated,
-                        // no stdout lock held).
+                        // Clear remaining cleanup flags and extract pending_paste.
                         let paste = if let Ok(mut state) = input_state.lock() {
                             // If it was a forced PTY cleanup, reset PTY flag.
                             if state.render_state.force_pty_alt_screen_cleanup {
                                 state.pty_alt_screen_active = false;
                                 state.render_state.force_pty_alt_screen_cleanup = false;
                             }
-                            state.tide_alt_screen_active = false;
+                            // tide_alt_screen_active already cleared above.
                             state.render_state.needs_cleanup = false;
                             state.render_state.dirty = false;
                             state.render_state.force_render = false;
@@ -1885,6 +1892,23 @@ fn render_runtime(
     let mut stdout = stdout
         .lock()
         .map_err(|_| io::Error::other("stdout lock poisoned"))?;
+
+    // Second guard: re-check tide_alt_screen_active now that we hold the stdout lock.
+    // The input thread sets tide_alt_screen_active=false (in state lock) BEFORE acquiring
+    // stdout, so if cleanup already ran we see false here and skip the render — preventing
+    // Block View from being drawn to the main terminal.
+    {
+        let state = state
+            .lock()
+            .map_err(|_| io::Error::other("runtime state lock poisoned"))?;
+        if !state.tide_alt_screen_active
+            || state.render_state.needs_cleanup
+            || matches!(state.view.view, ViewKind::Plain)
+        {
+            return Ok(());
+        }
+    }
+
     let (rendered, drew_underlying) = renderer::render(
         &mut *stdout,
         &visual_lines,
