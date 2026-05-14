@@ -194,11 +194,13 @@ pub fn enter_block_render<W: Write>(w: &mut W) -> io::Result<()> {
 ///
 /// # Ordering
 ///
-/// `LeaveAlternateScreen` MUST come first so that `ResetColor` and `Show` are
-/// applied on the *main* screen (the restored terminal state), not the alt
-/// screen that is about to be discarded.
+/// `LeaveAlternateScreen` MUST come first so that `Show` is applied on the *main*
+/// screen (the restored terminal state), not the alt screen that is about to be
+/// discarded.
 pub fn leave_block_render<W: Write>(w: &mut W, was_alt_screen: bool) -> io::Result<()> {
     if was_alt_screen {
+        // Most terminals restore the SGR state of the main buffer when leaving the alternate screen.
+        // The shell prompt (zle reset-prompt) will also ensure the correct style is applied.
         execute!(w, LeaveAlternateScreen, Show)
     } else {
         execute!(w, ResetColor, Show)
