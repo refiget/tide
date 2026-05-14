@@ -5,6 +5,7 @@ pub enum ShellHookEvent {
     CwdChanged { cwd: String },
     AltScreenEnter,
     AltScreenExit,
+    ZleReady,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,6 +209,11 @@ _tide_redraw_prompt() {
 zle -N _tide_redraw_prompt 2>/dev/null
 bindkey '^X^R' _tide_redraw_prompt 2>/dev/null
 
+_tide_zle_line_init() {
+  printf '\033]777;zle_ready\a'
+}
+zle -N zle-line-init _tide_zle_line_init 2>/dev/null
+
 add-zsh-hook preexec _tide_preexec
 add-zsh-hook precmd _tide_precmd
 add-zsh-hook chpwd _tide_emit_cwd
@@ -226,6 +232,10 @@ fn parse_osc777_event(bytes: &[u8]) -> Option<ShellHookEvent> {
 }
 
 fn parse_block_marker(text: &str) -> Option<ShellHookEvent> {
+    if text == "zle_ready" {
+        return Some(ShellHookEvent::ZleReady);
+    }
+
     if let Some(payload) = text.strip_prefix("block_start;cmd=") {
         return Some(ShellHookEvent::Preexec {
             command: decode_payload(payload)?,
@@ -287,8 +297,18 @@ mod tests {
         assert!(script.contains("file://"));
         assert!(script.contains("block_start"));
         assert!(script.contains("block_end"));
+        assert!(script.contains("zle-line-init"));
+        assert!(script.contains("zle_ready"));
         assert!(!script.contains("PROMPT="));
         assert!(!script.contains("RPROMPT="));
+    }
+
+    #[test]
+    fn strips_zle_ready_marker() {
+        let mut parser = Osc777Parser::default();
+        let parsed = parser.push(b"\x1b]777;zle_ready\x07");
+
+        assert_eq!(parsed, vec![ParsedPtyPart::Event(ShellHookEvent::ZleReady)]);
     }
 
     #[test]

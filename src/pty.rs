@@ -69,6 +69,7 @@ enum TuiLifecycleEvent {
     },
     AltScreenExit,
     Precmd,
+    ZleReady,
 }
 
 const FRAME_DURATION: Duration = Duration::from_millis(16);
@@ -106,6 +107,9 @@ pub fn run_shell(config: &Config) -> Result<()> {
         .with_context(|| format!("failed to spawn shell `{}`", config.shell.program))?;
 
     drop(pair.slave);
+
+    #[cfg(unix)]
+    let monitor_fd: std::os::unix::io::RawFd = pair.master.as_raw_fd().unwrap_or(-1);
 
     let mut reader = pair
         .master
@@ -166,26 +170,32 @@ pub fn run_shell(config: &Config) -> Result<()> {
                 Ok(0) => break,
                 Ok(n) => {
                     let parsed = parser.push(&buffer[..n]);
+                    let mut plain_stdout_dirty = false;
 
                     for part in parsed {
                         match part {
                             ParsedPtyPart::Visible(visible) => {
+                                let view = output_state
+                                    .lock()
+                                    .map(|state| state.view.view.clone())
+                                    .unwrap_or(ViewKind::Plain);
+
+                                if matches!(view, ViewKind::Plain) {
+                                    if !visible.is_empty() {
+                                        if let Ok(mut stdout) = output_stdout.lock() {
+                                            if stdout.write_all(&visible).is_err() {
+                                                break;
+                                            }
+                                            plain_stdout_dirty = true;
+                                        }
+                                    }
+                                }
+
                                 if let Ok(mut state) = output_state.lock() {
                                     let active_block_id = state.blocks.active_block_id();
                                     if !state.tui_state.is_capture_suspended() {
                                         state.blocks.append_output(&visible);
                                         state.shell.append(&visible, active_block_id);
-                                    }
-                                    let view = state.view.view.clone();
-                                    drop(state);
-
-                                    if matches!(view, ViewKind::Plain) {
-                                        if let Ok(mut stdout) = output_stdout.lock() {
-                                            if stdout.write_all(&visible).is_err() {
-                                                break;
-                                            }
-                                            let _ = stdout.flush();
-                                        }
                                     }
                                 } else {
                                     break;
@@ -206,6 +216,12 @@ pub fn run_shell(config: &Config) -> Result<()> {
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    if plain_stdout_dirty {
+                        if let Ok(mut stdout) = output_stdout.lock() {
+                            let _ = stdout.flush();
                         }
                     }
 
@@ -467,6 +483,28 @@ pub fn run_shell(config: &Config) -> Result<()> {
                 };
                 if should_render {
                     let _ = render_runtime(&watcher_state, &watcher_stdout);
+                }
+            }
+        }
+    });
+
+    #[cfg(unix)]
+    let monitor_running = Arc::clone(&running);
+    #[cfg(unix)]
+    let monitor_state = Arc::clone(&state);
+    #[cfg(unix)]
+    let _monitor_thread = thread::spawn(move || {
+        let mut prev_raw = is_pty_raw_mode(monitor_fd);
+        loop {
+            thread::sleep(Duration::from_millis(50));
+            if !monitor_running.load(Ordering::SeqCst) {
+                break;
+            }
+            let raw = is_pty_raw_mode(monitor_fd);
+            if raw != prev_raw {
+                prev_raw = raw;
+                if let Ok(mut st) = monitor_state.lock() {
+                    apply_pty_raw_mode_change(&mut st, raw);
                 }
             }
         }
@@ -811,6 +849,9 @@ fn detect_and_register_agent(
     if !cfg.enabled {
         return;
     }
+    if !is_agent_command(command, &cfg) {
+        return;
+    }
     if let Some(tty) = tmux_current_tty() {
         for _ in 0..8 {
             if tty_has_agent_process(&tty, &cfg) {
@@ -821,9 +862,7 @@ fn detect_and_register_agent(
         }
     }
     // Fallback: direct command match when process probing is unavailable.
-    if is_agent_command(command, &cfg) {
-        register_running_agent_block(state, id, command, provider, &cfg);
-    }
+    register_running_agent_block(state, id, command, provider, &cfg);
 }
 
 fn is_running_agent_block(state: &RuntimeState, id: BlockId) -> bool {
@@ -1121,20 +1160,31 @@ fn sync_shared_agent_blocks_for_provider(state: &mut RuntimeState, provider: Age
         };
 
         // command = just the display name (used for search/index); the compositor
-        // builds the full header line ([alias] name  ~/cwd  · status) at render time.
+        // builds the full header line (name  ~/cwd  · status) at render time.
         let command = display_name.clone();
 
-        // output_text = session title, rendered as the second body line by the compositor.
+        // output_text is rendered as the second body line by the compositor.
+        // Prefer the live command so agent blocks show what is currently running;
+        // fall back to the session title when no command is active.
+        let current_command = snapshot
+            .as_ref()
+            .and_then(|s| s.current_command.as_deref())
+            .unwrap_or("")
+            .to_string();
         let title = snapshot
             .as_ref()
             .and_then(|s| s.title.as_deref())
             .unwrap_or("")
             .to_string();
-        let output_text = title.clone();
-        let output_raw = if title.is_empty() {
+        let output_text = if current_command.is_empty() {
+            title
+        } else {
+            current_command
+        };
+        let output_raw = if output_text.is_empty() {
             Vec::new()
         } else {
-            title.as_bytes().to_vec()
+            output_text.as_bytes().to_vec()
         };
 
         state.blocks.executions.insert(
@@ -1266,20 +1316,43 @@ fn advance_tui_state(
             // Alt-screen was used (or suspended): finalize the TUI block.
             TuiRuntimeState::InAltScreen { block_id }
             | TuiRuntimeState::ExitedAltScreen { block_id }
-            | TuiRuntimeState::SuspendedNoAltScreen { block_id, .. } => {
-                (TuiRuntimeState::Idle, Some(block_id))
-            }
+            | TuiRuntimeState::SuspendedNoAltScreen { block_id, .. }
+            | TuiRuntimeState::JobSuspended { block_id } => (TuiRuntimeState::Idle, Some(block_id)),
             // Pending: TUI was detected but alt-screen was never entered.
             // Treat as a normal command — no finalize needed.
             TuiRuntimeState::PendingKnownTui { .. }
             | TuiRuntimeState::PendingAgentCli { .. }
+            | TuiRuntimeState::MonitorDetectedInteractive { .. }
             | TuiRuntimeState::Idle => (TuiRuntimeState::Idle, None),
+        },
+        TuiLifecycleEvent::ZleReady => match prev {
+            // TUI in alt-screen when Ctrl-Z hit → suspend to JobSuspended, capture resumes
+            TuiRuntimeState::InAltScreen { block_id } => {
+                (TuiRuntimeState::JobSuspended { block_id }, None)
+            }
+            // TUI exited or was always-suspend, precmd was missed → finalize now
+            TuiRuntimeState::ExitedAltScreen { block_id }
+            | TuiRuntimeState::SuspendedNoAltScreen { block_id, .. } => {
+                (TuiRuntimeState::Idle, Some(block_id))
+            }
+            // MonitorDetectedInteractive: REPL detected raw mode, cleared on ZleReady
+            TuiRuntimeState::MonitorDetectedInteractive { .. } => (TuiRuntimeState::Idle, None),
+            // Normal case (idle after every command) or already suspended → nop
+            other => (other, None),
         },
     }
 }
 
 fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug_blocks: bool) {
     match event {
+        ShellHookEvent::ZleReady => {
+            let prev = std::mem::take(&mut state.tui_state);
+            let (next, tui_finalize_block) = advance_tui_state(prev, TuiLifecycleEvent::ZleReady);
+            state.tui_state = next;
+            if let Some(block_id) = tui_finalize_block {
+                finalize_exited_tui_on_precmd(state, block_id);
+            }
+        }
         ShellHookEvent::AltScreenEnter => on_alt_screen_enter(state),
         ShellHookEvent::AltScreenExit => on_alt_screen_exit(state),
         ShellHookEvent::CwdChanged { cwd } => {
@@ -2839,6 +2912,16 @@ fn content_height(state: &RuntimeState) -> usize {
 
 fn on_alt_screen_enter(state: &mut RuntimeState) {
     state.pty_alt_screen_active = true;
+
+    // Special case: a job that was Ctrl-Z'd is now resuming.
+    // Use the stored block_id and don't change the block kind (already TuiSession).
+    if let TuiRuntimeState::JobSuspended { block_id } = state.tui_state {
+        let prev = std::mem::take(&mut state.tui_state);
+        let (next, _) = advance_tui_state(prev, TuiLifecycleEvent::AltScreenEnter { block_id });
+        state.tui_state = next;
+        return;
+    }
+
     // Extract app_name and categorization from Pending state.
     let (is_known_tui, app_name) = match &state.tui_state {
         TuiRuntimeState::PendingKnownTui { app_match, .. } => {
@@ -2938,6 +3021,32 @@ fn current_pty_size() -> PtySize {
         cols,
         pixel_width: 0,
         pixel_height: 0,
+    }
+}
+
+#[cfg(unix)]
+fn is_pty_raw_mode(fd: std::os::unix::io::RawFd) -> bool {
+    if fd < 0 {
+        return false;
+    }
+    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+    unsafe { libc::tcgetattr(fd, &mut termios) == 0 && termios.c_lflag & libc::ICANON == 0 }
+}
+
+fn apply_pty_raw_mode_change(state: &mut RuntimeState, raw: bool) {
+    if !raw {
+        return; // Raw mode ended — stay suspended until precmd/ZleReady clears state.
+    }
+    // Only act if a command is actively running and the TUI state machine is idle
+    // (no known TUI, no alt-screen, no agent-CLI pending).
+    if !state.shell_command_running {
+        return; // Shell readline showing a prompt — not a user command.
+    }
+    if !matches!(state.tui_state, TuiRuntimeState::Idle) {
+        return; // Already tracked by the existing TUI state machine.
+    }
+    if let Some(block_id) = state.blocks.active_block_id() {
+        state.tui_state = TuiRuntimeState::MonitorDetectedInteractive { block_id };
     }
 }
 
@@ -4243,6 +4352,15 @@ mod tests {
         assert!(!is_agent_process_command("echo opencode", &cfg));
     }
 
+    #[test]
+    fn agent_command_detection_only_accepts_configured_start_aliases() {
+        let cfg = opencode_agent_cfg();
+        assert!(is_agent_command("opencode", &cfg));
+        assert!(is_agent_command("env FOO=bar opencode --print-logs", &cfg));
+        assert!(!is_agent_command("ll", &cfg));
+        assert!(!is_agent_command("echo opencode", &cfg));
+    }
+
     // ─── detect_tui_app tests ────────────────────────────────────────────
 
     fn empty_tui_apps() -> std::collections::BTreeMap<String, crate::config::TuiAppConfig> {
@@ -4312,6 +4430,213 @@ mod tests {
         let result = detect_tui_app("env -u HOME lazygit", &[], &[], &empty_tui_apps());
         assert!(result.is_some());
         assert_eq!(result.as_ref().unwrap().command_name, "lazygit");
+    }
+
+    #[test]
+    fn zle_ready_in_idle_is_noop() {
+        let (state, finalize) =
+            advance_tui_state(TuiRuntimeState::Idle, TuiLifecycleEvent::ZleReady);
+        assert!(matches!(state, TuiRuntimeState::Idle));
+        assert!(finalize.is_none());
+    }
+
+    #[test]
+    fn zle_ready_after_ctrl_z_creates_job_suspended() {
+        let block_id = BlockId(1);
+        let (state, finalize) = advance_tui_state(
+            TuiRuntimeState::InAltScreen { block_id },
+            TuiLifecycleEvent::ZleReady,
+        );
+        assert!(matches!(
+            state,
+            TuiRuntimeState::JobSuspended {
+                block_id: BlockId(1)
+            }
+        ));
+        assert!(finalize.is_none());
+    }
+
+    #[test]
+    fn zle_ready_finalizes_exited_alt_screen_without_precmd() {
+        let block_id = BlockId(2);
+        let (state, finalize) = advance_tui_state(
+            TuiRuntimeState::ExitedAltScreen { block_id },
+            TuiLifecycleEvent::ZleReady,
+        );
+        assert!(matches!(state, TuiRuntimeState::Idle));
+        assert_eq!(finalize, Some(block_id));
+    }
+
+    #[test]
+    fn zle_ready_finalizes_suspended_no_alt_screen_without_precmd() {
+        let block_id = BlockId(3);
+        let app_match = TuiAppMatch {
+            app_name: "gdb".to_string(),
+            command_name: "gdb".to_string(),
+            source: TuiAppMatchSource::Builtin,
+            class: TuiCommandClass::AlwaysSuspend,
+        };
+        let (state, finalize) = advance_tui_state(
+            TuiRuntimeState::SuspendedNoAltScreen {
+                block_id,
+                app_match,
+            },
+            TuiLifecycleEvent::ZleReady,
+        );
+        assert!(matches!(state, TuiRuntimeState::Idle));
+        assert_eq!(finalize, Some(block_id));
+    }
+
+    #[test]
+    fn job_suspended_capture_not_suspended() {
+        let block_id = BlockId(4);
+        let state = TuiRuntimeState::JobSuspended { block_id };
+        assert!(!state.is_capture_suspended());
+        assert_eq!(state.active_block_id(), Some(block_id));
+    }
+
+    #[test]
+    fn job_suspended_resumes_via_alt_screen_enter() {
+        let block_id = BlockId(5);
+        let (state, finalize) = advance_tui_state(
+            TuiRuntimeState::JobSuspended { block_id },
+            TuiLifecycleEvent::AltScreenEnter { block_id },
+        );
+        assert!(matches!(
+            state,
+            TuiRuntimeState::InAltScreen {
+                block_id: BlockId(5)
+            }
+        ));
+        assert!(finalize.is_none());
+    }
+
+    #[test]
+    fn job_suspended_finalized_by_precmd() {
+        let block_id = BlockId(6);
+        let (state, finalize) = advance_tui_state(
+            TuiRuntimeState::JobSuspended { block_id },
+            TuiLifecycleEvent::Precmd,
+        );
+        assert!(matches!(state, TuiRuntimeState::Idle));
+        assert_eq!(finalize, Some(block_id));
+    }
+
+    #[test]
+    fn on_alt_screen_enter_resumes_job_suspended_block() {
+        let mut state = runtime_state();
+        // Simulate: nvim started, entered alt-screen, then was Ctrl-Z'd
+        let block_id = state
+            .blocks
+            .start_command("nvim".to_string(), 0, BlockKind::TuiSession);
+        state.tui_state = TuiRuntimeState::JobSuspended { block_id };
+
+        on_alt_screen_enter(&mut state);
+
+        // Should be InAltScreen with the ORIGINAL block_id (not a new one)
+        assert!(
+            matches!(state.tui_state, TuiRuntimeState::InAltScreen { block_id: b } if b == block_id)
+        );
+        // Block kind must not have been downgraded to RawProgram
+        assert_eq!(
+            state.blocks.block(block_id).unwrap().kind,
+            BlockKind::TuiSession
+        );
+    }
+
+    #[test]
+    fn monitor_ignores_raw_mode_when_not_running_command() {
+        let mut state = runtime_state();
+        // shell_command_running is false by default
+        assert!(!state.shell_command_running);
+        let block_id =
+            state
+                .blocks
+                .start_command("python".to_string(), 0, BlockKind::NormalCommand);
+        apply_pty_raw_mode_change(&mut state, true);
+        // Should stay Idle because no command is running
+        assert!(matches!(state.tui_state, TuiRuntimeState::Idle));
+        let _ = block_id;
+    }
+
+    #[test]
+    fn monitor_ignores_raw_mode_when_tui_state_not_idle() {
+        let mut state = runtime_state();
+        state.shell_command_running = true;
+        let block_id = state
+            .blocks
+            .start_command("nvim".to_string(), 0, BlockKind::NormalCommand);
+        let app_match = TuiAppMatch {
+            app_name: "nvim".to_string(),
+            command_name: "nvim".to_string(),
+            source: TuiAppMatchSource::Builtin,
+            class: TuiCommandClass::KnownTui,
+        };
+        state.tui_state = TuiRuntimeState::PendingKnownTui {
+            block_id,
+            app_match,
+        };
+        apply_pty_raw_mode_change(&mut state, true);
+        // Should stay PendingKnownTui — monitor does not override known TUI handling
+        assert!(matches!(
+            state.tui_state,
+            TuiRuntimeState::PendingKnownTui { .. }
+        ));
+    }
+
+    #[test]
+    fn monitor_detects_raw_mode_suspends_capture() {
+        let mut state = runtime_state();
+        state.shell_command_running = true;
+        let block_id =
+            state
+                .blocks
+                .start_command("python".to_string(), 0, BlockKind::NormalCommand);
+        apply_pty_raw_mode_change(&mut state, true);
+        assert!(matches!(
+            state.tui_state,
+            TuiRuntimeState::MonitorDetectedInteractive { block_id: b } if b == block_id
+        ));
+        assert!(state.tui_state.is_capture_suspended());
+    }
+
+    #[test]
+    fn monitor_detected_interactive_cleared_by_precmd() {
+        let block_id = BlockId(7);
+        let (state, finalize) = advance_tui_state(
+            TuiRuntimeState::MonitorDetectedInteractive { block_id },
+            TuiLifecycleEvent::Precmd,
+        );
+        assert!(matches!(state, TuiRuntimeState::Idle));
+        // No special TUI finalize — block cleaned up by normal precmd flow
+        assert!(finalize.is_none());
+    }
+
+    #[test]
+    fn monitor_detected_interactive_cleared_by_zle_ready() {
+        let block_id = BlockId(8);
+        let (state, finalize) = advance_tui_state(
+            TuiRuntimeState::MonitorDetectedInteractive { block_id },
+            TuiLifecycleEvent::ZleReady,
+        );
+        assert!(matches!(state, TuiRuntimeState::Idle));
+        assert!(finalize.is_none());
+    }
+
+    #[test]
+    fn monitor_detected_interactive_upgrades_on_alt_screen_enter() {
+        let mut state = runtime_state();
+        state.shell_command_running = true;
+        let block_id = state
+            .blocks
+            .start_command("ssh".to_string(), 0, BlockKind::NormalCommand);
+        state.tui_state = TuiRuntimeState::MonitorDetectedInteractive { block_id };
+        on_alt_screen_enter(&mut state);
+        // Should upgrade to InAltScreen (ssh unexpectedly used alt-screen too)
+        assert!(matches!(
+            state.tui_state,
+            TuiRuntimeState::InAltScreen { .. }
+        ));
     }
 }
 

@@ -774,15 +774,21 @@ pub enum TuiRuntimeState {
     InAltScreen { block_id: BlockId },
     /// Exited alternate screen but command hasn't finished (precmd) yet.
     ExitedAltScreen { block_id: BlockId },
+    /// TUI was Ctrl-Z'd while in alt-screen. Capture is NOT suspended.
+    /// Waiting for the job to resume (AltScreenEnter) or exit (Precmd).
+    JobSuspended { block_id: BlockId },
+    /// Raw-mode monitoring detected an interactive (REPL-like) program.
+    /// Capture is suspended. Cleared by precmd, ZleReady, or AltScreenEnter.
+    MonitorDetectedInteractive { block_id: BlockId },
 }
 
 impl TuiRuntimeState {
     /// Returns true if sidecar text capture should be suspended.
     pub fn is_capture_suspended(&self) -> bool {
         match self {
-            TuiRuntimeState::InAltScreen { .. } | TuiRuntimeState::SuspendedNoAltScreen { .. } => {
-                true
-            }
+            TuiRuntimeState::InAltScreen { .. }
+            | TuiRuntimeState::SuspendedNoAltScreen { .. }
+            | TuiRuntimeState::MonitorDetectedInteractive { .. } => true,
             _ => false,
         }
     }
@@ -795,6 +801,8 @@ impl TuiRuntimeState {
             TuiRuntimeState::SuspendedNoAltScreen { block_id, .. } => Some(*block_id),
             TuiRuntimeState::InAltScreen { block_id } => Some(*block_id),
             TuiRuntimeState::ExitedAltScreen { block_id } => Some(*block_id),
+            TuiRuntimeState::JobSuspended { block_id } => Some(*block_id),
+            TuiRuntimeState::MonitorDetectedInteractive { block_id } => Some(*block_id),
         }
     }
 }
