@@ -875,18 +875,18 @@ fn register_running_agent_block(
     command: &str,
     provider: AgentProvider,
     cfg: &AgentShareConfig,
-) {
+) -> bool {
     if !cfg.enabled {
-        return;
+        return false;
     }
     if state.agent_blocks.contains_key(&id) {
-        return;
+        return false;
     }
     let Some(block) = state.blocks.block(id) else {
-        return;
+        return false;
     };
     let Some(target) = tmux_current_target() else {
-        return;
+        return false;
     };
     let pane_id = tmux_current_pane_id().unwrap_or_default();
     let window_id = tmux_current_window_id().unwrap_or_default();
@@ -917,19 +917,23 @@ fn register_running_agent_block(
         &window_id,
     ) {
         state.agent_blocks.insert(id, AgentRef { provider, alias });
+        return true;
     }
+    false
 }
 
-fn detect_and_register_agents(state: &mut RuntimeState, id: BlockId, command: &str) {
+fn detect_and_register_agents(state: &mut RuntimeState, id: BlockId, command: &str) -> bool {
     let providers: Vec<(AgentProvider, AgentShareConfig)> = state
         .config
         .agents
         .iter()
         .map(|(&p, c)| (p, c.clone()))
         .collect();
+    let mut registered = false;
     for (provider, cfg) in providers {
-        detect_and_register_agent(state, id, command, provider, cfg);
+        registered |= detect_and_register_agent(state, id, command, provider, cfg);
     }
+    registered
 }
 
 fn detect_and_register_agent(
@@ -938,24 +942,23 @@ fn detect_and_register_agent(
     command: &str,
     provider: AgentProvider,
     cfg: AgentShareConfig,
-) {
+) -> bool {
     if !cfg.enabled {
-        return;
+        return false;
     }
     if !is_agent_command(command, &cfg) {
-        return;
+        return false;
     }
     if let Some(tty) = tmux_current_tty() {
         for _ in 0..8 {
             if tty_has_agent_process(&tty, &cfg) {
-                register_running_agent_block(state, id, command, provider, &cfg);
-                return;
+                return register_running_agent_block(state, id, command, provider, &cfg);
             }
             thread::sleep(Duration::from_millis(25));
         }
     }
     // Fallback: direct command match when process probing is unavailable.
-    register_running_agent_block(state, id, command, provider, &cfg);
+    register_running_agent_block(state, id, command, provider, &cfg)
 }
 
 fn is_running_agent_block(state: &RuntimeState, id: BlockId) -> bool {
@@ -1562,9 +1565,10 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
                 );
             }
 
-            detect_and_register_agents(state, block_id, &command);
-            sync_shared_agent_blocks(state);
-            move_running_agents_to_bottom(state);
+            if detect_and_register_agents(state, block_id, &command) {
+                sync_shared_agent_blocks(state);
+                move_running_agents_to_bottom(state);
+            }
             sync_block_viewport_after_history_change(state);
         }
         ShellHookEvent::Precmd { exit_code, cwd } => {
