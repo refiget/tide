@@ -1066,11 +1066,11 @@ fn render_framed_text<W: Write>(
 fn render_styled_framed_text<W: Write>(
     w: &mut W,
     styled: &StyledText,
-    plain_text: &str,
+    _plain_text: &str,
     bg: Option<crossterm::style::Color>,
     border_fg: crossterm::style::Color,
     width: usize,
-    layout: &BlockLayoutConfig,
+    _layout: &BlockLayoutConfig,
     block_view: &BlockViewConfig,
 ) -> io::Result<()> {
     let block_w = block_width(width, block_view);

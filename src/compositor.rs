@@ -820,9 +820,9 @@ fn build_return_panel_content(
     block: &CommandBlock,
     block_id: BlockId,
     blocks: &BlockStore,
-    width: u16,
+    _width: u16,
     height: u16,
-    block_view: &BlockViewConfig,
+    _block_view: &BlockViewConfig,
 ) -> Vec<VisualLine> {
     let app_name = block.app_name.as_deref().unwrap_or("TUI session");
     let title = format!("Return from {app_name}");
@@ -834,7 +834,7 @@ fn build_return_panel_content(
     let dur = format_duration_ms(block.duration_ms);
     let bottom_label = format!("{status} · {dur}");
 
-    let mut lines = vec![
+    let lines = vec![
         VisualLine::ReturnPanelTopBorder {
             block_id,
             label: title.clone(),
@@ -879,13 +879,13 @@ fn build_return_panel_content(
 
 fn build_return_panel_fallback(
     block_id: BlockId,
-    width: u16,
+    _width: u16,
     height: u16,
-    block_view: &BlockViewConfig,
+    _block_view: &BlockViewConfig,
     title: &str,
     message: &str,
 ) -> Vec<VisualLine> {
-    let mut lines = vec![
+    let lines = vec![
         VisualLine::ReturnPanelTopBorder {
             block_id,
             label: title.to_string(),

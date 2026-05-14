@@ -29,6 +29,11 @@ struct RuntimeState {
     tide_id: String,
     agent_blocks: HashMap<BlockId, AgentRef>,
     shell_command_running: bool,
+    capture_pending: Option<Vec<u8>>,
+    shell_pgid: Option<libc::pid_t>,
+    foreground_job_pgid: Option<libc::pid_t>,
+    agent_event_mtimes: HashMap<String, u64>,
+    debug_log: Option<DebugLog>,
     rows: u16,
     cols: u16,
     index: BlockIndex,
@@ -128,13 +133,14 @@ pub struct CommandBlock {
 pub enum BlockKind {
     NormalCommand,
     TuiSession,
+    Interactive,
     RawProgram,
     AiGenerated,
     SystemEvent,
 }
 ```
 
-`RawProgram` is set when an alternate-screen switch is detected during command execution. Non-zero exits set `BlockStatus::Failed` (kind stays `NormalCommand` unless another classifier changes it). `AiGenerated` and `SystemEvent` are future/reserved.
+`RawProgram` is set when an alternate-screen switch is detected during command execution. Non-zero exits set `BlockStatus::Failed` (kind stays `NormalCommand` unless another classifier changes it). `Interactive` is set for commands classified as REPL or detected as interactive via termios monitoring. `AiGenerated` and `SystemEvent` are future/reserved.
 
 ## BlockStatus
 

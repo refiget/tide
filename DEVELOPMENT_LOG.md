@@ -138,3 +138,10 @@ This log records notable project changes so future agents can quickly understand
   - PTY visible output flowing through renderer rather than directly to stdout
 - Updated AGENTS.md, README.md, CLAUDE.md to reflect rendering architecture
 - Design: Tide renders shell output (tmux-style), TUI apps will get transparent passthrough
+
+### pty.rs code-level refactor
+
+- Executed a major code-level refactoring on `src/pty.rs` to address structural complexity and god-object anti-patterns.
+- **Module Extraction:** Extracted tmux integration logic into `src/tmux.rs` and agent logic into `src/agent_logic.rs`. This reduces the scope of the main PTY loop, making future development and bug tracking significantly easier.
+- **Lock Ordering Standardization:** Investigated the lock ordering of `RuntimeState` and `stdout`. Determined that the codebase correctly follows a `stdout` -> `state` lock order (or uses lock-and-drop sequential patterns). Added explicit module-level documentation to `pty.rs` formalizing this rule to prevent future deadlocks.
+- **Cleanup:** Resolved 20+ unused variable/mutability warnings across `compositor.rs` and `pty.rs` via `cargo fix`.
