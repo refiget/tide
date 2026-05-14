@@ -56,6 +56,11 @@ struct RuntimeState {
     /// Committed to the block store on the first non-interactive monitor poll or on precmd.
     /// Discarded when alt-screen or raw/cbreak mode is detected (TUI / REPL startup bytes).
     capture_pending: Option<Vec<u8>>,
+    /// Process group ID of the shell process itself (set once at startup).
+    shell_pgid: Option<libc::pid_t>,
+    /// Foreground PGID of the PTY as of the last monitor poll.
+    /// `None` if unknown or equal to shell_pgid (no non-shell foreground job).
+    foreground_job_pgid: Option<libc::pid_t>,
     /// Last-seen mtime (seconds) per tmux pane_id for agent event files.
     /// Used by the watcher thread to detect when opencode writes new events.
     agent_event_mtimes: HashMap<String, u64>,
@@ -155,10 +160,23 @@ pub fn run_shell(config: &Config) -> Result<()> {
         agent_blocks: HashMap::new(),
         shell_command_running: false,
         capture_pending: None,
+        shell_pgid: None,
+        foreground_job_pgid: None,
         agent_event_mtimes: HashMap::new(),
     }));
     let stdout = Arc::new(Mutex::new(io::stdout()));
     let debug_blocks = std::env::var_os("TIDE_DEBUG_BLOCKS").is_some();
+
+    // Resolve shell PGID now that `state` exists.
+    #[cfg(unix)]
+    if let Some(shell_pid) = child.process_id() {
+        let pgid = unsafe { libc::getpgid(shell_pid as libc::pid_t) };
+        if pgid > 0 {
+            if let Ok(mut st) = state.lock() {
+                st.shell_pgid = Some(pgid);
+            }
+        }
+    }
 
     let output_running = Arc::clone(&running);
     let output_state = Arc::clone(&state);
@@ -504,22 +522,30 @@ pub fn run_shell(config: &Config) -> Result<()> {
     #[cfg(unix)]
     let _monitor_thread = thread::spawn(move || {
         let mut prev_mode = read_termios_mode(monitor_fd);
+        let mut prev_fg_pgid = read_foreground_pgid(monitor_fd);
         loop {
             thread::sleep(Duration::from_millis(50));
             if !monitor_running.load(Ordering::SeqCst) {
                 break;
             }
             let mode = read_termios_mode(monitor_fd);
-            if mode != prev_mode {
-                prev_mode = mode;
+            let fg_pgid = read_foreground_pgid(monitor_fd);
+
+            let mode_changed = mode != prev_mode;
+            let pgid_changed = fg_pgid != prev_fg_pgid;
+
+            if mode_changed || pgid_changed || (!mode.is_interactive() && prev_mode == mode) {
                 if let Ok(mut st) = monitor_state.lock() {
-                    apply_pty_raw_mode_change(&mut st, mode);
-                }
-            } else if !mode.is_interactive() {
-                // Non-interactive mode confirmed for this poll cycle:
-                // commit any pending capture buffer into the block store.
-                if let Ok(mut st) = monitor_state.lock() {
-                    if st.capture_pending.is_some() {
+                    if mode_changed {
+                        prev_mode = mode;
+                        apply_pty_raw_mode_change(&mut st, mode);
+                    }
+                    if pgid_changed {
+                        prev_fg_pgid = fg_pgid;
+                        apply_foreground_pgid_change(&mut st, fg_pgid);
+                    }
+                    // Commit pending capture when mode is non-interactive.
+                    if !mode.is_interactive() && st.capture_pending.is_some() {
                         commit_pending_capture(&mut st);
                     }
                 }
@@ -3052,6 +3078,29 @@ fn current_pty_size() -> PtySize {
     }
 }
 
+/// Read the current foreground process group of the PTY master.
+/// Returns `None` if the fd is invalid or the call fails.
+#[cfg(unix)]
+fn read_foreground_pgid(fd: std::os::unix::io::RawFd) -> Option<libc::pid_t> {
+    if fd < 0 {
+        return None;
+    }
+    let pgid = unsafe { libc::tcgetpgrp(fd) };
+    if pgid > 0 { Some(pgid) } else { None }
+}
+
+/// Update `foreground_job_pgid` based on the current PTY foreground PGID.
+/// Sets `Some(pgid)` when a non-shell process has the terminal, `None` when the shell does.
+#[cfg(unix)]
+fn apply_foreground_pgid_change(state: &mut RuntimeState, fg_pgid: Option<libc::pid_t>) {
+    let is_shell = match (fg_pgid, state.shell_pgid) {
+        (Some(fg), Some(sh)) => fg == sh,
+        (None, _) => true,
+        _ => false,
+    };
+    state.foreground_job_pgid = if is_shell { None } else { fg_pgid };
+}
+
 /// Flush any pending capture buffer into the active block.
 /// Called when a non-interactive monitor poll confirms the command is normal,
 /// or on precmd before finalizing the block.
@@ -3158,6 +3207,8 @@ mod tests {
             agent_blocks: HashMap::new(),
             shell_command_running: false,
             capture_pending: None,
+            shell_pgid: None,
+            foreground_job_pgid: None,
             agent_event_mtimes: HashMap::new(),
         }
     }
@@ -4879,6 +4930,33 @@ mod tests {
         commit_pending_capture(&mut state);
         assert!(state.capture_pending.is_none());
         assert_eq!(state.blocks.block(block_id).unwrap().output_raw, b"hello\n");
+    }
+
+    // ── PGID tracking tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn foreground_pgid_set_to_none_when_shell_has_terminal() {
+        let mut state = runtime_state();
+        state.shell_pgid = Some(100);
+        apply_foreground_pgid_change(&mut state, Some(100));
+        assert!(state.foreground_job_pgid.is_none());
+    }
+
+    #[test]
+    fn foreground_pgid_set_when_non_shell_process_has_terminal() {
+        let mut state = runtime_state();
+        state.shell_pgid = Some(100);
+        apply_foreground_pgid_change(&mut state, Some(200));
+        assert_eq!(state.foreground_job_pgid, Some(200));
+    }
+
+    #[test]
+    fn foreground_pgid_cleared_when_shell_regains_terminal() {
+        let mut state = runtime_state();
+        state.shell_pgid = Some(100);
+        state.foreground_job_pgid = Some(200);
+        apply_foreground_pgid_change(&mut state, Some(100));
+        assert!(state.foreground_job_pgid.is_none());
     }
 }
 
