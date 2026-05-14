@@ -1,12 +1,11 @@
 use std::{
     io::{Read, Seek, SeekFrom},
     path::Path,
-    time::UNIX_EPOCH,
 };
 
 use serde::Deserialize;
 
-use crate::app::{AgentLiveSnapshot, AgentLiveStatus};
+use crate::app::{AgentHistoryRecord, AgentLiveSnapshot, AgentLiveStatus, AgentToolCall};
 
 const TAIL_BYTES: u64 = 65536;
 const MAX_LINES: usize = 200;
@@ -15,7 +14,7 @@ const MAX_LINES: usize = 200;
 
 /// Read the live status snapshot for an agent.
 /// Hot path: reads events.jsonl (tail 64 KB) + session.json only.
-/// history.json is NOT read here — it is not needed for Block View rendering.
+/// history.json is also read to provide context for Detail View.
 pub fn read_agent_live_snapshot(agents_dir: &Path, pane_id: &str) -> Option<AgentLiveSnapshot> {
     if pane_id.is_empty() {
         return None;
@@ -23,8 +22,9 @@ pub fn read_agent_live_snapshot(agents_dir: &Path, pane_id: &str) -> Option<Agen
     let dir = agents_dir.join(pane_id);
     let status_snap = read_status_from_events(&dir);
     let title = read_session_title(&dir);
+    let history = read_history(&dir);
 
-    if status_snap.is_none() && title.is_none() {
+    if status_snap.is_none() && title.is_none() && history.is_empty() {
         return None;
     }
 
@@ -35,31 +35,11 @@ pub fn read_agent_live_snapshot(agents_dir: &Path, pane_id: &str) -> Option<Agen
         current_tool,
         current_command,
         title,
+        history,
     })
 }
 
-/// Returns the most-recent mtime (milliseconds) across events.jsonl and session.json.
-/// history.json is intentionally excluded — it is not part of the Block View hot path.
-pub fn agent_events_mtime(agents_dir: &Path, pane_id: &str) -> Option<u64> {
-    let dir = agents_dir.join(pane_id);
-    [
-        file_mtime_ms(&dir.join("events.jsonl")),
-        file_mtime_ms(&dir.join("session.json")),
-    ]
-    .into_iter()
-    .flatten()
-    .max()
-}
-
 // ─── File helpers ─────────────────────────────────────────────────────────────
-
-fn file_mtime_ms(path: &Path) -> Option<u64> {
-    std::fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-}
 
 // ─── Status from events.jsonl ─────────────────────────────────────────────────
 
@@ -198,16 +178,40 @@ fn read_session_title(dir: &Path) -> Option<String> {
     parsed.title.filter(|t| !t.trim().is_empty())
 }
 
-// ─── History from history.json (not on Block View hot path) ──────────────────
-// Kept for future use (e.g. Detail View). Not called by read_agent_live_snapshot.
+fn read_history(dir: &Path) -> Vec<AgentHistoryRecord> {
+    let path = dir.join("history.json");
+    let Ok(data) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(parsed) = serde_json::from_str::<HistoryFile>(&data) else {
+        return Vec::new();
+    };
+    parsed
+        .records
+        .into_iter()
+        .map(|r| AgentHistoryRecord {
+            at_ms: r.at_ms,
+            user_message: r.user_message,
+            tool_calls: r
+                .tool_calls
+                .into_iter()
+                .map(|t| AgentToolCall {
+                    tool_name: t.tool_name,
+                    command: t.command,
+                })
+                .collect(),
+            reply_summary: r.reply_summary,
+        })
+        .collect()
+}
 
-#[allow(dead_code)]
+// ─── History from history.json ───────────────────────────────────────────────
+
 #[derive(Deserialize)]
 struct HistoryFile {
     records: Vec<HistoryRecordJson>,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct HistoryRecordJson {
     at_ms: u64,
@@ -217,7 +221,6 @@ struct HistoryRecordJson {
     reply_summary: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize)]
 struct ToolCallJson {
     tool_name: String,

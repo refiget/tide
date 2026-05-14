@@ -954,8 +954,65 @@ fn center_return_panel_lines(mut lines: Vec<VisualLine>, height: usize) -> Vec<V
     padded
 }
 
+fn get_agent_history_styled_lines(block: &CommandBlock) -> Vec<crate::ansi::StyledText> {
+    use crate::ansi::{StyledSpan, StyledText, TextStyle};
+    use crate::theme::CatppuccinFrappe;
+
+    let Some(snapshot) = block.live_snapshot.as_ref() else {
+        return vec![StyledText::plain("no agent history available")];
+    };
+    if snapshot.history.is_empty() {
+        return vec![StyledText::plain("no conversation history")];
+    }
+
+    let mut lines = Vec::new();
+    for record in &snapshot.history {
+        if let Some(user_msg) = &record.user_message {
+            lines.push(StyledText::plain(""));
+            lines.push(StyledText {
+                spans: vec![StyledSpan {
+                    text: format!("  User: {user_msg}"),
+                    style: TextStyle {
+                        fg: Some(CatppuccinFrappe::BLUE),
+                        ..Default::default()
+                    },
+                }],
+            });
+        }
+        for tool in &record.tool_calls {
+            let cmd = tool.command.as_deref().unwrap_or("");
+            lines.push(StyledText {
+                spans: vec![StyledSpan {
+                    text: format!("    Tool [{}] {}", tool.tool_name, cmd),
+                    style: TextStyle {
+                        fg: Some(CatppuccinFrappe::TEAL),
+                        ..Default::default()
+                    },
+                }],
+            });
+        }
+        if let Some(reply) = &record.reply_summary {
+            lines.push(StyledText {
+                spans: vec![StyledSpan {
+                    text: format!("  Assistant: {reply}"),
+                    style: TextStyle {
+                        fg: Some(CatppuccinFrappe::MAUVE),
+                        ..Default::default()
+                    },
+                }],
+            });
+        }
+    }
+    lines
+}
+
 fn get_block_styled_output_lines(block: &CommandBlock) -> Vec<crate::ansi::StyledText> {
     use crate::ansi::StyledText;
+
+    if block.agent_ref.is_some() {
+        return get_agent_history_styled_lines(block);
+    }
+
     if matches!(block.kind, BlockKind::RawProgram | BlockKind::TuiSession) {
         return vec![StyledText::plain(
             "TUI session; screen output was not captured",

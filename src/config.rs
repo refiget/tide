@@ -157,6 +157,8 @@ fn deserialize_block_action(s: &str) -> Option<BlockViewAction> {
         "search_prev" => Some(BlockViewAction::SearchPrev),
         "help" => Some(BlockViewAction::Help),
         "quit" => Some(BlockViewAction::Quit),
+        "agent_stop" => Some(BlockViewAction::AgentStop),
+        "agent_retry" => Some(BlockViewAction::AgentRetry),
         _ => None,
     }
 }
@@ -205,6 +207,7 @@ pub fn default_block_keymap() -> HashMap<u8, BlockViewAction> {
     m.insert(b'r', BlockViewAction::Rerun);
     m.insert(b'd', BlockViewAction::Delete);
     m.insert(b'v', BlockViewAction::VisualMode);
+    m.insert(b's', BlockViewAction::AgentStop);
     m.insert(b'?', BlockViewAction::Help);
     m.insert(b'q', BlockViewAction::Quit);
     m.insert(0x1b, BlockViewAction::Quit);
@@ -280,16 +283,16 @@ pub fn build_runtime_config(config: Config) -> RuntimeConfig {
     let mut agents: HashMap<AgentProvider, AgentShareConfig> = HashMap::new();
     for (name, mut cfg) in config.agents {
         if let Some(provider) = AgentProvider::from_str(&name) {
-            fill_agent_defaults(provider, &mut cfg);
+            fill_agent_defaults(&provider, &mut cfg);
             agents.insert(provider, cfg);
         }
     }
-    if !agents.contains_key(&AgentProvider::Opencode) {
+    if !agents.contains_key(&AgentProvider::opencode()) {
         let mut cfg = config
             .opencode_share
             .unwrap_or_else(AgentShareConfig::default);
-        fill_agent_defaults(AgentProvider::Opencode, &mut cfg);
-        agents.insert(AgentProvider::Opencode, cfg);
+        fill_agent_defaults(&AgentProvider::opencode(), &mut cfg);
+        agents.insert(AgentProvider::opencode(), cfg);
     }
 
     RuntimeConfig {
@@ -325,21 +328,23 @@ fn merge_command_lists<const N: usize>(lists: [Vec<String>; N]) -> Vec<String> {
 }
 
 /// Fill provider-specific detection defaults for fields left empty in config.
-pub fn fill_agent_defaults_pub(provider: AgentProvider, cfg: &mut AgentShareConfig) {
+pub fn fill_agent_defaults_pub(provider: &AgentProvider, cfg: &mut AgentShareConfig) {
     fill_agent_defaults(provider, cfg);
 }
 
-fn fill_agent_defaults(provider: AgentProvider, cfg: &mut AgentShareConfig) {
+fn fill_agent_defaults(provider: &AgentProvider, cfg: &mut AgentShareConfig) {
     if cfg.start_aliases.is_empty() {
-        cfg.start_aliases = match provider {
-            AgentProvider::Opencode => vec!["opencode".to_string()],
+        cfg.start_aliases = match provider.as_str() {
+            "opencode" => vec!["opencode".to_string()],
+            _ => Vec::new(),
         };
     }
     if cfg.process_prefixes.is_empty() {
-        cfg.process_prefixes = match provider {
-            AgentProvider::Opencode => {
+        cfg.process_prefixes = match provider.as_str() {
+            "opencode" => {
                 vec!["opencode".to_string(), "opencode-".to_string()]
             }
+            _ => Vec::new(),
         };
     }
     if cfg.display_name.is_empty() {

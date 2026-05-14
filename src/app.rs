@@ -66,6 +66,8 @@ pub struct AgentLiveSnapshot {
     pub current_command: Option<String>,
     /// Session title from session.json. Shown as the second line in Block View.
     pub title: Option<String>,
+    /// Full session history from history.json. Shown in Detail View.
+    pub history: Vec<AgentHistoryRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -119,6 +121,8 @@ pub enum BlockViewAction {
     SearchPrev,
     Help,
     Quit,
+    AgentStop,
+    AgentRetry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize)]

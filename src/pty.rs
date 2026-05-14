@@ -2501,9 +2501,13 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                     state.input_accumulator.pending_block_delta = 0;
                     state.render_state.needs_cleanup = true;
                     state.render_state.pending_paste = Some(cmd);
-                } else {
-                    state.render_state.flash_message =
-                        Some(("shared block: jump only".to_string(), Instant::now()));
+                } else if let Some(selected) = state.view.selected_block {
+                    if state.blocks.block(selected).and_then(|b| b.agent_ref.as_ref()).is_some() {
+                        return execute_block_view_action(BlockViewAction::AgentRetry, state);
+                    } else {
+                        state.render_state.flash_message =
+                            Some(("shared block: jump only".to_string(), Instant::now()));
+                    }
                 }
             }
             true

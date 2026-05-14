@@ -130,7 +130,11 @@ pub const BLOCK_HELP_ENTRIES: &[HelpEntry] = &[
     },
     HelpEntry {
         key: "r",
-        desc: "rerun command",
+        desc: "rerun / agent retry",
+    },
+    HelpEntry {
+        key: "s",
+        desc: "stop agent",
     },
     HelpEntry {
         key: "d",
