@@ -961,12 +961,13 @@ fn get_agent_history_styled_lines(block: &CommandBlock) -> Vec<crate::ansi::Styl
     let Some(snapshot) = block.live_snapshot.as_ref() else {
         return vec![StyledText::plain("no agent history available")];
     };
-    if snapshot.history.is_empty() {
+    let history = snapshot.history.as_deref().unwrap_or_default();
+    if history.is_empty() {
         return vec![StyledText::plain("no conversation history")];
     }
 
     let mut lines = Vec::new();
-    for record in &snapshot.history {
+    for record in history {
         if let Some(user_msg) = &record.user_message {
             lines.push(StyledText::plain(""));
             lines.push(StyledText {

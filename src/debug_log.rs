@@ -127,13 +127,6 @@ impl DebugLog {
         }
     }
 
-    pub fn log(&mut self, msg: &str) {
-        let ms = self.start.elapsed().as_millis();
-        let _ = writeln!(self.writer, "[+{}ms] {}", ms, msg);
-        // Flush so the file is readable mid-session.
-        let _ = self.writer.flush();
-    }
-
     pub fn log_structured(
         &mut self,
         level: LogLevel,

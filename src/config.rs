@@ -157,8 +157,7 @@ fn deserialize_block_action(s: &str) -> Option<BlockViewAction> {
         "search_prev" => Some(BlockViewAction::SearchPrev),
         "help" => Some(BlockViewAction::Help),
         "quit" => Some(BlockViewAction::Quit),
-        "agent_stop" => Some(BlockViewAction::AgentStop),
-        "agent_retry" => Some(BlockViewAction::AgentRetry),
+        "jump_back" => Some(BlockViewAction::JumpBack),
         _ => None,
     }
 }
@@ -192,7 +191,7 @@ pub fn default_block_keymap() -> HashMap<u8, BlockViewAction> {
     m.insert(b'g', BlockViewAction::NavTop);
     m.insert(0x15, BlockViewAction::ScrollHalfUp);
     m.insert(0x04, BlockViewAction::ScrollHalfDown);
-    m.insert(0x02, BlockViewAction::ScrollFullUp);
+    m.insert(0x02, BlockViewAction::JumpBack);
     m.insert(0x06, BlockViewAction::ScrollFullDown);
     m.insert(b'\r', BlockViewAction::Expand);
     m.insert(b'\n', BlockViewAction::Expand);
@@ -207,7 +206,6 @@ pub fn default_block_keymap() -> HashMap<u8, BlockViewAction> {
     m.insert(b'r', BlockViewAction::Rerun);
     m.insert(b'd', BlockViewAction::Delete);
     m.insert(b'v', BlockViewAction::VisualMode);
-    m.insert(b's', BlockViewAction::AgentStop);
     m.insert(b'?', BlockViewAction::Help);
     m.insert(b'q', BlockViewAction::Quit);
     m.insert(0x1b, BlockViewAction::Quit);
@@ -890,5 +888,13 @@ mod tests {
 
         // Default keymap should be unchanged
         assert_eq!(map.get(&b'j'), Some(&BlockViewAction::NavDown));
+    }
+
+    #[test]
+    fn keymap_default_ctrl_b_maps_to_jump_back() {
+        let map = default_block_keymap();
+        assert_eq!(map.get(&0x02), Some(&BlockViewAction::JumpBack));
+        assert_eq!(map.get(&b's'), None);
+        assert_eq!(map.get(&b'b'), None);
     }
 }

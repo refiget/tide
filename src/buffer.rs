@@ -95,11 +95,8 @@ impl ShellBuffer {
             return;
         }
 
-        if let Some((start, next_char)) = self.current_line.char_indices().nth(self.current_col) {
-            let end = start + next_char.len_utf8();
-            let mut b = [0; 4];
-            self.current_line
-                .replace_range(start..end, ch.encode_utf8(&mut b));
+        if let Some((byte_offset, old_ch)) = self.current_line.char_indices().nth(self.current_col) {
+            self.current_line.replace_range(byte_offset..byte_offset + old_ch.len_utf8(), &ch.to_string());
         }
         self.current_col += 1;
     }
@@ -110,10 +107,8 @@ impl ShellBuffer {
         }
 
         self.current_col -= 1;
-        if self.current_col < self.current_line_chars {
-            if let Some((start, _)) = self.current_line.char_indices().nth(self.current_col) {
-                self.current_line.remove(start);
-            }
+        if let Some((byte_offset, _)) = self.current_line.char_indices().nth(self.current_col) {
+            self.current_line.remove(byte_offset);
             self.current_line_chars = self.current_line_chars.saturating_sub(1);
         }
     }

@@ -6,7 +6,7 @@ use crossterm::{
     style::{
         Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
     },
-    terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{Clear, ClearType, EnterAlternateScreen},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -137,6 +137,10 @@ pub const BLOCK_HELP_ENTRIES: &[HelpEntry] = &[
         desc: "stop agent",
     },
     HelpEntry {
+        key: "b",
+        desc: "jump back from agent",
+    },
+    HelpEntry {
         key: "d",
         desc: "delete block",
     },
@@ -205,9 +209,9 @@ pub fn leave_block_render<W: Write>(w: &mut W, was_alt_screen: bool) -> io::Resu
     if was_alt_screen {
         // Most terminals restore the SGR state of the main buffer when leaving the alternate screen.
         // The shell prompt (zle reset-prompt) will also ensure the correct style is applied.
-        execute!(w, LeaveAlternateScreen, Show)
+        execute!(w, crossterm::terminal::LeaveAlternateScreen, crossterm::cursor::Show)
     } else {
-        execute!(w, ResetColor, Show)
+        execute!(w, crossterm::style::ResetColor, crossterm::cursor::Show)
     }
 }
 

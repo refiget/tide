@@ -1,5 +1,5 @@
 use crate::debug_log::LogCategory::*;
-use crate::{tdebug, tinfo, ttrace};
+use crate::{tinfo};
 use std::{
     collections::HashMap,
     fs,
@@ -548,24 +548,12 @@ pub fn run_shell(config: &Config) -> Result<()> {
                     continue;
                 }
 
-                let should_sync = {
-                    let Ok(state) = watcher_state.lock() else {
-                        continue;
-                    };
-                    matches!(state.view.view, ViewKind::Blocks)
-                };
-
-                if should_sync {
-                    let should_render = if let Ok(mut state) = watcher_state.lock() {
+                if let Ok(mut state) = watcher_state.lock() {
+                    if matches!(state.view.view, ViewKind::Blocks) {
                         sync_shared_agent_blocks(&mut state);
                         move_running_agents_to_bottom(&mut state);
                         state.render_state.dirty = true;
                         state.render_state.force_render = true;
-                        true
-                    } else {
-                        false
-                    };
-                    if should_render {
                         let _ = render_runtime(&watcher_state, &watcher_stdout);
                     }
                 }
@@ -1300,10 +1288,13 @@ fn sync_shared_agent_blocks_for_provider(state: &mut RuntimeState, provider: Age
             .and_then(|s| s.title.as_deref())
             .unwrap_or("")
             .to_string();
-        let output_text = if current_command.is_empty() {
-            title
-        } else {
+        
+        let output_text = if !title.is_empty() && !current_command.is_empty() {
+            format!("{title} · running: {current_command}")
+        } else if !current_command.is_empty() {
             current_command
+        } else {
+            title
         };
         let output_raw = if output_text.is_empty() {
             Vec::new()
@@ -2350,6 +2341,39 @@ fn execute_delete_blocks(state: &mut RuntimeState, block_ids: Vec<BlockId>) {
     state.render_state.force_render = true;
 }
 
+fn jump_to_agent_pane(state: &mut RuntimeState, selected: BlockId) -> bool {
+    if let Some(agent_ref) = state.blocks.block(selected).and_then(|b| b.agent_ref.clone())
+        && let Ok(Some(rec)) =
+            crate::agent_registry::find_by_alias(&agent_ref.provider, &agent_ref.alias)
+    {
+        let jump_target = if !rec.tmux_pane_id.is_empty() {
+            rec.tmux_pane_id.clone()
+        } else {
+            rec.tmux_target.clone()
+        };
+        if tmux_target_exists(&jump_target) {
+            if let Some(cur) = tmux_current_pane_id().or_else(tmux_current_target) {
+                let from_zoomed = tmux_window_zoomed(&cur).unwrap_or(false);
+                let _ = crate::agent_registry::write_last_jump(&cur, &jump_target, from_zoomed);
+            }
+            if tmux_jump_and_zoom(&jump_target) {
+                state.render_state.flash_message =
+                    Some((format!("jumped [{}]", agent_ref.alias), Instant::now()));
+            } else {
+                state.render_state.flash_message =
+                    Some((format!("jump failed [{}]", agent_ref.alias), Instant::now()));
+            }
+        } else {
+            state.render_state.flash_message =
+                Some((format!("stale [{}]", agent_ref.alias), Instant::now()));
+        }
+        state.render_state.dirty = true;
+        state.render_state.force_render = true;
+        return true;
+    }
+    false
+}
+
 fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) -> bool {
     match action {
         BlockViewAction::Quit => {
@@ -2446,6 +2470,11 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
         BlockViewAction::Expand => {
             flush_navigation_delta(state);
             let selected = state.view.selected_block;
+            if let Some(id) = selected {
+                if jump_to_agent_pane(state, id) {
+                    return true;
+                }
+            }
             if state.view.expanded_block == selected && selected.is_some() {
                 state.view.expanded_block = None;
             } else {
@@ -2501,19 +2530,18 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                     state.input_accumulator.pending_block_delta = 0;
                     state.render_state.needs_cleanup = true;
                     state.render_state.pending_paste = Some(cmd);
-                } else if let Some(selected) = state.view.selected_block {
-                    if state.blocks.block(selected).and_then(|b| b.agent_ref.as_ref()).is_some() {
-                        return execute_block_view_action(BlockViewAction::AgentRetry, state);
-                    } else {
-                        state.render_state.flash_message =
-                            Some(("shared block: jump only".to_string(), Instant::now()));
-                    }
+                } else if state.view.selected_block.is_some() {
+                    state.render_state.flash_message =
+                        Some(("shared block: jump only".to_string(), Instant::now()));
                 }
             }
             true
         }
         BlockViewAction::DetailView => {
             if let Some(selected) = state.view.selected_block {
+                if jump_to_agent_pane(state, selected) {
+                    return true;
+                }
                 exit_visual_mode(state);
                 tinfo!(state.debug_log, APP, "View:  Blocks → Detail  block={}",
                     selected.0);
@@ -2526,82 +2554,19 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
             }
             true
         }
-        BlockViewAction::AgentStop => {
-            if let Some(selected) = state.view.selected_block {
-                if let Some(agent_ref) = state
-                    .blocks
-                    .block(selected)
-                    .and_then(|b| b.agent_ref.clone())
-                    && let Ok(Some(rec)) =
-                        crate::agent_registry::find_by_alias(&agent_ref.provider, &agent_ref.alias)
-                {
-                    if !rec.tmux_pane_id.is_empty() {
-                        let _ = Command::new("tmux")
-                            .args(["send-keys", "-t", &rec.tmux_pane_id, "C-c"])
-                            .status();
-                        state.render_state.flash_message =
-                            Some(("agent: sent SIGINT".to_string(), Instant::now()));
-                    } else {
-                        state.render_state.flash_message =
-                            Some(("agent: no tmux pane".to_string(), Instant::now()));
-                    }
-                    state.render_state.dirty = true;
-                    state.render_state.force_render = true;
-                }
-            }
-            true
-        }
-        BlockViewAction::AgentRetry => {
-            if let Some(selected) = state.view.selected_block {
-                if let Some(agent_ref) = state
-                    .blocks
-                    .block(selected)
-                    .and_then(|b| b.agent_ref.clone())
-                    && let Ok(Some(rec)) =
-                        crate::agent_registry::find_by_alias(&agent_ref.provider, &agent_ref.alias)
-                {
-                    let jump_target = if !rec.tmux_pane_id.is_empty() {
-                        rec.tmux_pane_id.clone()
-                    } else {
-                        rec.tmux_target.clone()
-                    };
-                    if tmux_target_exists(&jump_target) {
-                        if let Some(cur) = tmux_current_pane_id().or_else(tmux_current_target) {
-                            let from_zoomed = tmux_window_zoomed(&cur).unwrap_or(false);
-                            let _ = crate::agent_registry::write_last_jump(
-                                &cur,
-                                &jump_target,
-                                from_zoomed,
-                            );
-                        }
-                        if tmux_jump_and_zoom(&jump_target) {
-                            let _ = Command::new("tmux")
-                                .args(["send-keys", "-t", &jump_target, "Enter"])
-                                .status();
-                            state.render_state.flash_message =
-                                Some((format!("retrying [{}]", agent_ref.alias), Instant::now()));
-                        } else {
-                            state.render_state.flash_message = Some((
-                                format!("jump failed [{}]", agent_ref.alias),
-                                Instant::now(),
-                            ));
-                        }
-                    } else {
-                        state.render_state.flash_message =
-                            Some((format!("stale [{}]", agent_ref.alias), Instant::now()));
-                    }
-                    state.render_state.dirty = true;
-                    state.render_state.force_render = true;
-                }
-            }
-            true
-        }
         BlockViewAction::ToggleFailedFilter => {
             state.view.filter.failed_only = !state.view.filter.failed_only;
             rebuild_visible(state);
             restore_or_clamp_selection(state);
             state.render_state.dirty = true;
             state.render_state.force_render = true;
+            true
+        }
+        BlockViewAction::JumpBack => {
+            if try_global_jump_back(state) {
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+            }
             true
         }
         BlockViewAction::OpenSearch => {
@@ -2913,14 +2878,6 @@ fn handle_block_view_byte(byte: u8, state: &mut RuntimeState) -> bool {
 
     if state.view.search_buffer.is_some() {
         return handle_search_input(byte, state);
-    }
-
-    if byte == b'b' {
-        if try_global_jump_back(state) {
-            state.render_state.dirty = true;
-            state.render_state.force_render = true;
-            return true;
-        }
     }
 
     if let Some(action) = state.config.resolved_block_keymap.get(&byte) {

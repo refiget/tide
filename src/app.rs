@@ -67,7 +67,7 @@ pub struct AgentLiveSnapshot {
     /// Session title from session.json. Shown as the second line in Block View.
     pub title: Option<String>,
     /// Full session history from history.json. Shown in Detail View.
-    pub history: Vec<AgentHistoryRecord>,
+    pub history: Option<Vec<AgentHistoryRecord>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -121,8 +121,7 @@ pub enum BlockViewAction {
     SearchPrev,
     Help,
     Quit,
-    AgentStop,
-    AgentRetry,
+    JumpBack,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Deserialize)]

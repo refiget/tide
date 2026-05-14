@@ -14,7 +14,6 @@ const MAX_LINES: usize = 200;
 
 /// Read the live status snapshot for an agent.
 /// Hot path: reads events.jsonl (tail 64 KB) + session.json only.
-/// history.json is also read to provide context for Detail View.
 pub fn read_agent_live_snapshot(agents_dir: &Path, pane_id: &str) -> Option<AgentLiveSnapshot> {
     if pane_id.is_empty() {
         return None;
@@ -22,9 +21,8 @@ pub fn read_agent_live_snapshot(agents_dir: &Path, pane_id: &str) -> Option<Agen
     let dir = agents_dir.join(pane_id);
     let status_snap = read_status_from_events(&dir);
     let title = read_session_title(&dir);
-    let history = read_history(&dir);
 
-    if status_snap.is_none() && title.is_none() && history.is_empty() {
+    if status_snap.is_none() && title.is_none() {
         return None;
     }
 
@@ -35,8 +33,17 @@ pub fn read_agent_live_snapshot(agents_dir: &Path, pane_id: &str) -> Option<Agen
         current_tool,
         current_command,
         title,
-        history,
+        history: None,
     })
+}
+
+/// Read the full conversation history for an agent.
+/// Used when entering Detail View to avoid overhead in the Block View hot path.
+pub fn read_agent_history(agents_dir: &Path, pane_id: &str) -> Vec<AgentHistoryRecord> {
+    if pane_id.is_empty() {
+        return Vec::new();
+    }
+    read_history(&agents_dir.join(pane_id))
 }
 
 // ─── File helpers ─────────────────────────────────────────────────────────────
@@ -50,7 +57,6 @@ struct MinimalEvent {
     at_ms: Option<u64>,
     tool_name: Option<String>,
     command: Option<String>,
-    text: Option<String>,
 }
 
 type StatusTuple = (AgentLiveStatus, Option<u64>, Option<String>, Option<String>);
