@@ -34,43 +34,38 @@ copy_format = "plaintext"
 horizontal_padding = 1
 show_padding_in_plain = true
 
-# Legacy compatibility field. Current Normal mode is transparent passthrough,
-# so this is not required for vim/yazi/fzf/less/ssh/etc. to work.
-raw_programs = [
-  "my-tui-app",
-  "lg",
-  "v",
+# Classification is an exception list. Commands not listed here are normal:
+# Tide captures their linear output into ordinary command blocks.
+[classification.tui]
+commands = [
+  "vim", "nvim", "vi", "nano", "helix", "hx", "less", "more", "bat", "batcat",
+  "fzf", "skim", "sk",
+  "yazi", "ya", "ranger", "nnn", "lf", "mc", "vifm",
+  "lazygit", "tig", "gitui", "serie", "lazyjj",
+  "lazydocker", "k9s", "kubectl-neat", "ctop", "lazysql",
+  "top", "htop", "btop", "bottom", "btm", "glances", "nmon", "iotop", "iftop", "nvtop",
+  "tmux", "screen", "zellij",
+  "watch", "viddy", "posting",
 ]
 
-[tui_apps.nvim]
-commands = ["nvim", "vim"]
-handoff = true
-snapshot = ["git", "cwd"]
-return_panel = "changed-files"
+[classification.repl]
+commands = [
+  "python", "python3", "ipython", "bpython", "ptpython",
+  "node", "deno", "bun", "tsx",
+  "psql", "sqlite3", "mysql", "mariadb", "redis-cli", "mongosh", "duckdb", "clickhouse-client",
+  "ruby", "irb", "pry", "php", "phpdbg", "lua", "luajit", "R", "Rscript", "julia",
+  "ghci", "scala", "sbt", "clojure", "lein", "iex", "erl", "erlc", "swipl", "gdb", "lldb",
+  "bash", "zsh", "fish", "xonsh", "nu", "powershell", "pwsh",
+]
 
-[tui_apps.lazygit]
-commands = ["lazygit"]
-handoff = true
-snapshot = ["git"]
-after_exit = ["git status --short"]
-return_panel = "git"
-
-[tui_apps.opencode]
-commands = ["opencode"]
-handoff = true
-snapshot = ["git", "cwd"]
-after_exit = ["git status --short", "git diff --stat"]
-return_panel = "summary"
-
-[tui_apps.fzf]
-commands = ["fzf"]
-handoff = true
-return_panel = "none"
-
-[tui_apps.less]
-commands = ["less"]
-handoff = true
-return_panel = "none"
+[classification.agent]
+commands = [
+  "codex", "claude", "gemini",
+  "opencode", "aider", "crush", "goose", "amp", "codebuff", "cursor-agent",
+  "copilot", "gh-copilot",
+  "qwen", "qwen-code",
+  "ollama", "llm", "mods", "sgpt", "fabric",
+]
 
 # Key bindings — single-byte keys only. Multi-byte sequences (arrows, Ctrl-chords)
 # stay hardcoded. Action name is the key, value is the character string.

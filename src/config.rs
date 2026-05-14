@@ -34,6 +34,8 @@ pub struct Config {
     #[serde(default)]
     pub tui: TuiConfig,
     #[serde(default)]
+    pub classification: ClassificationConfig,
+    #[serde(default)]
     pub keymap: KeymapConfig,
     /// New-style per-provider agent config: `[agents.opencode]`, `[agents.aider]`, …
     #[serde(default)]
@@ -97,6 +99,7 @@ impl Default for Config {
             raw_programs: Vec::new(),
             tui_apps: BTreeMap::new(),
             tui: TuiConfig::default(),
+            classification: ClassificationConfig::default(),
             keymap: KeymapConfig::default(),
             agents: BTreeMap::new(),
             opencode_share: None,
@@ -119,9 +122,10 @@ pub struct RuntimeConfig {
     pub max_blocks: Option<usize>,
     pub resolved_block_keymap: HashMap<u8, BlockViewAction>,
     pub resolved_detail_keymap: HashMap<u8, DetailViewAction>,
-    /// Extra TUI commands from user config (merged with builtins).
-    pub tui_extra_commands: Vec<String>,
-    /// Commands that should suspend capture immediately.
+    pub classification_tui_commands: Vec<String>,
+    pub classification_repl_commands: Vec<String>,
+    pub classification_agent_commands: Vec<String>,
+    /// Commands that should suspend capture immediately. Legacy alias for TUI classification.
     pub tui_always_suspend_commands: Vec<String>,
     /// Per-app TUI configuration from `[tui.apps]` or `[tui_apps]`.
     pub tui_apps: BTreeMap<String, TuiAppConfig>,
@@ -294,11 +298,30 @@ pub fn build_runtime_config(config: Config) -> RuntimeConfig {
         max_blocks,
         resolved_block_keymap: build_resolved_block_keymap(&config.keymap.blocks),
         resolved_detail_keymap: build_resolved_detail_keymap(&config.keymap.detail),
-        tui_extra_commands: config.tui.extra_commands,
+        classification_tui_commands: merge_command_lists([
+            config.classification.tui.commands,
+            config.tui.extra_commands,
+            merged_apps
+                .values()
+                .flat_map(|app| app.commands.clone())
+                .collect(),
+        ]),
+        classification_repl_commands: config.classification.repl.commands,
+        classification_agent_commands: config.classification.agent.commands,
         tui_always_suspend_commands: config.tui.always_suspend_commands,
         tui_apps: merged_apps,
         agents,
     }
+}
+
+fn merge_command_lists<const N: usize>(lists: [Vec<String>; N]) -> Vec<String> {
+    let mut out = Vec::new();
+    for command in lists.into_iter().flatten() {
+        if !out.contains(&command) {
+            out.push(command);
+        }
+    }
+    out
 }
 
 /// Fill provider-specific detection defaults for fields left empty in config.
@@ -539,6 +562,163 @@ pub struct TuiConfig {
     pub always_suspend_commands: Vec<String>,
     #[serde(default)]
     pub apps: BTreeMap<String, TuiAppConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClassificationConfig {
+    #[serde(default = "default_tui_classification")]
+    pub tui: CommandClassification,
+    #[serde(default = "default_repl_classification")]
+    pub repl: CommandClassification,
+    #[serde(default = "default_agent_classification")]
+    pub agent: CommandClassification,
+}
+
+impl Default for ClassificationConfig {
+    fn default() -> Self {
+        Self {
+            tui: default_tui_classification(),
+            repl: default_repl_classification(),
+            agent: default_agent_classification(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CommandClassification {
+    #[serde(default)]
+    pub commands: Vec<String>,
+}
+
+fn commands(values: &[&str]) -> CommandClassification {
+    CommandClassification {
+        commands: values.iter().map(|value| (*value).to_string()).collect(),
+    }
+}
+
+fn default_tui_classification() -> CommandClassification {
+    commands(&[
+        "vim",
+        "nvim",
+        "vi",
+        "nano",
+        "helix",
+        "hx",
+        "less",
+        "more",
+        "bat",
+        "batcat",
+        "fzf",
+        "skim",
+        "sk",
+        "yazi",
+        "ya",
+        "ranger",
+        "nnn",
+        "lf",
+        "mc",
+        "vifm",
+        "lazygit",
+        "tig",
+        "gitui",
+        "serie",
+        "lazyjj",
+        "lazydocker",
+        "k9s",
+        "kubectl-neat",
+        "ctop",
+        "lazysql",
+        "top",
+        "htop",
+        "btop",
+        "bottom",
+        "btm",
+        "glances",
+        "nmon",
+        "iotop",
+        "iftop",
+        "nvtop",
+        "tmux",
+        "screen",
+        "zellij",
+        "watch",
+        "viddy",
+        "posting",
+    ])
+}
+
+fn default_repl_classification() -> CommandClassification {
+    commands(&[
+        "python",
+        "python3",
+        "ipython",
+        "bpython",
+        "ptpython",
+        "node",
+        "deno",
+        "bun",
+        "tsx",
+        "psql",
+        "sqlite3",
+        "mysql",
+        "mariadb",
+        "redis-cli",
+        "mongosh",
+        "duckdb",
+        "clickhouse-client",
+        "ruby",
+        "irb",
+        "pry",
+        "php",
+        "phpdbg",
+        "lua",
+        "luajit",
+        "R",
+        "Rscript",
+        "julia",
+        "ghci",
+        "scala",
+        "sbt",
+        "clojure",
+        "lein",
+        "iex",
+        "erl",
+        "erlc",
+        "swipl",
+        "gdb",
+        "lldb",
+        "bash",
+        "zsh",
+        "fish",
+        "xonsh",
+        "nu",
+        "powershell",
+        "pwsh",
+    ])
+}
+
+fn default_agent_classification() -> CommandClassification {
+    commands(&[
+        "codex",
+        "claude",
+        "gemini",
+        "opencode",
+        "aider",
+        "crush",
+        "goose",
+        "amp",
+        "codebuff",
+        "cursor-agent",
+        "copilot",
+        "gh-copilot",
+        "qwen",
+        "qwen-code",
+        "ollama",
+        "llm",
+        "mods",
+        "sgpt",
+        "fabric",
+    ])
 }
 
 fn default_shell_program() -> String {

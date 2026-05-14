@@ -185,29 +185,30 @@ quit = "q"
 | `help` | `?` | Toggle help overlay |
 | `quit` | `q` / `Esc` | Return to Block View |
 
-## TUI Apps
+## Classification
 
-TUI application definitions let Tide recognise full-screen programs and optionally snapshot their output or run cleanup commands after they exit.
+Classification is an exception list. Commands that do not match `tui`, `repl`, or `agent` are normal commands and Tide captures their linear output.
 
 ```toml
-[tui_apps]
-[tui_apps.lazygit]
-commands = ["lazygit", "lg"]
-handoff = true
-snapshot = []
-after_exit = ["clear"]
-return_panel = "none"
+[classification.tui]
+commands = ["vim", "nvim", "less", "fzf", "lazygit", "top"]
+
+[classification.repl]
+commands = ["python", "python3", "node", "psql", "sqlite3"]
+
+[classification.agent]
+commands = ["codex", "claude", "opencode", "aider"]
 ```
 
-- `commands` — binary names or aliases that identify the app.
-- `handoff` — whether Tide enters a passthrough handoff mode (not yet wired).
-- `snapshot` — commands to run after the app exits to capture terminal state (not yet wired).
-- `after_exit` — shell commands to run after the app exits (e.g. `"clear"`).
-- `return_panel` — which panel to show after the app exits: `"none"`, `"plain"`, `"blocks"`, or `"detail"`. Default `"none"`.
+- `classification.tui.commands` — full-screen or terminal-UI programs. Tide suspends capture and shows a TUI placeholder block.
+- `classification.repl.commands` — interactive shells, language REPLs, debuggers, and database consoles. Tide suspends capture and shows a REPL placeholder block.
+- `classification.agent.commands` — coding agent CLIs. Tide suspends capture and treats the command as an agent-like interactive session.
+
+Legacy `[tui_apps]` and `[tui.apps]` entries are still parsed and treated as TUI classification for compatibility, but the classification table is the preferred interface.
 
 ## Legacy `raw_programs`
 
-The current architecture does not require a RawProgram whitelist for passthrough.
+The current architecture does not require a RawProgram whitelist for passthrough or normal rendering.
 
 Normal mode forwards visible PTY bytes directly to the real terminal, so full-screen commands such as these work without detection:
 
@@ -239,7 +240,7 @@ raw_programs = [
 ]
 ```
 
-Future versions may use this or a replacement setting as metadata for labeling interactive blocks. It must not be required for terminal passthrough.
+Use `[classification.tui]`, `[classification.repl]`, or `[classification.agent]` to control how interactive commands are labeled and captured.
 
 ## Shared Agent Registry
 

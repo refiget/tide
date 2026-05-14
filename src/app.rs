@@ -658,6 +658,7 @@ pub enum FooterSegment {
 #[serde(rename_all = "snake_case")]
 pub enum TuiCommandClass {
     KnownTui,
+    Repl,
     AgentCli,
     AlwaysSuspend,
 }
@@ -675,82 +676,6 @@ pub enum TuiAppMatchSource {
     Builtin,
     UserConfig,
 }
-
-/// Default list of well-known TUI / full-screen programs.
-/// These are commands that enter alternate screen or take over the terminal.
-pub const DEFAULT_TUI_COMMANDS: &[&str] = &[
-    // editors
-    "vim",
-    "nvim",
-    "vi",
-    "view",
-    "nano",
-    "micro",
-    "helix",
-    "hx",
-    "kak",
-    "emacs",
-    "emacsclient",
-    // git / dev TUI
-    "lazygit",
-    "tig",
-    "gitui",
-    "gitu",
-    "lazydocker",
-    "k9s",
-    "ctop",
-    "dive",
-    // monitors
-    "htop",
-    "btop",
-    "top",
-    "glances",
-    "iftop",
-    "nethogs",
-    "ncdu",
-    // file managers / TUI
-    "ranger",
-    "lf",
-    "yazi",
-    "mc",
-    "broot",
-    "nnn",
-    // multiplexers
-    "tmux",
-    "screen",
-    "zellij",
-    // db / api / network
-    "posting",
-    "atac",
-    "rainfrog",
-    "termshark",
-    // fuzzy finders
-    "fzf",
-    "sk",
-    "skim",
-    "peco",
-];
-
-pub const DEFAULT_AGENT_CLI_COMMANDS: &[&str] = &[
-    "opencode",
-    "claude",
-    "claude-code",
-    "gemini",
-    "gemini-cli",
-    "aider",
-    "aider-chat",
-    "cursor-agent",
-    "codex",
-    "openai",
-    "goose",
-    "crush",
-    "amp",
-    "qwen",
-    "qwen-code",
-    "codebuff",
-    "continue",
-    "cody",
-];
 
 // ─── Termios Mode ──────────────────────────────────────────────────────────
 

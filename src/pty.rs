@@ -721,23 +721,23 @@ fn basename_command(command: &str) -> String {
     command.rsplit('/').next().unwrap_or(command).to_string()
 }
 
-/// Match a command name against known TUI apps.
+/// Match a command name against configured non-normal command classes.
 ///
 /// Priority:
-/// 1. AlwaysSuspend commands (user config)
-/// 2. User-configured app in `tui_apps` (exact command match)
-/// 3. User `tui_extra_commands` list
-/// 4. Builtin default TUI list
-/// 5. Builtin default Agent CLI list
+/// 1. Legacy always-suspend commands as TUI
+/// 2. Agent classification
+/// 3. TUI classification
+/// 4. Legacy app configs as TUI
+/// 5. REPL classification
 fn detect_tui_app(
     command_line: &str,
-    extra_commands: &[String],
+    tui_commands: &[String],
+    repl_commands: &[String],
+    agent_commands: &[String],
     always_suspend_commands: &[String],
     tui_apps: &std::collections::BTreeMap<String, crate::config::TuiAppConfig>,
 ) -> Option<TuiAppMatch> {
-    use crate::app::{
-        DEFAULT_AGENT_CLI_COMMANDS, DEFAULT_TUI_COMMANDS, TuiAppMatchSource, TuiCommandClass,
-    };
+    use crate::app::{TuiAppMatchSource, TuiCommandClass};
 
     let command_name = extract_command_name(command_line)?;
 
@@ -751,7 +751,25 @@ fn detect_tui_app(
         });
     }
 
-    // 2. User app config exact match
+    if agent_commands.iter().any(|c| c == &command_name) {
+        return Some(TuiAppMatch {
+            app_name: command_name.clone(),
+            command_name,
+            source: TuiAppMatchSource::UserConfig,
+            class: TuiCommandClass::AgentCli,
+        });
+    }
+
+    if tui_commands.iter().any(|c| c == &command_name) {
+        return Some(TuiAppMatch {
+            app_name: command_name.clone(),
+            command_name,
+            source: TuiAppMatchSource::UserConfig,
+            class: TuiCommandClass::KnownTui,
+        });
+    }
+
+    // Legacy app config exact match.
     for (app_name, app_cfg) in tui_apps {
         if app_cfg.commands.iter().any(|c| c == &command_name) {
             return Some(TuiAppMatch {
@@ -763,33 +781,12 @@ fn detect_tui_app(
         }
     }
 
-    // 3. User extra_commands list
-    if extra_commands.iter().any(|c| c == &command_name) {
+    if repl_commands.iter().any(|c| c == &command_name) {
         return Some(TuiAppMatch {
             app_name: command_name.clone(),
             command_name,
             source: TuiAppMatchSource::UserConfig,
-            class: TuiCommandClass::KnownTui,
-        });
-    }
-
-    // 4. Builtin default TUI list
-    if DEFAULT_TUI_COMMANDS.contains(&command_name.as_str()) {
-        return Some(TuiAppMatch {
-            app_name: command_name.clone(),
-            command_name,
-            source: TuiAppMatchSource::Builtin,
-            class: TuiCommandClass::KnownTui,
-        });
-    }
-
-    // 5. Builtin default Agent CLI list
-    if DEFAULT_AGENT_CLI_COMMANDS.contains(&command_name.as_str()) {
-        return Some(TuiAppMatch {
-            app_name: command_name.clone(),
-            command_name,
-            source: TuiAppMatchSource::Builtin,
-            class: TuiCommandClass::AgentCli,
+            class: TuiCommandClass::Repl,
         });
     }
 
@@ -1382,6 +1379,13 @@ fn advance_tui_state(
                 },
                 None,
             ),
+            TuiCommandClass::Repl => (
+                TuiRuntimeState::SuspendedNoAltScreen {
+                    block_id,
+                    app_match,
+                },
+                None,
+            ),
             TuiCommandClass::AgentCli => (
                 TuiRuntimeState::PendingAgentCli {
                     block_id,
@@ -1501,7 +1505,9 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             // Detect known TUI apps for later handoff / return panel.
             let lifecycle_event = if let Some(app_match) = detect_tui_app(
                 &command,
-                &state.config.tui_extra_commands,
+                &state.config.classification_tui_commands,
+                &state.config.classification_repl_commands,
+                &state.config.classification_agent_commands,
                 &state.config.tui_always_suspend_commands,
                 &state.config.tui_apps,
             ) {
@@ -1526,11 +1532,22 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             );
             state.tui_state = next;
 
-            // Handle immediate suspension for AlwaysSuspend class.
+            // Handle configured exception classes.
             if let TuiRuntimeState::SuspendedNoAltScreen { .. } = &state.tui_state {
                 if let Some(block) = state.blocks.block_mut(block_id) {
-                    block.kind = BlockKind::TuiSession;
+                    block.kind = match extract_command_name(&command)
+                        .filter(|name| state.config.classification_repl_commands.contains(name))
+                    {
+                        Some(_) => BlockKind::Interactive,
+                        None => BlockKind::TuiSession,
+                    };
                 }
+            } else if matches!(
+                state.tui_state,
+                TuiRuntimeState::PendingKnownTui { .. } | TuiRuntimeState::PendingAgentCli { .. }
+            ) && let Some(block) = state.blocks.block_mut(block_id)
+            {
+                block.kind = BlockKind::TuiSession;
             }
 
             // For unclassified commands (Idle after preexec), buffer initial bytes
@@ -3943,7 +3960,7 @@ mod tests {
                     );
                     assert!(matches!(state.tui_state, TuiRuntimeState::Idle));
                     let block = state.blocks.block(block_id).expect("finished block");
-                    assert_eq!(block.kind, BlockKind::NormalCommand);
+                    assert_eq!(block.kind, BlockKind::TuiSession);
                     assert!(!state.render_state.needs_cleanup);
                 }
                 Scenario::PendingThenUnrelatedExitThenPrecmd => {
@@ -3963,7 +3980,7 @@ mod tests {
                     );
                     assert!(matches!(state.tui_state, TuiRuntimeState::Idle));
                     let block = state.blocks.block(block_id).expect("finished block");
-                    assert_eq!(block.kind, BlockKind::NormalCommand);
+                    assert_eq!(block.kind, BlockKind::TuiSession);
                     assert!(!state.render_state.needs_cleanup);
                 }
                 Scenario::PendingEnterExitPrecmd => {
@@ -4685,35 +4702,53 @@ mod tests {
         std::collections::BTreeMap::new()
     }
 
+    fn detect_for_test(
+        command: &str,
+        tui: &[String],
+        repl: &[String],
+        agent: &[String],
+    ) -> Option<TuiAppMatch> {
+        detect_tui_app(command, tui, repl, agent, &[], &empty_tui_apps())
+    }
+
     #[test]
     fn detect_non_tui_returns_none() {
-        assert!(detect_tui_app("ls", &[], &[], &empty_tui_apps()).is_none());
+        assert!(detect_for_test("ls", &[], &[], &[]).is_none());
     }
 
     #[test]
-    fn detect_default_tui_command() {
-        let result = detect_tui_app("lazygit", &[], &[], &empty_tui_apps());
+    fn detect_configured_tui_command() {
+        let result = detect_for_test("lazygit", &["lazygit".into()], &[], &[]);
         assert!(result.is_some());
         assert_eq!(result.as_ref().unwrap().command_name, "lazygit");
-        assert_eq!(result.as_ref().unwrap().source, TuiAppMatchSource::Builtin);
-    }
-
-    #[test]
-    fn detect_sudo_default_tui() {
-        let result = detect_tui_app("sudo -u alice lazygit", &[], &[], &empty_tui_apps());
-        assert!(result.is_some());
-        assert_eq!(result.as_ref().unwrap().command_name, "lazygit");
-    }
-
-    #[test]
-    fn detect_extra_commands() {
-        let result = detect_tui_app("myapp", &["myapp".into()], &[], &empty_tui_apps());
-        assert!(result.is_some());
-        assert_eq!(result.as_ref().unwrap().command_name, "myapp");
         assert_eq!(
             result.as_ref().unwrap().source,
             TuiAppMatchSource::UserConfig
         );
+        assert_eq!(result.as_ref().unwrap().class, TuiCommandClass::KnownTui);
+    }
+
+    #[test]
+    fn detect_sudo_configured_tui() {
+        let result = detect_for_test("sudo -u alice lazygit", &["lazygit".into()], &[], &[]);
+        assert!(result.is_some());
+        assert_eq!(result.as_ref().unwrap().command_name, "lazygit");
+    }
+
+    #[test]
+    fn detect_configured_repl_command() {
+        let result = detect_for_test("python3", &[], &["python3".into()], &[]);
+        assert!(result.is_some());
+        assert_eq!(result.as_ref().unwrap().command_name, "python3");
+        assert_eq!(result.as_ref().unwrap().class, TuiCommandClass::Repl);
+    }
+
+    #[test]
+    fn detect_configured_agent_command() {
+        let result = detect_for_test("codex", &[], &[], &["codex".into()]);
+        assert!(result.is_some());
+        assert_eq!(result.as_ref().unwrap().command_name, "codex");
+        assert_eq!(result.as_ref().unwrap().class, TuiCommandClass::AgentCli);
     }
 
     #[test]
@@ -4727,7 +4762,7 @@ mod tests {
         };
         let mut apps = std::collections::BTreeMap::new();
         apps.insert("my-custom-app".into(), cfg);
-        let result = detect_tui_app("custom-tui", &[], &[], &apps);
+        let result = detect_tui_app("custom-tui", &[], &[], &[], &[], &apps);
         assert!(result.is_some());
         assert_eq!(result.as_ref().unwrap().app_name, "my-custom-app");
         assert_eq!(
@@ -4738,14 +4773,14 @@ mod tests {
 
     #[test]
     fn detect_env_with_tui() {
-        let result = detect_tui_app("env FOO=bar nvim", &[], &[], &empty_tui_apps());
+        let result = detect_for_test("env FOO=bar nvim", &["nvim".into()], &[], &[]);
         assert!(result.is_some());
         assert_eq!(result.as_ref().unwrap().command_name, "nvim");
     }
 
     #[test]
     fn detect_env_unset_with_tui() {
-        let result = detect_tui_app("env -u HOME lazygit", &[], &[], &empty_tui_apps());
+        let result = detect_for_test("env -u HOME lazygit", &["lazygit".into()], &[], &[]);
         assert!(result.is_some());
         assert_eq!(result.as_ref().unwrap().command_name, "lazygit");
     }
@@ -5074,7 +5109,7 @@ mod tests {
         apply_shell_hook_event(
             &mut state,
             ShellHookEvent::Preexec {
-                command: "python".to_string(),
+                command: "unknown_interactive".to_string(),
             },
             false,
         );
