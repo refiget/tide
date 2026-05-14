@@ -5,6 +5,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -84,6 +85,11 @@ enum TuiLifecycleEvent {
     ZleReady,
 }
 
+enum CaptureEvent {
+    Visible(Vec<u8>),
+    Hook(ShellHookEvent),
+}
+
 const FRAME_DURATION: Duration = Duration::from_millis(16);
 
 pub fn run_shell(config: &Config) -> Result<()> {
@@ -136,6 +142,8 @@ pub fn run_shell(config: &Config) -> Result<()> {
     let runtime_config = build_runtime_config(config.clone());
     let master = Arc::new(Mutex::new(pair.master));
     let running = Arc::new(AtomicBool::new(true));
+    let plain_passthrough = Arc::new(AtomicBool::new(true));
+    let (capture_tx, capture_rx) = mpsc::channel::<CaptureEvent>();
     let mut view = ViewState::default();
     view.block_viewport.anchor = if runtime_config.block_view.follow_tail {
         ViewAnchor::Tail
@@ -199,12 +207,64 @@ pub fn run_shell(config: &Config) -> Result<()> {
         }
     }
 
+    let capture_state = Arc::clone(&state);
+    let capture_stdout = Arc::clone(&stdout);
+    let capture_passthrough = Arc::clone(&plain_passthrough);
+    let capture_thread = thread::spawn(move || {
+        while let Ok(event) = capture_rx.recv() {
+            match event {
+                CaptureEvent::Visible(visible) => {
+                    let should_render = if let Ok(mut state) = capture_state.lock() {
+                        let active_block_id = state.blocks.active_block_id();
+                        if !state.tui_state.is_capture_suspended() {
+                            if let Some(pending) = &mut state.capture_pending {
+                                pending.extend_from_slice(&visible);
+                            } else {
+                                state.blocks.append_output(&visible);
+                            }
+                            state.shell.append(&visible, active_block_id);
+                        }
+                        state.tide_alt_screen_active
+                            && !state.render_state.needs_cleanup
+                            && !capture_passthrough.load(Ordering::Acquire)
+                            && !matches!(state.view.view, ViewKind::Plain | ViewKind::Help)
+                            && state.view.confirm.is_none()
+                    } else {
+                        false
+                    };
+                    if should_render {
+                        let _ = render_runtime(&capture_state, &capture_stdout);
+                    }
+                }
+                CaptureEvent::Hook(event) => {
+                    let should_render = if let Ok(mut state) = capture_state.lock() {
+                        match event {
+                            ShellHookEvent::AltScreenEnter => on_alt_screen_enter(&mut state),
+                            ShellHookEvent::AltScreenExit => on_alt_screen_exit(&mut state),
+                            _ => apply_shell_hook_event(&mut state, event, debug_blocks),
+                        }
+                        state.tide_alt_screen_active
+                            && !state.render_state.needs_cleanup
+                            && !capture_passthrough.load(Ordering::Acquire)
+                            && !matches!(state.view.view, ViewKind::Plain | ViewKind::Help)
+                            && state.view.confirm.is_none()
+                    } else {
+                        false
+                    };
+                    if should_render {
+                        let _ = render_runtime(&capture_state, &capture_stdout);
+                    }
+                }
+            }
+        }
+    });
+
     let output_running = Arc::clone(&running);
-    let output_state = Arc::clone(&state);
     let output_stdout = Arc::clone(&stdout);
-    // Output thread: always locks (input_state) -> (input_stdout).
-    // Input / resize threads must avoid (input_stdout) -> (input_state)
-    // to prevent deadlock.
+    let output_capture = capture_tx.clone();
+    let output_passthrough = Arc::clone(&plain_passthrough);
+    // Output thread hot path: strip Tide markers, write visible bytes to stdout
+    // when Plain passthrough is active, and enqueue sidecar capture work.
     let output_thread = thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
         let mut parser = Osc777Parser::default();
@@ -219,12 +279,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
                     for part in parsed {
                         match part {
                             ParsedPtyPart::Visible(visible) => {
-                                let view = output_state
-                                    .lock()
-                                    .map(|state| state.view.view.clone())
-                                    .unwrap_or(ViewKind::Plain);
-
-                                if matches!(view, ViewKind::Plain) {
+                                if output_passthrough.load(Ordering::Acquire) {
                                     if !visible.is_empty() {
                                         if let Ok(mut stdout) = output_stdout.lock() {
                                             if stdout.write_all(&visible).is_err() {
@@ -234,34 +289,13 @@ pub fn run_shell(config: &Config) -> Result<()> {
                                         }
                                     }
                                 }
-
-                                if let Ok(mut state) = output_state.lock() {
-                                    let active_block_id = state.blocks.active_block_id();
-                                    if !state.tui_state.is_capture_suspended() {
-                                        if let Some(pending) = &mut state.capture_pending {
-                                            pending.extend_from_slice(&visible);
-                                        } else {
-                                            state.blocks.append_output(&visible);
-                                        }
-                                        state.shell.append(&visible, active_block_id);
-                                    }
-                                } else {
+                                if output_capture.send(CaptureEvent::Visible(visible)).is_err() {
                                     break;
                                 };
                             }
                             ParsedPtyPart::Event(event) => {
-                                if let Ok(mut state) = output_state.lock() {
-                                    match event {
-                                        ShellHookEvent::AltScreenEnter => {
-                                            on_alt_screen_enter(&mut state)
-                                        }
-                                        ShellHookEvent::AltScreenExit => {
-                                            on_alt_screen_exit(&mut state)
-                                        }
-                                        _ => {
-                                            apply_shell_hook_event(&mut state, event, debug_blocks)
-                                        }
-                                    }
+                                if output_capture.send(CaptureEvent::Hook(event)).is_err() {
+                                    break;
                                 }
                             }
                         }
@@ -272,19 +306,6 @@ pub fn run_shell(config: &Config) -> Result<()> {
                             let _ = stdout.flush();
                         }
                     }
-
-                    let should_render = output_state
-                        .lock()
-                        .map(|state| {
-                            state.tide_alt_screen_active
-                                && !state.render_state.needs_cleanup
-                                && !matches!(state.view.view, ViewKind::Plain | ViewKind::Help)
-                                && state.view.confirm.is_none()
-                        })
-                        .unwrap_or(false);
-                    if should_render && render_runtime(&output_state, &output_stdout).is_err() {
-                        break;
-                    }
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
@@ -293,35 +314,20 @@ pub fn run_shell(config: &Config) -> Result<()> {
 
         let remaining = parser.flush_visible();
         if !remaining.is_empty() {
-            let (view, has_overlay) = if let Ok(mut state) = output_state.lock() {
-                let active_block_id = state.blocks.active_block_id();
-                if !state.tui_state.is_capture_suspended() {
-                    state.shell.append(&remaining, active_block_id);
-                }
-                let has_overlay =
-                    matches!(state.view.view, ViewKind::Help) || state.view.confirm.is_some();
-                (state.view.view.clone(), has_overlay)
-            } else {
-                (ViewKind::Plain, false)
-            };
-
-            if matches!(view, ViewKind::Plain) {
+            if output_passthrough.load(Ordering::Acquire) {
                 if let Ok(mut stdout) = output_stdout.lock() {
                     let _ = stdout.write_all(&remaining);
                     let _ = stdout.flush();
                 }
-            } else if !has_overlay {
-                // Skip re-render when a static overlay (Help/Confirm) is showing —
-                // the overlay was drawn with force_render when opened; re-rendering
-                // from PTY output would cause visible flicker without adding value.
-                let _ = render_runtime(&output_state, &output_stdout);
             }
+            let _ = output_capture.send(CaptureEvent::Visible(remaining));
         }
     });
 
     let input_running = Arc::clone(&running);
     let input_state = Arc::clone(&state);
     let input_stdout = Arc::clone(&stdout);
+    let input_passthrough = Arc::clone(&plain_passthrough);
     let _input_thread = thread::spawn(move || {
         let mut stdin = io::stdin();
         let mut buffer = [0_u8; 8192];
@@ -362,6 +368,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
                                     && is_shell_normal_mode(&state);
                                 drop(state);
                                 if should_enter_block {
+                                    input_passthrough.store(false, Ordering::Release);
                                     // Enter alternate screen for Block View.
                                     // Lock ordering: drop state before locking stdout
                                     // (output thread locks state -> stdout, must not invert).
@@ -420,6 +427,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
                         if let Ok(mut stdout) = input_stdout.lock() {
                             let _ = renderer::leave_block_render(&mut *stdout, was_alt_screen);
                         }
+                        input_passthrough.store(true, Ordering::Release);
 
                         // Clear remaining cleanup flags and extract pending_paste.
                         let paste = if let Ok(mut state) = input_state.lock() {
@@ -612,6 +620,8 @@ pub fn run_shell(config: &Config) -> Result<()> {
     drop(master);
 
     let _ = output_thread.join();
+    drop(capture_tx);
+    let _ = capture_thread.join();
     let _ = signal_hook::low_level::raise(SIGWINCH);
     let _ = resize_thread.join();
     let _ = watcher_thread.join();
