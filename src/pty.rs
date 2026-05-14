@@ -213,52 +213,48 @@ pub fn run_shell(config: &Config) -> Result<()> {
     let capture_passthrough = Arc::clone(&plain_passthrough);
     let capture_thread = thread::spawn(move || {
         while let Ok(event) = capture_rx.recv() {
-            match event {
+            let should_render = match event {
                 CaptureEvent::Visible(visible) => {
-                    let should_render = if let Ok(mut state) = capture_state.lock() {
-                        let active_block_id = state.blocks.active_block_id();
-                        if !state.tui_state.is_capture_suspended() {
-                            if let Some(pending) = &mut state.capture_pending {
-                                pending.extend_from_slice(&visible);
-                            } else {
-                                state.blocks.append_output(&visible);
-                            }
-                            state.shell.append(&visible, active_block_id);
-                        }
-                        state.tide_alt_screen_active
-                            && !state.render_state.needs_cleanup
-                            && !capture_passthrough.load(Ordering::Acquire)
-                            && !matches!(state.view.view, ViewKind::Plain | ViewKind::Help)
-                            && state.view.confirm.is_none()
-                    } else {
-                        false
+                    let Ok(mut state) = capture_state.lock() else {
+                        continue;
                     };
-                    if should_render {
-                        let _ = render_runtime(&capture_state, &capture_stdout);
+                    let active_block_id = state.blocks.active_block_id();
+                    if !state.tui_state.is_capture_suspended() {
+                        if let Some(pending) = &mut state.capture_pending {
+                            pending.extend_from_slice(&visible);
+                        } else {
+                            state.blocks.append_output(&visible);
+                        }
+                        state.shell.append(&visible, active_block_id);
                     }
+                    state.tide_alt_screen_active
+                        && !state.render_state.needs_cleanup
+                        && !capture_passthrough.load(Ordering::Acquire)
+                        && !matches!(state.view.view, ViewKind::Plain | ViewKind::Help)
+                        && state.view.confirm.is_none()
                 }
                 CaptureEvent::Hook(event) => {
-                    let should_render = if let Ok(mut state) = capture_state.lock() {
-                        match event {
-                            ShellHookEvent::AltScreenEnter => on_alt_screen_enter(&mut state),
-                            ShellHookEvent::AltScreenExit => on_alt_screen_exit(&mut state),
-                            _ => apply_shell_hook_event(&mut state, event, debug_blocks),
-                        }
-                        state.tide_alt_screen_active
-                            && !state.render_state.needs_cleanup
-                            && !capture_passthrough.load(Ordering::Acquire)
-                            && !matches!(state.view.view, ViewKind::Plain | ViewKind::Help)
-                            && state.view.confirm.is_none()
-                    } else {
-                        false
+                    let Ok(mut state) = capture_state.lock() else {
+                        continue;
                     };
-                    if should_render {
-                        let _ = render_runtime(&capture_state, &capture_stdout);
+                    match event {
+                        ShellHookEvent::AltScreenEnter => on_alt_screen_enter(&mut state),
+                        ShellHookEvent::AltScreenExit => on_alt_screen_exit(&mut state),
+                        _ => apply_shell_hook_event(&mut state, event, debug_blocks),
                     }
+                    state.tide_alt_screen_active
+                        && !state.render_state.needs_cleanup
+                        && !capture_passthrough.load(Ordering::Acquire)
+                        && !matches!(state.view.view, ViewKind::Plain | ViewKind::Help)
+                        && state.view.confirm.is_none()
                 }
                 CaptureEvent::Barrier(done) => {
                     let _ = done.send(());
+                    false
                 }
+            };
+            if should_render {
+                let _ = render_runtime(&capture_state, &capture_stdout);
             }
         }
     });
@@ -504,10 +500,6 @@ pub fn run_shell(config: &Config) -> Result<()> {
                     ensure_selected_visible(&mut state);
                     state.render_state.dirty = true;
                     state.render_state.force_render = true;
-                    // Force Help to re-render its underlying view at the new size.
-                    if let Some(h) = &mut state.view.help {
-                        h.underlying_rendered = false;
-                    }
                 }
                 not_plain
             } else {
@@ -2051,13 +2043,6 @@ fn maybe_flush_navigation_and_render(
 }
 
 fn flush_render_state(state: &mut RuntimeState) -> bool {
-    // Suppress normal rendering while alt-screen cleanup is pending.
-    if state.render_state.needs_cleanup {
-        state.render_state.dirty = false;
-        state.render_state.force_render = false;
-        return false;
-    }
-
     let force_render = state.render_state.force_render;
     let changed = flush_navigation_delta(state);
     if !force_render && !changed && state.input_accumulator.pending_block_delta == 0 {
@@ -2090,6 +2075,7 @@ fn enter_block_view(state: &mut RuntimeState) {
     );
     state.render_state.dirty = true;
     state.render_state.force_render = true;
+    state.render_state.needs_cleanup = false;
 }
 
 fn handle_view_key_sequence(bytes: &[u8], state: &Arc<Mutex<RuntimeState>>) -> Option<usize> {
