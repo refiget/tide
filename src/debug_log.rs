@@ -171,16 +171,6 @@ impl DebugLog {
     }
 }
 
-/// Write a debug log entry if the log is present.
-#[macro_export]
-macro_rules! dlog {
-    ($log:expr, $($arg:tt)*) => {
-        if let Some(ref mut __log) = $log {
-            __log.log(&format!($($arg)*));
-        }
-    };
-}
-
 /// Write an INFO level structured log entry.
 #[macro_export]
 macro_rules! tinfo {

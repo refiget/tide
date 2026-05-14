@@ -1,5 +1,8 @@
+use crate::debug_log::LogCategory::*;
+use crate::{tdebug, tinfo, ttrace};
 use std::{
     collections::HashMap,
+    fs,
     io::{self, Read, Write},
     process::{Command, Output, Stdio},
     sync::{
@@ -15,8 +18,10 @@ use anyhow::{Context, Result};
 use crossterm::terminal;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use signal_hook::{consts::signal::SIGWINCH, iterator::Signals};
+use tracing::debug;
+use notify::{Watcher, RecursiveMode, RecommendedWatcher, Config as NotifyConfig};
 
-use crate::dlog;
+
 use crate::{
     agent_registry::{AgentProvider, AgentRef},
     app::{
@@ -63,9 +68,6 @@ struct RuntimeState {
     /// Foreground PGID of the PTY as of the last monitor poll.
     /// `None` if unknown or equal to shell_pgid (no non-shell foreground job).
     foreground_job_pgid: Option<libc::pid_t>,
-    /// Last-seen mtime (seconds) per tmux pane_id for agent event files.
-    /// Used by the watcher thread to detect when opencode writes new events.
-    agent_event_mtimes: HashMap<String, u64>,
     /// Per-session debug log.  `Some` when `TIDE_DEBUG=1`.
     debug_log: Option<crate::debug_log::DebugLog>,
 }
@@ -174,7 +176,6 @@ pub fn run_shell(config: &Config) -> Result<()> {
         capture_pending: None,
         shell_pgid: None,
         foreground_job_pgid: None,
-        agent_event_mtimes: HashMap::new(),
         debug_log: None,
     }));
     let stdout = Arc::new(Mutex::new(io::stdout()));
@@ -187,13 +188,10 @@ pub fn run_shell(config: &Config) -> Result<()> {
             let shell = config.shell.program.clone();
             let cwd = initial_cwd.display().to_string();
             st.debug_log = Some(log);
-            dlog!(
-                st.debug_log,
-                "session start  pid={}  shell={}  cwd={}",
+            tinfo!(st.debug_log, APP, "session start  pid={}  shell={}  cwd={}",
                 std::process::id(),
                 shell,
-                cwd
-            );
+                cwd);
         }
     }
 
@@ -382,7 +380,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
                                         input_state.lock().unwrap_or_else(|e| e.into_inner());
                                     state.tide_alt_screen_active = true;
                                     enter_block_view(&mut state);
-                                    dlog!(state.debug_log, "ctrl-b  enter_block_view_returned");
+                                    tinfo!(state.debug_log, APP, "ctrl-b  enter_block_view_returned");
                                     drop(state);
                                     let _ = maybe_flush_navigation_and_render(
                                         &input_state,
@@ -511,43 +509,65 @@ pub fn run_shell(config: &Config) -> Result<()> {
         }
     });
 
-    // Watcher thread: polls agent event file mtimes every 500 ms while Block View
-    // is open. Triggers a sync + re-render when opencode writes new events.
+    // Watcher thread: uses notify to watch agent event files.
+    // Triggers a sync + re-render when opencode writes new events.
     let watcher_running = Arc::clone(&running);
     let watcher_state = Arc::clone(&state);
     let watcher_stdout = Arc::clone(&stdout);
     let watcher_thread = thread::spawn(move || {
+        let (tx, rx) = mpsc::channel();
+
+        let mut watcher = match RecommendedWatcher::new(tx, NotifyConfig::default()) {
+            Ok(w) => w,
+            Err(e) => {
+                debug!("Failed to create watcher: {:?}", e);
+                return;
+            }
+        };
+
+        let agents_dir = crate::agent_registry::registry_dir().join("agents");
+        if let Err(e) = fs::create_dir_all(&agents_dir) {
+            debug!("Failed to create agents dir: {:?}", e);
+            return;
+        }
+
+        if let Err(e) = watcher.watch(&agents_dir, RecursiveMode::Recursive) {
+            debug!("Failed to watch agents dir: {:?}", e);
+            return;
+        }
+
         while watcher_running.load(Ordering::SeqCst) {
-            thread::sleep(Duration::from_millis(500));
+            // Use a timeout to periodically check if we should stop
+            if let Ok(Ok(event)) = rx.recv_timeout(Duration::from_millis(500)) {
+                let is_agent_event = event.paths.iter().any(|p| {
+                    let ext = p.extension().and_then(|s| s.to_str());
+                    matches!(ext, Some("json") | Some("jsonl"))
+                });
 
-            let should_sync = {
-                let Ok(state) = watcher_state.lock() else {
+                if !is_agent_event {
                     continue;
-                };
-                if !matches!(state.view.view, ViewKind::Blocks) {
-                    false
-                } else {
-                    let agents_dir = crate::agent_registry::registry_dir().join("agents");
-                    state.agent_event_mtimes.iter().any(|(pane_id, &known)| {
-                        crate::agent_events::agent_events_mtime(&agents_dir, pane_id)
-                            .map(|m| m > known)
-                            .unwrap_or(false)
-                    })
                 }
-            };
 
-            if should_sync {
-                let should_render = if let Ok(mut state) = watcher_state.lock() {
-                    sync_shared_agent_blocks(&mut state);
-                    move_running_agents_to_bottom(&mut state);
-                    state.render_state.dirty = true;
-                    state.render_state.force_render = true;
-                    true
-                } else {
-                    false
+                let should_sync = {
+                    let Ok(state) = watcher_state.lock() else {
+                        continue;
+                    };
+                    matches!(state.view.view, ViewKind::Blocks)
                 };
-                if should_render {
-                    let _ = render_runtime(&watcher_state, &watcher_stdout);
+
+                if should_sync {
+                    let should_render = if let Ok(mut state) = watcher_state.lock() {
+                        sync_shared_agent_blocks(&mut state);
+                        move_running_agents_to_bottom(&mut state);
+                        state.render_state.dirty = true;
+                        state.render_state.force_render = true;
+                        true
+                    } else {
+                        false
+                    };
+                    if should_render {
+                        let _ = render_runtime(&watcher_state, &watcher_stdout);
+                    }
                 }
             }
         }
@@ -575,22 +595,16 @@ pub fn run_shell(config: &Config) -> Result<()> {
             if mode_changed || pgid_changed || (!mode.is_interactive() && prev_mode == mode) {
                 if let Ok(mut st) = monitor_state.lock() {
                     if mode_changed {
-                        dlog!(
-                            st.debug_log,
-                            "monitor  termios  {:?} → {:?}",
+                        tinfo!(st.debug_log, PTY, "monitor  termios  {:?} → {:?}",
                             prev_mode,
-                            mode
-                        );
+                            mode);
                         prev_mode = mode;
                         apply_pty_raw_mode_change(&mut st, mode);
                     }
                     if pgid_changed {
-                        dlog!(
-                            st.debug_log,
-                            "monitor  pgid  {:?} → {:?}",
+                        tinfo!(st.debug_log, PTY, "monitor  pgid  {:?} → {:?}",
                             prev_fg_pgid,
-                            fg_pgid
-                        );
+                            fg_pgid);
                         prev_fg_pgid = fg_pgid;
                         apply_foreground_pgid_change(&mut st, fg_pgid);
                     }
@@ -598,11 +612,8 @@ pub fn run_shell(config: &Config) -> Result<()> {
                     if !mode.is_interactive() && st.capture_pending.is_some() {
                         let pending_bytes =
                             st.capture_pending.as_ref().map(|v| v.len()).unwrap_or(0);
-                        dlog!(
-                            st.debug_log,
-                            "monitor  commit_pending  bytes={}",
-                            pending_bytes
-                        );
+                        tinfo!(st.debug_log, PTY, "monitor  commit_pending  bytes={}",
+                            pending_bytes);
                         commit_pending_capture(&mut st);
                     }
                 }
@@ -613,7 +624,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
     let status = child.wait().context("failed to wait for shell process")?;
     running.store(false, Ordering::SeqCst);
     if let Ok(mut st) = state.lock() {
-        dlog!(st.debug_log, "session end  exit={}", status.exit_code());
+        tinfo!(st.debug_log, APP, "session end  exit={}", status.exit_code());
     }
 
     drop(master);
@@ -1251,20 +1262,26 @@ fn sync_shared_agent_blocks_for_provider(state: &mut RuntimeState, provider: Age
 
         let agents_dir = crate::agent_registry::registry_dir().join("agents");
         let snapshot = if !rec.tmux_pane_id.is_empty() {
-            let snap =
-                crate::agent_events::read_agent_live_snapshot(&agents_dir, &rec.tmux_pane_id);
-            // Record the mtime so the watcher thread can detect future changes.
-            if let Some(mtime) =
-                crate::agent_events::agent_events_mtime(&agents_dir, &rec.tmux_pane_id)
-            {
-                state
-                    .agent_event_mtimes
-                    .insert(rec.tmux_pane_id.clone(), mtime);
-            }
-            snap
+            crate::agent_events::read_agent_live_snapshot(&agents_dir, &rec.tmux_pane_id)
         } else {
             None
         };
+
+        // Filter out historical/dead runs.
+        if let Some(ref s) = snapshot {
+            if s.status == crate::app::AgentLiveStatus::Exited {
+                continue;
+            }
+        } else {
+            // No snapshot (files missing): only show if it started very recently (grace period).
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            if now.saturating_sub(rec.started_at_ms) > 30000 {
+                continue;
+            }
+        }
 
         // command = just the display name (used for search/index); the compositor
         // builds the full header line (name  ~/cwd  · status) at render time.
@@ -1463,55 +1480,40 @@ fn advance_tui_state(
 fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug_blocks: bool) {
     match event {
         ShellHookEvent::ZleReady => {
-            dlog!(state.debug_log, "hook zle_ready  tui={:?}", state.tui_state);
+            tinfo!(state.debug_log, HOOK, "zle_ready  tui={:?}", state.tui_state);
             let prev = std::mem::take(&mut state.tui_state);
             let prev_label = format!("{:?}", prev);
             let (next, tui_finalize_block) = advance_tui_state(prev, TuiLifecycleEvent::ZleReady);
-            dlog!(
-                state.debug_log,
-                "tui  ZleReady:  {} → {:?}  finalize={:?}",
+            tinfo!(state.debug_log, APP, "tui  ZleReady:  {} → {:?}  finalize={:?}",
                 prev_label,
                 next,
-                tui_finalize_block
-            );
+                tui_finalize_block);
             state.tui_state = next;
             if let Some(block_id) = tui_finalize_block {
                 finalize_exited_tui_on_precmd(state, block_id);
             }
         }
         ShellHookEvent::AltScreenEnter => {
-            dlog!(
-                state.debug_log,
-                "hook alt_screen_enter  tui={:?}",
-                state.tui_state
-            );
+            tinfo!(state.debug_log, HOOK, "alt_screen_enter  tui={:?}",
+                state.tui_state);
             on_alt_screen_enter(state);
-            dlog!(
-                state.debug_log,
-                "tui  after alt_screen_enter → {:?}",
-                state.tui_state
-            );
+            tinfo!(state.debug_log, APP, "tui  after alt_screen_enter → {:?}",
+                state.tui_state);
         }
         ShellHookEvent::AltScreenExit => {
-            dlog!(
-                state.debug_log,
-                "hook alt_screen_exit  tui={:?}",
-                state.tui_state
-            );
+            tinfo!(state.debug_log, HOOK, "alt_screen_exit  tui={:?}",
+                state.tui_state);
             on_alt_screen_exit(state);
-            dlog!(
-                state.debug_log,
-                "tui  after alt_screen_exit → {:?}",
-                state.tui_state
-            );
+            tinfo!(state.debug_log, APP, "tui  after alt_screen_exit → {:?}",
+                state.tui_state);
         }
         ShellHookEvent::CwdChanged { cwd } => {
-            dlog!(state.debug_log, "hook cwd_changed  cwd={}", cwd);
+            tinfo!(state.debug_log, HOOK, "cwd_changed  cwd={}", cwd);
             state.blocks.set_cwd(cwd.clone());
             let _ = std::env::set_current_dir(cwd);
         }
         ShellHookEvent::Preexec { command } => {
-            dlog!(state.debug_log, "hook preexec  command={:?}", command);
+            tinfo!(state.debug_log, HOOK, "preexec  command={:?}", command);
             state.shell_command_running = true;
             let start_line = state.shell.line_count();
             let block_id =
@@ -1540,14 +1542,11 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             let prev = std::mem::take(&mut state.tui_state);
             let prev_label = format!("{:?}", prev);
             let (next, _) = advance_tui_state(prev, lifecycle_event);
-            dlog!(
-                state.debug_log,
-                "tui  Preexec block={:?}:  {} → {:?}  capture_suspended={}",
+            tinfo!(state.debug_log, APP, "tui  Preexec block={:?}:  {} → {:?}  capture_suspended={}",
                 block_id,
                 prev_label,
                 next,
-                next.is_capture_suspended()
-            );
+                next.is_capture_suspended());
             state.tui_state = next;
 
             // Handle configured exception classes.
@@ -1573,11 +1572,8 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             // Known TUI/Agent states already suspend capture, so no pending needed.
             if matches!(state.tui_state, TuiRuntimeState::Idle) {
                 state.capture_pending = Some(Vec::new());
-                dlog!(
-                    state.debug_log,
-                    "capture_pending started  block={:?}",
-                    block_id
-                );
+                tinfo!(state.debug_log, PTY, "capture_pending started  block={:?}",
+                    block_id);
             }
 
             if detect_and_register_agents(state, block_id, &command) {
@@ -1587,13 +1583,10 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             sync_block_viewport_after_history_change(state);
         }
         ShellHookEvent::Precmd { exit_code, cwd } => {
-            dlog!(
-                state.debug_log,
-                "hook precmd  exit={:?}  cwd={:?}  tui={:?}",
+            tinfo!(state.debug_log, HOOK, "precmd  exit={:?}  cwd={:?}  tui={:?}",
                 exit_code,
                 cwd.as_deref().unwrap_or(""),
-                state.tui_state
-            );
+                state.tui_state);
             state.shell_command_running = false;
             let finished_cwd = cwd;
             if let Some(ref cwd) = finished_cwd {
@@ -1607,13 +1600,10 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             let prev = std::mem::take(&mut state.tui_state);
             let prev_label = format!("{:?}", prev);
             let (next, tui_finalize_block) = advance_tui_state(prev, TuiLifecycleEvent::Precmd);
-            dlog!(
-                state.debug_log,
-                "tui  Precmd:  {} → {:?}  finalize={:?}",
+            tinfo!(state.debug_log, APP, "tui  Precmd:  {} → {:?}  finalize={:?}",
                 prev_label,
                 next,
-                tui_finalize_block
-            );
+                tui_finalize_block);
             state.tui_state = next;
 
             let active_id = state.blocks.active_block_id();
@@ -1621,26 +1611,20 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             let pending_bytes = state.capture_pending.as_ref().map(|v| v.len()).unwrap_or(0);
             commit_pending_capture(state);
             if pending_bytes > 0 {
-                dlog!(
-                    state.debug_log,
-                    "capture_pending committed  bytes={}",
-                    pending_bytes
-                );
+                tinfo!(state.debug_log, PTY, "capture_pending committed  bytes={}",
+                    pending_bytes);
             }
             let end_line = state.shell.line_count().saturating_sub(1);
             state.blocks.finish_command(exit_code, end_line);
             if let Some(id) = active_id {
                 if let Some(block) = state.blocks.block(id) {
-                    dlog!(
-                        state.debug_log,
-                        "block #{} finished  status={:?}  exit={:?}  kind={:?}  bytes={}  duration={}ms",
+                    tinfo!(state.debug_log, APP, "block #{} finished  status={:?}  exit={:?}  kind={:?}  bytes={}  duration={}ms",
                         id.0,
                         block.status,
                         block.exit_code,
                         block.kind,
                         block.output_raw.len(),
-                        block.duration_ms.unwrap_or(0)
-                    );
+                        block.duration_ms.unwrap_or(0));
                 }
             }
             sync_block_viewport_after_history_change(state);
@@ -1885,12 +1869,9 @@ fn render_runtime(
 
         let _n_blocks = state.blocks.timeline.len();
         let _view_kind = format!("{:?}", state.view.view);
-        dlog!(
-            state.debug_log,
-            "render_runtime  building_visual_lines  view={}  blocks={}",
+        tinfo!(state.debug_log, RENDER, "render_runtime  building_visual_lines  view={}  blocks={}",
             _view_kind,
-            _n_blocks
-        );
+            _n_blocks);
 
         // Clear expired flash message and extract text for compositor.
         let flash_text = state
@@ -1922,11 +1903,8 @@ fn render_runtime(
                 .map(std::path::PathBuf::from)
                 .as_deref(),
         );
-        dlog!(
-            state.debug_log,
-            "render_runtime  visual_lines_done  n={}",
-            visual_lines.len()
-        );
+        tinfo!(state.debug_log, RENDER, "render_runtime  visual_lines_done  n={}",
+            visual_lines.len());
         (
             visual_lines,
             state.view.clone(),
@@ -1977,7 +1955,7 @@ fn render_runtime(
             .lock()
             .map_err(|_| io::Error::other("runtime state lock poisoned"))?;
         state.render_state.last_rendered_rows = rendered;
-        dlog!(state.debug_log, "render_runtime  done  rows={}", rendered);
+        tinfo!(state.debug_log, RENDER, "render_runtime  done  rows={}", rendered);
         // Mark underlying view as cleanly rendered so subsequent Help
         // navigations can skip it (avoiding full-screen flicker on j/k).
         if drew_underlying {
@@ -2047,22 +2025,16 @@ fn flush_render_state(state: &mut RuntimeState) -> bool {
 }
 
 fn enter_block_view(state: &mut RuntimeState) {
-    dlog!(state.debug_log, "view  Plain → Blocks");
+    tinfo!(state.debug_log, APP, "View:  Plain → Blocks");
     sync_shared_agent_blocks(state);
-    dlog!(
-        state.debug_log,
-        "enter_block_view  sync_done  blocks={}",
-        state.blocks.timeline.len()
-    );
+    tinfo!(state.debug_log, APP, "enter_block_view  sync_done  blocks={}",
+        state.blocks.timeline.len());
     move_running_agents_to_bottom(state);
     state.view.view = ViewKind::Blocks;
     state.view.expanded_block = None;
     select_tail_block(state);
-    dlog!(
-        state.debug_log,
-        "enter_block_view  select_done  idx={}",
-        state.view.block_viewport.selected_index
-    );
+    tinfo!(state.debug_log, APP, "enter_block_view  select_done  idx={}",
+        state.view.block_viewport.selected_index);
     state.render_state.dirty = true;
     state.render_state.force_render = true;
     state.render_state.needs_cleanup = false;
@@ -2386,7 +2358,7 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
             } else {
-                dlog!(state.debug_log, "view  Blocks → Plain  (quit)");
+                tinfo!(state.debug_log, APP, "View:  Blocks → Plain  (quit)");
                 state.view = ViewState::default();
                 state.input_accumulator.pending_block_delta = 0;
                 state.render_state.needs_cleanup = true;
@@ -2538,6 +2510,45 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
         }
         BlockViewAction::DetailView => {
             if let Some(selected) = state.view.selected_block {
+                exit_visual_mode(state);
+                tinfo!(state.debug_log, APP, "View:  Blocks → Detail  block={}",
+                    selected.0);
+                state.view.view = ViewKind::Detail;
+                state.view.expanded_block = Some(selected);
+                state.view.block_viewport.line_offset = 0;
+                state.view.detail_line_cursor = 0;
+                state.render_state.dirty = true;
+                state.render_state.force_render = true;
+            }
+            true
+        }
+        BlockViewAction::AgentStop => {
+            if let Some(selected) = state.view.selected_block {
+                if let Some(agent_ref) = state
+                    .blocks
+                    .block(selected)
+                    .and_then(|b| b.agent_ref.clone())
+                    && let Ok(Some(rec)) =
+                        crate::agent_registry::find_by_alias(&agent_ref.provider, &agent_ref.alias)
+                {
+                    if !rec.tmux_pane_id.is_empty() {
+                        let _ = Command::new("tmux")
+                            .args(["send-keys", "-t", &rec.tmux_pane_id, "C-c"])
+                            .status();
+                        state.render_state.flash_message =
+                            Some(("agent: sent SIGINT".to_string(), Instant::now()));
+                    } else {
+                        state.render_state.flash_message =
+                            Some(("agent: no tmux pane".to_string(), Instant::now()));
+                    }
+                    state.render_state.dirty = true;
+                    state.render_state.force_render = true;
+                }
+            }
+            true
+        }
+        BlockViewAction::AgentRetry => {
+            if let Some(selected) = state.view.selected_block {
                 if let Some(agent_ref) = state
                     .blocks
                     .block(selected)
@@ -2560,8 +2571,11 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                             );
                         }
                         if tmux_jump_and_zoom(&jump_target) {
+                            let _ = Command::new("tmux")
+                                .args(["send-keys", "-t", &jump_target, "Enter"])
+                                .status();
                             state.render_state.flash_message =
-                                Some((format!("jumped [{}]", agent_ref.alias), Instant::now()));
+                                Some((format!("retrying [{}]", agent_ref.alias), Instant::now()));
                         } else {
                             state.render_state.flash_message = Some((
                                 format!("jump failed [{}]", agent_ref.alias),
@@ -2574,21 +2588,7 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                     }
                     state.render_state.dirty = true;
                     state.render_state.force_render = true;
-                    return true;
                 }
-
-                exit_visual_mode(state);
-                dlog!(
-                    state.debug_log,
-                    "view  Blocks → Detail  block={}",
-                    selected.0
-                );
-                state.view.view = ViewKind::Detail;
-                state.view.expanded_block = Some(selected);
-                state.view.block_viewport.line_offset = 0;
-                state.view.detail_line_cursor = 0;
-                state.render_state.dirty = true;
-                state.render_state.force_render = true;
             }
             true
         }
@@ -2855,7 +2855,7 @@ fn execute_detail_view_action(action: DetailViewAction, state: &mut RuntimeState
             state.render_state.force_render = true;
         }
         DetailViewAction::Quit => {
-            dlog!(state.debug_log, "view  Detail → Blocks  (quit)");
+            tinfo!(state.debug_log, APP, "View:  Detail → Blocks  (quit)");
             state.view.view = ViewKind::Blocks;
             state.view.expanded_block = None;
             state.view.detail_line_cursor = 0;
@@ -3375,11 +3375,8 @@ fn apply_pty_raw_mode_change(state: &mut RuntimeState, mode: crate::app::Termios
     // This keeps history clean if a program starts in canonical mode (shell)
     // but later switches to raw mode (interactive program).
     if let Some(pending) = state.capture_pending.take() {
-        dlog!(
-            state.debug_log,
-            "monitor  interactive  discarding_pending_bytes={}",
-            pending.len()
-        );
+        tinfo!(state.debug_log, PTY, "monitor  interactive  discarding_pending_bytes={}",
+            pending.len());
     }
 
     // Only act further if a command is actively running and the TUI state machine is idle
@@ -3391,12 +3388,9 @@ fn apply_pty_raw_mode_change(state: &mut RuntimeState, mode: crate::app::Termios
         return; // Already tracked by the existing TUI state machine.
     }
     if let Some(block_id) = state.blocks.active_block_id() {
-        dlog!(
-            state.debug_log,
-            "monitor  interactive  block={}  mode={:?}",
+        tinfo!(state.debug_log, PTY, "monitor  interactive  block={}  mode={:?}",
             block_id.0,
-            mode
-        );
+            mode);
         if let Some(block) = state.blocks.block_mut(block_id) {
             block.kind = BlockKind::Interactive;
         }
@@ -3455,7 +3449,6 @@ mod tests {
             capture_pending: None,
             shell_pgid: None,
             foreground_job_pgid: None,
-            agent_event_mtimes: HashMap::new(),
             debug_log: None,
         }
     }
