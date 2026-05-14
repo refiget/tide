@@ -494,17 +494,17 @@ pub fn run_shell(config: &Config) -> Result<()> {
     let monitor_state = Arc::clone(&state);
     #[cfg(unix)]
     let _monitor_thread = thread::spawn(move || {
-        let mut prev_raw = is_pty_raw_mode(monitor_fd);
+        let mut prev_mode = read_termios_mode(monitor_fd);
         loop {
             thread::sleep(Duration::from_millis(50));
             if !monitor_running.load(Ordering::SeqCst) {
                 break;
             }
-            let raw = is_pty_raw_mode(monitor_fd);
-            if raw != prev_raw {
-                prev_raw = raw;
+            let mode = read_termios_mode(monitor_fd);
+            if mode != prev_mode {
+                prev_mode = mode;
                 if let Ok(mut st) = monitor_state.lock() {
-                    apply_pty_raw_mode_change(&mut st, raw);
+                    apply_pty_raw_mode_change(&mut st, mode);
                 }
             }
         }
@@ -3025,17 +3025,33 @@ fn current_pty_size() -> PtySize {
 }
 
 #[cfg(unix)]
-fn is_pty_raw_mode(fd: std::os::unix::io::RawFd) -> bool {
+fn read_termios_mode(fd: std::os::unix::io::RawFd) -> crate::app::TermiosMode {
+    use crate::app::TermiosMode;
     if fd < 0 {
-        return false;
+        return TermiosMode::Unknown;
     }
-    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
-    unsafe { libc::tcgetattr(fd, &mut termios) == 0 && termios.c_lflag & libc::ICANON == 0 }
+    let mut t: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(fd, &mut t) } != 0 {
+        return TermiosMode::Unknown;
+    }
+    let canonical = t.c_lflag & libc::ICANON != 0;
+    let echo = t.c_lflag & libc::ECHO != 0;
+    let isig = t.c_lflag & libc::ISIG != 0;
+    match (canonical, echo, isig) {
+        (true, true, _) => TermiosMode::CanonicalEcho,
+        (true, false, _) => TermiosMode::CanonicalNoEcho,
+        (false, _, true) => TermiosMode::Cbreak,
+        (false, _, false) => TermiosMode::Raw,
+    }
 }
 
-fn apply_pty_raw_mode_change(state: &mut RuntimeState, raw: bool) {
-    if !raw {
-        return; // Raw mode ended — stay suspended until precmd/ZleReady clears state.
+fn apply_pty_raw_mode_change(state: &mut RuntimeState, mode: crate::app::TermiosMode) {
+    // Only `Cbreak` and `Raw` indicate an interactive program that should
+    // suspend capture.  `CanonicalNoEcho` (sudo password prompt) is brief
+    // and non-sticky; we leave the block running so subsequent output is
+    // still captured.
+    if !mode.is_interactive() {
+        return;
     }
     // Only act if a command is actively running and the TUI state machine is idle
     // (no known TUI, no alt-screen, no agent-CLI pending).
@@ -4553,7 +4569,7 @@ mod tests {
             state
                 .blocks
                 .start_command("python".to_string(), 0, BlockKind::NormalCommand);
-        apply_pty_raw_mode_change(&mut state, true);
+        apply_pty_raw_mode_change(&mut state, crate::app::TermiosMode::Raw);
         // Should stay Idle because no command is running
         assert!(matches!(state.tui_state, TuiRuntimeState::Idle));
         let _ = block_id;
@@ -4576,7 +4592,7 @@ mod tests {
             block_id,
             app_match,
         };
-        apply_pty_raw_mode_change(&mut state, true);
+        apply_pty_raw_mode_change(&mut state, crate::app::TermiosMode::Raw);
         // Should stay PendingKnownTui — monitor does not override known TUI handling
         assert!(matches!(
             state.tui_state,
@@ -4592,12 +4608,51 @@ mod tests {
             state
                 .blocks
                 .start_command("python".to_string(), 0, BlockKind::NormalCommand);
-        apply_pty_raw_mode_change(&mut state, true);
+        apply_pty_raw_mode_change(&mut state, crate::app::TermiosMode::Raw);
         assert!(matches!(
             state.tui_state,
             TuiRuntimeState::MonitorDetectedInteractive { block_id: b } if b == block_id
         ));
         assert!(state.tui_state.is_capture_suspended());
+    }
+
+    #[test]
+    fn monitor_cbreak_also_suspends_capture() {
+        let mut state = runtime_state();
+        state.shell_command_running = true;
+        let block_id = state
+            .blocks
+            .start_command("less".to_string(), 0, BlockKind::NormalCommand);
+        apply_pty_raw_mode_change(&mut state, crate::app::TermiosMode::Cbreak);
+        assert!(matches!(
+            state.tui_state,
+            TuiRuntimeState::MonitorDetectedInteractive { block_id: b } if b == block_id
+        ));
+        assert!(state.tui_state.is_capture_suspended());
+    }
+
+    #[test]
+    fn monitor_canonical_no_echo_does_not_suspend_capture() {
+        let mut state = runtime_state();
+        state.shell_command_running = true;
+        let _block_id = state
+            .blocks
+            .start_command("sudo".to_string(), 0, BlockKind::NormalCommand);
+        // CanonicalNoEcho (password prompt) must NOT trigger MonitorDetectedInteractive —
+        // subsequent apt/command output should still be captured.
+        apply_pty_raw_mode_change(&mut state, crate::app::TermiosMode::CanonicalNoEcho);
+        assert!(matches!(state.tui_state, TuiRuntimeState::Idle));
+    }
+
+    #[test]
+    fn monitor_canonical_echo_does_not_suspend_capture() {
+        let mut state = runtime_state();
+        state.shell_command_running = true;
+        let _block_id = state
+            .blocks
+            .start_command("echo".to_string(), 0, BlockKind::NormalCommand);
+        apply_pty_raw_mode_change(&mut state, crate::app::TermiosMode::CanonicalEcho);
+        assert!(matches!(state.tui_state, TuiRuntimeState::Idle));
     }
 
     #[test]

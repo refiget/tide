@@ -748,6 +748,38 @@ pub const DEFAULT_AGENT_CLI_COMMANDS: &[&str] = &[
     "cody",
 ];
 
+// ─── Termios Mode ──────────────────────────────────────────────────────────
+
+/// Classification of the PTY's current line-discipline settings.
+///
+/// Polled every 50 ms by the monitor thread via `tcgetattr` on the master fd.
+/// Used only to decide whether to suspend sidecar capture — never to gate
+/// stdout passthrough.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TermiosMode {
+    #[default]
+    /// ICANON=1, ECHO=1 — normal shell readline.
+    CanonicalEcho,
+    /// ICANON=1, ECHO=0 — password prompt (sudo, ssh passphrase).
+    CanonicalNoEcho,
+    /// ICANON=0, ISIG=1 — character-at-a-time, signals still active (less, more, readline cbreak).
+    Cbreak,
+    /// ICANON=0, ISIG=0 — fully raw (vim, fzf, TUI apps, Python REPL with readline).
+    Raw,
+    /// tcgetattr failed (fd closed, error).
+    Unknown,
+}
+
+#[cfg(unix)]
+impl TermiosMode {
+    /// True when the mode indicates an interactive program that should not be
+    /// captured into the block store.
+    pub fn is_interactive(self) -> bool {
+        matches!(self, TermiosMode::Cbreak | TermiosMode::Raw)
+    }
+}
+
 // ─── Alt-Screen Lifecycle ───────────────────────────────────────────────────
 
 /// States for the TUI full-screen lifecycle state machine.
