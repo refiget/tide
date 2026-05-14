@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     io::{self, Read, Write},
-    process::Command,
+    process::{Command, Output, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -372,6 +372,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
                                         input_state.lock().unwrap_or_else(|e| e.into_inner());
                                     state.tide_alt_screen_active = true;
                                     enter_block_view(&mut state);
+                                    dlog!(state.debug_log, "ctrl-b  enter_block_view_returned");
                                     drop(state);
                                     let _ = maybe_flush_navigation_and_render(
                                         &input_state,
@@ -818,10 +819,10 @@ fn is_agent_process_command(command: &str, cfg: &AgentShareConfig) -> bool {
 }
 
 fn tmux_current_tty() -> Option<String> {
-    let out = Command::new("tmux")
-        .args(["display-message", "-p", "#{pane_tty}"])
-        .output()
-        .ok()?;
+    let out = tmux_output_with_timeout(
+        &["display-message", "-p", "#{pane_tty}"],
+        Duration::from_millis(200),
+    )?;
     if !out.status.success() {
         return None;
     }
@@ -838,10 +839,10 @@ fn tmux_current_pane_id() -> Option<String> {
 
 fn tmux_current_window_id() -> Option<String> {
     let pane_id = tmux_current_pane_id()?;
-    let out = Command::new("tmux")
-        .args(["display-message", "-p", "-t", &pane_id, "#{window_id}"])
-        .output()
-        .ok()?;
+    let out = tmux_output_with_timeout(
+        &["display-message", "-p", "-t", &pane_id, "#{window_id}"],
+        Duration::from_millis(200),
+    )?;
     if !out.status.success() {
         return None;
     }
@@ -986,18 +987,40 @@ fn synthetic_agent_block_id(provider: AgentProvider, alias: &str) -> BlockId {
     BlockId(u64::MAX - (h % 1_000_000_000))
 }
 
+fn tmux_output_with_timeout(args: &[&str], timeout: Duration) -> Option<Output> {
+    let mut child = Command::new("tmux")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = Instant::now();
+    loop {
+        if child.try_wait().ok()?.is_some() {
+            return child.wait_with_output().ok();
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn tmux_current_target() -> Option<String> {
     if let Ok(pane_id) = std::env::var("TMUX_PANE") {
-        let out = Command::new("tmux")
-            .args([
+        let out = tmux_output_with_timeout(
+            &[
                 "display-message",
                 "-p",
                 "-t",
                 pane_id.trim(),
                 "#{session_name}:#{window_index}.#{pane_index}",
-            ])
-            .output()
-            .ok()?;
+            ],
+            Duration::from_millis(200),
+        )?;
         if out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !s.is_empty() {
@@ -1006,14 +1029,14 @@ fn tmux_current_target() -> Option<String> {
         }
     }
 
-    let out = Command::new("tmux")
-        .args([
+    let out = tmux_output_with_timeout(
+        &[
             "display-message",
             "-p",
             "#{session_name}:#{window_index}.#{pane_index}",
-        ])
-        .output()
-        .ok()?;
+        ],
+        Duration::from_millis(200),
+    )?;
     if !out.status.success() {
         return None;
     }
@@ -1022,11 +1045,12 @@ fn tmux_current_target() -> Option<String> {
 }
 
 fn tmux_target_exists(target: &str) -> bool {
-    Command::new("tmux")
-        .args(["display-message", "-p", "-t", target, "#{pane_id}"])
-        .output()
-        .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-        .unwrap_or(false)
+    tmux_output_with_timeout(
+        &["display-message", "-p", "-t", target, "#{pane_id}"],
+        Duration::from_millis(120),
+    )
+    .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+    .unwrap_or(false)
 }
 
 fn tmux_jump_and_zoom(target: &str) -> bool {
@@ -1037,19 +1061,7 @@ fn tmux_jump_and_zoom(target: &str) -> bool {
             .map(|s| s.success())
             .unwrap_or(false)
         {
-            let zoomed = Command::new("tmux")
-                .args([
-                    "display-message",
-                    "-p",
-                    "-t",
-                    target,
-                    "#{window_zoomed_flag}",
-                ])
-                .output()
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_default();
-            if zoomed == "0" {
+            if tmux_window_zoomed(target) == Some(false) {
                 let _ = Command::new("tmux")
                     .args(["resize-pane", "-Z", "-t", target])
                     .status();
@@ -1082,19 +1094,7 @@ fn tmux_jump_and_zoom(target: &str) -> bool {
             .map(|s| s.success())
             .unwrap_or(false)
     {
-        let zoomed = Command::new("tmux")
-            .args([
-                "display-message",
-                "-p",
-                "-t",
-                target,
-                "#{window_zoomed_flag}",
-            ])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-        if zoomed == "0" {
+        if tmux_window_zoomed(target) == Some(false) {
             let _ = Command::new("tmux").args(["resize-pane", "-Z"]).status();
         }
         true
@@ -1104,16 +1104,16 @@ fn tmux_jump_and_zoom(target: &str) -> bool {
 }
 
 fn tmux_window_zoomed(target: &str) -> Option<bool> {
-    let out = Command::new("tmux")
-        .args([
+    let out = tmux_output_with_timeout(
+        &[
             "display-message",
             "-p",
             "-t",
             target,
             "#{window_zoomed_flag}",
-        ])
-        .output()
-        .ok()?;
+        ],
+        Duration::from_millis(200),
+    )?;
     if !out.status.success() {
         return None;
     }
@@ -1847,6 +1847,15 @@ fn render_runtime(
             return Ok(());
         }
 
+        let _n_blocks = state.blocks.timeline.len();
+        let _view_kind = format!("{:?}", state.view.view);
+        dlog!(
+            state.debug_log,
+            "render_runtime  building_visual_lines  view={}  blocks={}",
+            _view_kind,
+            _n_blocks
+        );
+
         // Clear expired flash message and extract text for compositor.
         let flash_text = state
             .render_state
@@ -1877,6 +1886,11 @@ fn render_runtime(
                 .map(std::path::PathBuf::from)
                 .as_deref(),
         );
+        dlog!(
+            state.debug_log,
+            "render_runtime  visual_lines_done  n={}",
+            visual_lines.len()
+        );
         (
             visual_lines,
             state.view.clone(),
@@ -1892,6 +1906,7 @@ fn render_runtime(
     let mut stdout = stdout
         .lock()
         .map_err(|_| io::Error::other("stdout lock poisoned"))?;
+    // stdout lock acquired — note: no dlog here since debug_log is inside the state lock
 
     // Second guard: re-check tide_alt_screen_active now that we hold the stdout lock.
     // The input thread sets tide_alt_screen_active=false (in state lock) BEFORE acquiring
@@ -1926,6 +1941,7 @@ fn render_runtime(
             .lock()
             .map_err(|_| io::Error::other("runtime state lock poisoned"))?;
         state.render_state.last_rendered_rows = rendered;
+        dlog!(state.debug_log, "render_runtime  done  rows={}", rendered);
         // Mark underlying view as cleanly rendered so subsequent Help
         // navigations can skip it (avoiding full-screen flicker on j/k).
         if drew_underlying {
@@ -2004,10 +2020,20 @@ fn flush_render_state(state: &mut RuntimeState) -> bool {
 fn enter_block_view(state: &mut RuntimeState) {
     dlog!(state.debug_log, "view  Plain → Blocks");
     sync_shared_agent_blocks(state);
+    dlog!(
+        state.debug_log,
+        "enter_block_view  sync_done  blocks={}",
+        state.blocks.timeline.len()
+    );
     move_running_agents_to_bottom(state);
     state.view.view = ViewKind::Blocks;
     state.view.expanded_block = None;
     select_tail_block(state);
+    dlog!(
+        state.debug_log,
+        "enter_block_view  select_done  idx={}",
+        state.view.block_viewport.selected_index
+    );
     state.render_state.dirty = true;
     state.render_state.force_render = true;
 }
