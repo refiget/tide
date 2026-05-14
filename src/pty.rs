@@ -3383,7 +3383,19 @@ fn apply_pty_raw_mode_change(state: &mut RuntimeState, mode: crate::app::Termios
     if !mode.is_interactive() {
         return;
     }
-    // Only act if a command is actively running and the TUI state machine is idle
+
+    // Discard any pending capture as soon as we detect interactive mode.
+    // This keeps history clean if a program starts in canonical mode (shell)
+    // but later switches to raw mode (interactive program).
+    if let Some(pending) = state.capture_pending.take() {
+        dlog!(
+            state.debug_log,
+            "monitor  interactive  discarding_pending_bytes={}",
+            pending.len()
+        );
+    }
+
+    // Only act further if a command is actively running and the TUI state machine is idle
     // (no known TUI, no alt-screen, no agent-CLI pending).
     if !state.shell_command_running {
         return; // Shell readline showing a prompt — not a user command.
@@ -3394,12 +3406,10 @@ fn apply_pty_raw_mode_change(state: &mut RuntimeState, mode: crate::app::Termios
     if let Some(block_id) = state.blocks.active_block_id() {
         dlog!(
             state.debug_log,
-            "monitor  interactive  block={}  mode={:?}  discarding_pending={}",
+            "monitor  interactive  block={}  mode={:?}",
             block_id.0,
-            mode,
-            state.capture_pending.is_some()
+            mode
         );
-        state.capture_pending = None; // discard startup bytes before raw mode
         if let Some(block) = state.blocks.block_mut(block_id) {
             block.kind = BlockKind::Interactive;
         }
