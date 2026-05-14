@@ -63,6 +63,16 @@ fn file_mtime_ms(path: &Path) -> Option<u64> {
 
 // ─── Status from events.jsonl ─────────────────────────────────────────────────
 
+#[derive(Deserialize)]
+struct MinimalEvent {
+    #[serde(rename = "type")]
+    event_type: Option<String>,
+    at_ms: Option<u64>,
+    tool_name: Option<String>,
+    command: Option<String>,
+    text: Option<String>,
+}
+
 type StatusTuple = (AgentLiveStatus, Option<u64>, Option<String>, Option<String>);
 
 /// Some event types carry no live-status meaning and must be skipped during
@@ -108,30 +118,24 @@ fn read_status_from_events(dir: &Path) -> Option<StatusTuple> {
             continue;
         }
         // Skip partial lines that may result from a write-in-progress at EOF.
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+        let Ok(val) = serde_json::from_str::<MinimalEvent>(line) else {
             continue;
         };
 
-        let event_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let event_type = val.event_type.as_deref().unwrap_or("");
 
         // Status: first status-bearing event wins (scanning newest→oldest).
         if !status_found && carries_status(event_type) {
-            at_ms = val.get("at_ms").and_then(|v| v.as_u64());
+            at_ms = val.at_ms;
             status = event_to_status(&val, event_type);
             status_found = true;
         }
 
         // Tool info: from the most recent tool_call (independent of status scan).
         if event_type == "tool_call" && !tool_found {
-            current_tool = val
-                .get("tool_name")
-                .and_then(|v| v.as_str())
-                .map(String::from);
+            current_tool = val.tool_name.clone();
             if is_exec_tool(current_tool.as_deref().unwrap_or("")) {
-                current_command = val
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
+                current_command = val.command.clone();
             }
             tool_found = true;
         }
@@ -148,11 +152,11 @@ fn read_status_from_events(dir: &Path) -> Option<StatusTuple> {
     Some((status, at_ms, current_tool, current_command))
 }
 
-fn event_to_status(val: &serde_json::Value, event_type: &str) -> AgentLiveStatus {
+fn event_to_status(val: &MinimalEvent, event_type: &str) -> AgentLiveStatus {
     match event_type {
         "thinking" => AgentLiveStatus::Thinking,
         "tool_call" => {
-            let tool = val.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+            let tool = val.tool_name.as_deref().unwrap_or("");
             if is_exec_tool(tool) {
                 AgentLiveStatus::ExecutingCommand
             } else {
