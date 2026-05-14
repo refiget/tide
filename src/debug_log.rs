@@ -1,9 +1,48 @@
 use std::{
+    fmt::Display,
     fs::{File, OpenOptions},
     io::{BufWriter, Write},
     path::PathBuf,
     time::Instant,
 };
+
+#[derive(Debug, Clone, Copy)]
+pub enum LogLevel {
+    INFO,
+    DEBUG,
+    TRACE,
+}
+
+impl Display for LogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LogLevel::INFO => write!(f, "INFO"),
+            LogLevel::DEBUG => write!(f, "DEBUG"),
+            LogLevel::TRACE => write!(f, "TRACE"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum LogCategory {
+    PTY,
+    HOOK,
+    APP,
+    RENDER,
+    AGENT,
+}
+
+impl Display for LogCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LogCategory::PTY => write!(f, "PTY"),
+            LogCategory::HOOK => write!(f, "HOOK"),
+            LogCategory::APP => write!(f, "APP"),
+            LogCategory::RENDER => write!(f, "RENDER"),
+            LogCategory::AGENT => write!(f, "AGENT"),
+        }
+    }
+}
 
 /// Per-session debug log.  Created when `TIDE_DEBUG=1` is set.
 ///
@@ -54,6 +93,45 @@ impl DebugLog {
         let _ = writeln!(self.writer, "[+{}ms] {}", ms, msg);
         // Flush so the file is readable mid-session.
         let _ = self.writer.flush();
+    }
+
+    pub fn log_structured(
+        &mut self,
+        level: LogLevel,
+        cat: LogCategory,
+        msg: &str,
+        context: Option<&str>,
+    ) {
+        let ms = self.start.elapsed().as_millis();
+        let context_str = if let Some(c) = context {
+            format!(" | Context: {{{}}}", c)
+        } else {
+            String::new()
+        };
+        let _ = writeln!(
+            self.writer,
+            "[+{}ms][{}][{}] {}{}",
+            ms, level, cat, msg, context_str
+        );
+        let _ = self.writer.flush();
+    }
+
+    /// Escapes non-printable ASCII characters for trace logging.
+    pub fn escape_bytes(bytes: &[u8]) -> String {
+        let mut escaped = String::new();
+        for &b in bytes {
+            if b >= 0x20 && b <= 0x7E {
+                escaped.push(b as char);
+            } else {
+                match b {
+                    b'\n' => escaped.push_str("\\n"),
+                    b'\r' => escaped.push_str("\\r"),
+                    b'\t' => escaped.push_str("\\t"),
+                    _ => escaped.push_str(&format!("\\x{:02x}", b)),
+                }
+            }
+        }
+        escaped
     }
 }
 
