@@ -915,7 +915,7 @@ fn register_running_agent_block(
         crate::config::ShareCwdMode::None => String::new(),
     };
     if let Ok(alias) = crate::agent_registry::register_running(
-        provider,
+        &provider,
         &state.tide_id,
         id.0,
         &share_command,
@@ -925,7 +925,10 @@ fn register_running_agent_block(
         &pane_id,
         &window_id,
     ) {
-        state.agent_blocks.insert(id, AgentRef { provider, alias });
+        state.agent_blocks.insert(id, AgentRef {
+            provider,
+            alias,
+        });
         return true;
     }
     false
@@ -936,7 +939,7 @@ fn detect_and_register_agents(state: &mut RuntimeState, id: BlockId, command: &s
         .config
         .agents
         .iter()
-        .map(|(&p, c)| (p, c.clone()))
+        .map(|(p, c)| (p.clone(), c.clone()))
         .collect();
     let mut registered = false;
     for (provider, cfg) in providers {
@@ -1196,7 +1199,7 @@ fn sync_shared_agent_blocks(state: &mut RuntimeState) {
         .config
         .agents
         .iter()
-        .map(|(&p, c)| (p, c.enabled))
+        .map(|(p, c)| (p.clone(), c.enabled))
         .collect();
     for (provider, enabled) in providers {
         if enabled {
@@ -1206,7 +1209,7 @@ fn sync_shared_agent_blocks(state: &mut RuntimeState) {
 }
 
 fn sync_shared_agent_blocks_for_provider(state: &mut RuntimeState, provider: AgentProvider) {
-    let Ok(records) = crate::agent_registry::list_all(provider) else {
+    let Ok(records) = crate::agent_registry::list_all(&provider) else {
         return;
     };
 
@@ -1240,26 +1243,10 @@ fn sync_shared_agent_blocks_for_provider(state: &mut RuntimeState, provider: Age
         if rec.status == crate::agent_registry::AgentStatus::Exited {
             continue;
         }
-        // Use pane_id (%N) for existence check — pane indices can be reused by new panes,
-        // so tmux_target (session:window.index) would falsely match a different pane.
-        let pane_alive = if !rec.tmux_pane_id.is_empty() {
-            tmux_target_exists(&rec.tmux_pane_id)
-        } else {
-            tmux_target_exists(&rec.tmux_target)
-        };
-        if rec.status == crate::agent_registry::AgentStatus::Running && !pane_alive {
-            let _ = crate::agent_registry::mark_stale(provider, &rec.alias);
-        }
-        if rec.status == crate::agent_registry::AgentStatus::Stale && !pane_alive {
-            continue;
-        }
-
-        let display_status = if pane_alive {
-            BlockStatus::Running
-        } else {
-            BlockStatus::Unknown
-        };
-        let id = synthetic_agent_block_id(provider, &rec.alias);
+        // Optimistically assume the pane is alive if it's in the registry and hasn't exited.
+        // Blocking tmux checks are removed from the sync loop to avoid visual lag.
+        let display_status = BlockStatus::Running;
+        let id = synthetic_agent_block_id(provider.clone(), &rec.alias);
         let cwd = std::path::PathBuf::from(&rec.cwd);
 
         let agents_dir = crate::agent_registry::registry_dir().join("agents");
@@ -1321,7 +1308,7 @@ fn sync_shared_agent_blocks_for_provider(state: &mut RuntimeState, provider: Age
                 synthetic: true,
                 actions: BlockActionScope::JumpOnly,
                 agent_ref: Some(AgentRef {
-                    provider,
+                    provider: provider.clone(),
                     alias: rec.alias.clone(),
                 }),
                 live_snapshot: snapshot,
@@ -1676,7 +1663,7 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             if let Some(id) = active_id {
                 if let Some(agent_ref) = state.agent_blocks.remove(&id) {
                     let _ = crate::agent_registry::unregister_running(
-                        agent_ref.provider,
+                        &agent_ref.provider,
                         &state.tide_id,
                         id.0,
                     );
@@ -2556,7 +2543,7 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                     .block(selected)
                     .and_then(|b| b.agent_ref.clone())
                     && let Ok(Some(rec)) =
-                        crate::agent_registry::find_by_alias(agent_ref.provider, &agent_ref.alias)
+                        crate::agent_registry::find_by_alias(&agent_ref.provider, &agent_ref.alias)
                 {
                     let jump_target = if !rec.tmux_pane_id.is_empty() {
                         rec.tmux_pane_id.clone()
@@ -4741,7 +4728,7 @@ mod tests {
 
     fn opencode_agent_cfg() -> crate::config::AgentShareConfig {
         let mut cfg = crate::config::AgentShareConfig::default();
-        crate::config::fill_agent_defaults_pub(AgentProvider::Opencode, &mut cfg);
+        crate::config::fill_agent_defaults_pub(&AgentProvider::opencode(), &mut cfg);
         cfg
     }
 

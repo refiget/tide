@@ -335,21 +335,6 @@ pub fn find_by_alias(provider: &AgentProvider, alias: &str) -> Result<Option<Age
     })
 }
 
-pub fn mark_stale(provider: &AgentProvider, alias: &str) -> Result<()> {
-    with_lock(|| {
-        let path = registry_path();
-        let mut reg = read_registry_unlocked(&path);
-        for rec in &mut reg.records {
-            if rec.provider == *provider && rec.alias == alias && rec.status == AgentStatus::Running
-            {
-                rec.status = AgentStatus::Stale;
-                rec.last_seen_at_ms = now_ms();
-            }
-        }
-        write_registry_unlocked(&path, &reg)
-    })
-}
-
 pub fn write_last_jump(
     from_tmux_target: &str,
     to_tmux_target: &str,
