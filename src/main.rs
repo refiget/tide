@@ -8,6 +8,7 @@ mod buffer;
 mod cli;
 mod compositor;
 mod config;
+mod debug_log;
 mod format;
 mod index;
 mod pty;

@@ -15,6 +15,7 @@ use crossterm::terminal;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use signal_hook::{consts::signal::SIGWINCH, iterator::Signals};
 
+use crate::dlog;
 use crate::{
     agent_registry::{AgentProvider, AgentRef},
     app::{
@@ -64,6 +65,8 @@ struct RuntimeState {
     /// Last-seen mtime (seconds) per tmux pane_id for agent event files.
     /// Used by the watcher thread to detect when opencode writes new events.
     agent_event_mtimes: HashMap<String, u64>,
+    /// Per-session debug log.  `Some` when `TIDE_DEBUG=1`.
+    debug_log: Option<crate::debug_log::DebugLog>,
 }
 
 #[derive(Clone)]
@@ -142,7 +145,7 @@ pub fn run_shell(config: &Config) -> Result<()> {
     let state = Arc::new(Mutex::new(RuntimeState {
         shell: ShellBuffer::new(),
         blocks: BlockStore::new(
-            initial_cwd,
+            initial_cwd.clone(),
             runtime_config.max_blocks,
             config.blocks.max_output_bytes_per_block,
         ),
@@ -163,9 +166,27 @@ pub fn run_shell(config: &Config) -> Result<()> {
         shell_pgid: None,
         foreground_job_pgid: None,
         agent_event_mtimes: HashMap::new(),
+        debug_log: None,
     }));
     let stdout = Arc::new(Mutex::new(io::stdout()));
     let debug_blocks = std::env::var_os("TIDE_DEBUG_BLOCKS").is_some();
+
+    // Open debug log if TIDE_DEBUG=1. Print path so the user knows where to tail.
+    if let Some(log) = crate::debug_log::DebugLog::open_if_enabled() {
+        eprintln!("\r\ntide debug log: {}\r", log.path.display());
+        if let Ok(mut st) = state.lock() {
+            let shell = config.shell.program.clone();
+            let cwd = initial_cwd.display().to_string();
+            st.debug_log = Some(log);
+            dlog!(
+                st.debug_log,
+                "session start  pid={}  shell={}  cwd={}",
+                std::process::id(),
+                shell,
+                cwd
+            );
+        }
+    }
 
     // Resolve shell PGID now that `state` exists.
     #[cfg(unix)]
@@ -539,15 +560,34 @@ pub fn run_shell(config: &Config) -> Result<()> {
             if mode_changed || pgid_changed || (!mode.is_interactive() && prev_mode == mode) {
                 if let Ok(mut st) = monitor_state.lock() {
                     if mode_changed {
+                        dlog!(
+                            st.debug_log,
+                            "monitor  termios  {:?} → {:?}",
+                            prev_mode,
+                            mode
+                        );
                         prev_mode = mode;
                         apply_pty_raw_mode_change(&mut st, mode);
                     }
                     if pgid_changed {
+                        dlog!(
+                            st.debug_log,
+                            "monitor  pgid  {:?} → {:?}",
+                            prev_fg_pgid,
+                            fg_pgid
+                        );
                         prev_fg_pgid = fg_pgid;
                         apply_foreground_pgid_change(&mut st, fg_pgid);
                     }
                     // Commit pending capture when mode is non-interactive.
                     if !mode.is_interactive() && st.capture_pending.is_some() {
+                        let pending_bytes =
+                            st.capture_pending.as_ref().map(|v| v.len()).unwrap_or(0);
+                        dlog!(
+                            st.debug_log,
+                            "monitor  commit_pending  bytes={}",
+                            pending_bytes
+                        );
                         commit_pending_capture(&mut st);
                     }
                 }
@@ -557,6 +597,9 @@ pub fn run_shell(config: &Config) -> Result<()> {
 
     let status = child.wait().context("failed to wait for shell process")?;
     running.store(false, Ordering::SeqCst);
+    if let Ok(mut st) = state.lock() {
+        dlog!(st.debug_log, "session end  exit={}", status.exit_code());
+    }
 
     drop(master);
 
@@ -1391,20 +1434,55 @@ fn advance_tui_state(
 fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug_blocks: bool) {
     match event {
         ShellHookEvent::ZleReady => {
+            dlog!(state.debug_log, "hook zle_ready  tui={:?}", state.tui_state);
             let prev = std::mem::take(&mut state.tui_state);
+            let prev_label = format!("{:?}", prev);
             let (next, tui_finalize_block) = advance_tui_state(prev, TuiLifecycleEvent::ZleReady);
+            dlog!(
+                state.debug_log,
+                "tui  ZleReady:  {} → {:?}  finalize={:?}",
+                prev_label,
+                next,
+                tui_finalize_block
+            );
             state.tui_state = next;
             if let Some(block_id) = tui_finalize_block {
                 finalize_exited_tui_on_precmd(state, block_id);
             }
         }
-        ShellHookEvent::AltScreenEnter => on_alt_screen_enter(state),
-        ShellHookEvent::AltScreenExit => on_alt_screen_exit(state),
+        ShellHookEvent::AltScreenEnter => {
+            dlog!(
+                state.debug_log,
+                "hook alt_screen_enter  tui={:?}",
+                state.tui_state
+            );
+            on_alt_screen_enter(state);
+            dlog!(
+                state.debug_log,
+                "tui  after alt_screen_enter → {:?}",
+                state.tui_state
+            );
+        }
+        ShellHookEvent::AltScreenExit => {
+            dlog!(
+                state.debug_log,
+                "hook alt_screen_exit  tui={:?}",
+                state.tui_state
+            );
+            on_alt_screen_exit(state);
+            dlog!(
+                state.debug_log,
+                "tui  after alt_screen_exit → {:?}",
+                state.tui_state
+            );
+        }
         ShellHookEvent::CwdChanged { cwd } => {
+            dlog!(state.debug_log, "hook cwd_changed  cwd={}", cwd);
             state.blocks.set_cwd(cwd.clone());
             let _ = std::env::set_current_dir(cwd);
         }
         ShellHookEvent::Preexec { command } => {
+            dlog!(state.debug_log, "hook preexec  command={:?}", command);
             state.shell_command_running = true;
             let start_line = state.shell.line_count();
             let block_id =
@@ -1429,7 +1507,16 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             };
 
             let prev = std::mem::take(&mut state.tui_state);
+            let prev_label = format!("{:?}", prev);
             let (next, _) = advance_tui_state(prev, lifecycle_event);
+            dlog!(
+                state.debug_log,
+                "tui  Preexec block={:?}:  {} → {:?}  capture_suspended={}",
+                block_id,
+                prev_label,
+                next,
+                next.is_capture_suspended()
+            );
             state.tui_state = next;
 
             // Handle immediate suspension for AlwaysSuspend class.
@@ -1444,6 +1531,11 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             // Known TUI/Agent states already suspend capture, so no pending needed.
             if matches!(state.tui_state, TuiRuntimeState::Idle) {
                 state.capture_pending = Some(Vec::new());
+                dlog!(
+                    state.debug_log,
+                    "capture_pending started  block={:?}",
+                    block_id
+                );
             }
 
             detect_and_register_agents(state, block_id, &command);
@@ -1452,6 +1544,13 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
             sync_block_viewport_after_history_change(state);
         }
         ShellHookEvent::Precmd { exit_code, cwd } => {
+            dlog!(
+                state.debug_log,
+                "hook precmd  exit={:?}  cwd={:?}  tui={:?}",
+                exit_code,
+                cwd.as_deref().unwrap_or(""),
+                state.tui_state
+            );
             state.shell_command_running = false;
             let finished_cwd = cwd;
             if let Some(ref cwd) = finished_cwd {
@@ -1463,14 +1562,44 @@ fn apply_shell_hook_event(state: &mut RuntimeState, event: ShellHookEvent, debug
 
             // TUI session finalization — decide Return Panel or direct Plain.
             let prev = std::mem::take(&mut state.tui_state);
+            let prev_label = format!("{:?}", prev);
             let (next, tui_finalize_block) = advance_tui_state(prev, TuiLifecycleEvent::Precmd);
+            dlog!(
+                state.debug_log,
+                "tui  Precmd:  {} → {:?}  finalize={:?}",
+                prev_label,
+                next,
+                tui_finalize_block
+            );
             state.tui_state = next;
 
             let active_id = state.blocks.active_block_id();
             // Flush any pending capture before finalizing the block.
+            let pending_bytes = state.capture_pending.as_ref().map(|v| v.len()).unwrap_or(0);
             commit_pending_capture(state);
+            if pending_bytes > 0 {
+                dlog!(
+                    state.debug_log,
+                    "capture_pending committed  bytes={}",
+                    pending_bytes
+                );
+            }
             let end_line = state.shell.line_count().saturating_sub(1);
             state.blocks.finish_command(exit_code, end_line);
+            if let Some(id) = active_id {
+                if let Some(block) = state.blocks.block(id) {
+                    dlog!(
+                        state.debug_log,
+                        "block #{} finished  status={:?}  exit={:?}  kind={:?}  bytes={}  duration={}ms",
+                        id.0,
+                        block.status,
+                        block.exit_code,
+                        block.kind,
+                        block.output_raw.len(),
+                        block.duration_ms.unwrap_or(0)
+                    );
+                }
+            }
             sync_block_viewport_after_history_change(state);
 
             if let Some(block_id) = tui_finalize_block {
@@ -1849,6 +1978,7 @@ fn flush_render_state(state: &mut RuntimeState) -> bool {
 }
 
 fn enter_block_view(state: &mut RuntimeState) {
+    dlog!(state.debug_log, "view  Plain → Blocks");
     sync_shared_agent_blocks(state);
     move_running_agents_to_bottom(state);
     state.view.view = ViewKind::Blocks;
@@ -2176,6 +2306,7 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                 state.render_state.dirty = true;
                 state.render_state.force_render = true;
             } else {
+                dlog!(state.debug_log, "view  Blocks → Plain  (quit)");
                 state.view = ViewState::default();
                 state.input_accumulator.pending_block_delta = 0;
                 state.render_state.needs_cleanup = true;
@@ -2367,6 +2498,11 @@ fn execute_block_view_action(action: BlockViewAction, state: &mut RuntimeState) 
                 }
 
                 exit_visual_mode(state);
+                dlog!(
+                    state.debug_log,
+                    "view  Blocks → Detail  block={}",
+                    selected.0
+                );
                 state.view.view = ViewKind::Detail;
                 state.view.expanded_block = Some(selected);
                 state.view.block_viewport.line_offset = 0;
@@ -2639,6 +2775,7 @@ fn execute_detail_view_action(action: DetailViewAction, state: &mut RuntimeState
             state.render_state.force_render = true;
         }
         DetailViewAction::Quit => {
+            dlog!(state.debug_log, "view  Detail → Blocks  (quit)");
             state.view.view = ViewKind::Blocks;
             state.view.expanded_block = None;
             state.view.detail_line_cursor = 0;
@@ -3162,6 +3299,13 @@ fn apply_pty_raw_mode_change(state: &mut RuntimeState, mode: crate::app::Termios
         return; // Already tracked by the existing TUI state machine.
     }
     if let Some(block_id) = state.blocks.active_block_id() {
+        dlog!(
+            state.debug_log,
+            "monitor  interactive  block={}  mode={:?}  discarding_pending={}",
+            block_id.0,
+            mode,
+            state.capture_pending.is_some()
+        );
         state.capture_pending = None; // discard startup bytes before raw mode
         if let Some(block) = state.blocks.block_mut(block_id) {
             block.kind = BlockKind::Interactive;
@@ -3222,6 +3366,7 @@ mod tests {
             shell_pgid: None,
             foreground_job_pgid: None,
             agent_event_mtimes: HashMap::new(),
+            debug_log: None,
         }
     }
 
