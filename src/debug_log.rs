@@ -72,6 +72,9 @@ impl DebugLog {
         // In development `cargo run` sets the cwd to the workspace root.
         let dir = std::env::current_dir().ok()?.join("debug");
         std::fs::create_dir_all(&dir).ok()?;
+
+        Self::cleanup_old_logs(&dir);
+
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -87,6 +90,41 @@ impl DebugLog {
             start: Instant::now(),
             path,
         })
+    }
+
+    fn cleanup_old_logs(dir: &std::path::Path) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        let mut logs = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                    if name.starts_with("tide-") && name.ends_with(".log") {
+                        if let Ok(metadata) = entry.metadata() {
+                            if let Ok(mtime) = metadata.modified() {
+                                logs.push((path, mtime));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if logs.len() < 10 {
+            return;
+        }
+
+        // Sort by modification time, oldest first
+        logs.sort_by_key(|&(_, mtime)| mtime);
+
+        let to_delete = logs.len().saturating_sub(9);
+        for (path, _) in logs.iter().take(to_delete) {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     pub fn log(&mut self, msg: &str) {
@@ -193,6 +231,31 @@ macro_rules! ttrace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_log_cleanup() {
+        let temp_dir = std::env::temp_dir().join("tide_test_logs");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create 12 dummy log files
+        for i in 0..12 {
+            let path = temp_dir.join(format!("tide-test-{}.log", i));
+            std::fs::write(&path, "test").unwrap();
+            // Sleep briefly to ensure different modification times
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        // Call the cleanup method
+        DebugLog::cleanup_old_logs(&temp_dir);
+
+        // Verify that exactly 9 files remain (since it's intended to leave room for the 10th)
+        let remaining = std::fs::read_dir(&temp_dir).unwrap().count();
+        assert_eq!(remaining, 9, "Should have 9 logs remaining");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 
     #[test]
     fn test_escape_bytes() {
